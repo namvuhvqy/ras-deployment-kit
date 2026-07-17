@@ -7,6 +7,7 @@ RAS package = customer VPS/cloud + RAS1 Hermes Main + RAS2 OpenClaw + Zernio OAu
 Do not copy runtime folders such as `.hermes` or `.hermes-cskh` wholesale into a public repo because they may contain secrets, logs, backups, credentials, and state.
 
 Docs:
+- `docs/ARCHITECTURE_DECISION_LOCKED.md` — final MVP architecture decision to follow
 - `docs/RAS_DEPLOYMENT_ARCHITECTURE.md`
 - `docs/IMPLEMENTATION_PLAN.md`
 - `pricing/RAS_PRICING_MODEL.md`
