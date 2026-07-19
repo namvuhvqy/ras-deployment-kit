@@ -1,0 +1,21 @@
+services:
+  ras-api:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm ci && npm run build && node dist/apps/ras-api/src/server.js"
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      RAS_DRY_RUN: "true"
+    volumes:
+      - ../..:/app
+
+  ras-worker:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm ci && npm run build && node dist/apps/ras-worker/src/worker.js"
+    environment:
+      RAS_DRY_RUN: "true"
+    volumes:
+      - ../..:/app

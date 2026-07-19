@@ -19,6 +19,8 @@ backups/
 data/runtime/
 data/secrets/
 node_modules/
+dist/
+coverage/
 __pycache__/
 .pytest_cache/
 .DS_Store

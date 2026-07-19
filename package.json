@@ -1,0 +1,22 @@
+{
+  "name": "ras-deployment-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RunAgentSys RAS deployment kit: API, worker, queue, and Zernio adapter skeleton.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test dist/tests/*.test.js",
+    "check": "npm run build && npm test",
+    "dev:api": "tsx apps/ras-api/src/server.ts",
+    "dev:worker": "tsx apps/ras-worker/src/worker.ts",
+    "schema:sql": "tsx scripts/print-schema.ts"
+  },
+  "dependencies": {
+    "@types/node": "^20.17.19",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}
