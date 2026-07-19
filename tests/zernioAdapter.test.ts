@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPostPayload, createZernioAdapterFromEnv, DryRunZernioAdapter, LiveZernioAdapter, ZernioApiError } from '../packages/zernio-adapter/src/index.js';
+import { createPostPayload, createProfilePayload, createZernioAdapterFromEnv, DryRunZernioAdapter, LiveZernioAdapter, ZernioApiError } from '../packages/zernio-adapter/src/index.js';
 
 test('createZernioAdapterFromEnv defaults to dry-run', () => {
   const adapter = createZernioAdapterFromEnv({});
@@ -31,6 +31,10 @@ test('LiveZernioAdapter createProfile sends only documented Zernio fields', asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('createProfilePayload does not include undocumented mapping fields', () => {
+  assert.deepEqual(Object.keys(createProfilePayload({ customerId: 'cust_1', name: 'Shop A', email: 'owner@example.test' })).sort(), ['description', 'name']);
 });
 
 test('LiveZernioAdapter createPost sends Zernio payload and maps response', async () => {
@@ -75,7 +79,7 @@ test('createPostPayload follows documented Zernio /posts shape', () => {
       platform: 'youtube',
       content: 'Video description here',
       mediaUrls: ['https://cdn.example/video.mp4', 'https://cdn.example/cover.png'],
-      platformSpecificData: { title: 'My Video Title', visibility: 'public', playlistId: 'PLxxx' },
+      platformSpecificData: { title: 'My Video Title', visibility: 'public', madeForKids: false },
     }),
     {
       content: 'Video description here',
@@ -83,7 +87,7 @@ test('createPostPayload follows documented Zernio /posts shape', () => {
         {
           platform: 'youtube',
           accountId: 'account_1',
-          platformSpecificData: { title: 'My Video Title', visibility: 'public', playlistId: 'PLxxx' },
+          platformSpecificData: { title: 'My Video Title', visibility: 'public', madeForKids: false },
         },
       ],
       publishNow: true,
@@ -97,13 +101,24 @@ test('createPostPayload follows documented Zernio /posts shape', () => {
 
 test('LiveZernioAdapter surfaces API errors', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'bad' }), { status: 429 });
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: 'bad' }), {
+    status: 429,
+    headers: {
+      'Retry-After': '30',
+      'X-RateLimit-Limit': '100',
+      'X-RateLimit-Remaining': '0',
+      'X-RateLimit-Reset': '1780000000',
+    },
+  });
 
   try {
     const adapter = new LiveZernioAdapter({ apiKey: 'test-key', baseUrl: 'https://example.test/api/v1' });
     await assert.rejects(
       () => adapter.getConnectUrl({ profileId: 'profile_1', platform: 'facebook', redirectUrl: 'https://ras.test/callback' }),
-      (error) => error instanceof ZernioApiError && error.status === 429,
+      (error) => error instanceof ZernioApiError
+        && error.status === 429
+        && error.headers['retry-after'] === '30'
+        && error.headers['x-ratelimit-reset'] === '1780000000',
     );
   } finally {
     globalThis.fetch = originalFetch;

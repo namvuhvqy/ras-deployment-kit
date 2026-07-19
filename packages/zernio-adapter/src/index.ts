@@ -24,16 +24,22 @@ export interface CreatePostInput {
 
 type MediaType = 'image' | 'video';
 
+export interface PlatformTargetPayload {
+  platform: Platform;
+  accountId: string;
+  customContent?: string;
+  customMedia?: Array<{ type: MediaType; url: string }>;
+  scheduledFor?: string;
+  platformSpecificData?: Record<string, unknown>;
+}
+
 export interface ZernioPostPayload {
   content: string;
-  platforms: Array<{
-    platform: Platform;
-    accountId: string;
-    platformSpecificData?: Record<string, unknown>;
-  }>;
+  platforms: PlatformTargetPayload[];
   publishNow?: boolean;
   scheduledFor?: string;
   mediaItems?: Array<{ type: MediaType; url: string }>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface CreatePostResult {
@@ -102,6 +108,7 @@ export class ZernioApiError extends Error {
     message: string,
     readonly status: number,
     readonly body: unknown,
+    readonly headers: Record<string, string> = {},
   ) {
     super(message);
     this.name = 'ZernioApiError';
@@ -121,10 +128,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
   async createProfile(input: CreateProfileInput): Promise<RasCustomer> {
     const profile = await this.request<Record<string, unknown>>('/profiles', {
       method: 'POST',
-      body: {
-        name: input.name,
-        ...(input.email ? { description: `RAS customer ${input.customerId} <${input.email}>` } : { description: `RAS customer ${input.customerId}` }),
-      },
+      body: createProfilePayload(input),
     });
 
     return {
@@ -179,7 +183,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
     };
   }
 
-  private async request<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+  private async request<T>(path: string, init: { method?: string; body?: unknown; requestId?: string } = {}): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -189,6 +193,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
           authorization: `Bearer ${this.options.apiKey}`,
           'content-type': 'application/json',
           accept: 'application/json',
+          ...(init.requestId ? { 'x-request-id': init.requestId } : {}),
         },
         body: init.body === undefined ? undefined : JSON.stringify(init.body),
         signal: controller.signal,
@@ -196,7 +201,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
       const text = await response.text();
       const body = text ? safeJson(text) : null;
       if (!response.ok) {
-        throw new ZernioApiError(`Zernio API ${response.status} for ${path}`, response.status, body);
+        throw new ZernioApiError(`Zernio API ${response.status} for ${path}`, response.status, body, rateLimitHeaders(response.headers));
       }
       return body as T;
     } finally {
@@ -215,6 +220,14 @@ export function createZernioAdapterFromEnv(env: NodeJS.ProcessEnv = process.env)
     });
   }
   return new DryRunZernioAdapter();
+}
+
+function rateLimitHeaders(headers: Headers): Record<string, string> {
+  const keys = ['retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset'];
+  return Object.fromEntries(keys.flatMap((key) => {
+    const value = headers.get(key);
+    return value === null ? [] : [[key, value]];
+  }));
 }
 
 function safeJson(text: string): unknown {
@@ -254,6 +267,13 @@ function arrayFrom(value: unknown, keys?: string[]): unknown[] {
 function normalizeAccountStatus(status?: string): ConnectedAccount['status'] {
   if (status === 'expired' || status === 'revoked' || status === 'error') return status;
   return 'connected';
+}
+
+export function createProfilePayload(input: CreateProfileInput): { name: string; description: string; color?: string; isDefault?: boolean } {
+  return {
+    name: input.name,
+    ...(input.email ? { description: `RAS customer ${input.customerId} <${input.email}>` } : { description: `RAS customer ${input.customerId}` }),
+  };
 }
 
 export function createPostPayload(input: CreatePostInput): ZernioPostPayload {
