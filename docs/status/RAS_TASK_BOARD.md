@@ -4,13 +4,13 @@
 
 | Topic | Purpose |
 |---|---|
-| RAS PMO / Decisions | Điều phối tổng, scope, roadmap, priorities, decisions |
-| RAS Core / Backend | API, DB, queue, persistent worker, core domain |
-| RAS Zernio Integration | Zernio profile/account/post/webhook, tenant/profile/account mapping |
-| RAS Landing / Vercel / Frontend | Vercel app, login, dashboard, control panel, connection-state UI |
-| RAS Marketing / Content | Website copy, content, campaigns, positioning, social marketing ops |
-| RAS Sales / Customer Onboarding | Leads, packages, customer onboarding, CRM/CSKH handoff |
-| RAS Ops / Logs / Support | VPS, deploy, smoke tests, logs, support operations |
+| PMO27 - RAS Roadmap | Điều phối tổng, scope, roadmap, priorities, decisions |
+| Backend28 - RAS API/Worker | API, DB, queue, persistent worker, core domain |
+| Zernio29 - Social Adapter | Zernio profile/account/post/webhook, tenant/profile/account mapping |
+| Frontend30 - RAS Dashboard | Vercel app, login, dashboard, control panel, connection-state UI |
+| Marketing31 - RAS Growth/Content | Website copy, content, campaigns, positioning, social marketing ops |
+| Sales32 - RAS Onboarding | Leads, packages, customer onboarding, CRM/CSKH handoff |
+| Ops33 - Deploy/Smoke | VPS, deploy, smoke tests, summarized logs, support operations |
 
 ## Now
 
