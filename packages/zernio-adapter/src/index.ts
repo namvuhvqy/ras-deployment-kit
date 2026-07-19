@@ -178,10 +178,11 @@ export class LiveZernioAdapter implements ZernioAdapter {
       method: 'POST',
       body: createPostPayload(input),
     });
+    const post = unwrapRecord(response, ['post', 'data']);
 
     return {
-      zernioPostId: stringFrom(response, ['_id', 'id', 'postId']),
-      status: normalizePostStatus(optionalStringFrom(response, ['status']), Boolean(input.scheduleAtIso)),
+      zernioPostId: stringFrom(post, ['_id', 'id', 'postId']),
+      status: normalizePostStatus(optionalStringFrom(post, ['status']), Boolean(input.scheduleAtIso)),
     };
   }
 
@@ -264,6 +265,14 @@ function optionalStringFrom(record: Record<string, unknown>, keys: string[]): st
 function arrayFrom(value: unknown, keys?: string[]): unknown[] {
   const source = keys ? keys.map((key) => asRecord(value)[key]).find(Array.isArray) : value;
   return Array.isArray(source) ? source : [];
+}
+
+function unwrapRecord(value: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  for (const key of keys) {
+    const nested = asRecord(value[key]);
+    if (Object.keys(nested).length > 0) return nested;
+  }
+  return value;
 }
 
 function normalizeAccountStatus(status?: string): ConnectedAccount['status'] {
