@@ -7,9 +7,9 @@
 - [x] Create clean deployment repo skeleton.
 - [x] Add dry-run Zernio adapter contract.
 - [x] Add fair per-profile queue skeleton.
-- [ ] Add persistent DB schema/migrations.
+- [x] Add persistent DB schema/migrations.
 - [ ] Add live Zernio API client behind adapter.
-- [ ] Add VPS deploy key / non-interactive SSH.
+- [x] Add VPS deploy key / non-interactive SSH.
 - [ ] Link/check Vercel landing project after access granted.
 
 ## MVP Sprint 1
