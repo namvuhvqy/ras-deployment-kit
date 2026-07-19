@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 
@@ -7,6 +7,19 @@ const store = createStoreFromEnv();
 const port = Number(process.env.PORT ?? 8080);
 
 const ready = store.migrate();
+
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  if (!chunks.length) return {};
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+}
+
+function bearerToken(req: IncomingMessage): string | undefined {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return undefined;
+  return header.slice('Bearer '.length);
+}
 
 const server = createServer(async (req, res) => {
   await ready;
@@ -30,6 +43,29 @@ const server = createServer(async (req, res) => {
         },
       }),
     );
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/auth/login') {
+    const body = await readJsonBody(req);
+    const session = await store.login({ email: String(body.email ?? ''), password: String(body.password ?? '') });
+    if (!session) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_credentials' }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, token: session.token, expiresAtIso: session.expiresAtIso }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/dashboard') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, dashboard }));
     return;
   }
 

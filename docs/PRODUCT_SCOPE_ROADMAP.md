@@ -63,13 +63,25 @@ Current confirmed OpenAPI constraints:
 6. **Integrate Zernio as tenant/profile/account add-on mapping**.
 7. **Hardening**: webhooks, persistent queue/worker, billing, audit logs, staging smoke tests.
 
-## 5. Topic naming
+## 5. Topic routing
 
-Use these topics instead of `ras landing`:
+Use the existing Telegram topic IDs as execution lanes:
 
-- **RAS Sandbox — Product Scope & Roadmap**
-- **RAS Sandbox — Agent Env & Control Panel**
-- **RAS Sandbox — Zernio Add-on / White-label Social**
+| Topic | Purpose |
+|---|---|
+| **RAS PMO / Decisions** | Overall coordination, scope, roadmap, priorities, decisions |
+| **RAS Core / Backend** | API, DB, queue, persistent worker, core domain |
+| **RAS Zernio Integration** | Zernio profile/account/post/webhook, tenant/profile/account mapping |
+| **RAS Landing / Vercel / Frontend** | Vercel app, login, dashboard, control panel, connection state UI |
+| **RAS Marketing / Content** | Website copy, content, campaigns, positioning, social marketing ops |
+| **RAS Sales / Customer Onboarding** | Leads, packages, customer onboarding, CRM/CSKH handoff |
+| **RAS Ops / Logs / Support** | VPS, deploy, smoke tests, logs, support operations |
+
+Short topic labels can still be used in docs when helpful:
+
+- **RAS Sandbox — Product Scope & Roadmap** → PMO27
+- **RAS Sandbox — Agent Env & Control Panel** → Backend28 / Frontend30 / Ops33 depending on task
+- **RAS Sandbox — Zernio Add-on / White-label Social** → Zernio29
 
 ## 6. Implementation guardrails
 

@@ -2,9 +2,15 @@
 
 ## Topic lanes
 
-- RAS Sandbox — Product Scope & Roadmap
-- RAS Sandbox — Agent Env & Control Panel
-- RAS Sandbox — Zernio Add-on / White-label Social
+| Topic | Purpose |
+|---|---|
+| RAS PMO / Decisions | Điều phối tổng, scope, roadmap, priorities, decisions |
+| RAS Core / Backend | API, DB, queue, persistent worker, core domain |
+| RAS Zernio Integration | Zernio profile/account/post/webhook, tenant/profile/account mapping |
+| RAS Landing / Vercel / Frontend | Vercel app, login, dashboard, control panel, connection-state UI |
+| RAS Marketing / Content | Website copy, content, campaigns, positioning, social marketing ops |
+| RAS Sales / Customer Onboarding | Leads, packages, customer onboarding, CRM/CSKH handoff |
+| RAS Ops / Logs / Support | VPS, deploy, smoke tests, logs, support operations |
 
 ## Now
 
@@ -18,7 +24,7 @@
 - [x] Add live Zernio API client behind adapter.
 - [x] Add VPS deploy key / non-interactive SSH.
 - [x] Fix fake Connected bug: connection state must come from real connected account mapping + verification, never from click/demo state.
-- [ ] Add minimum login + dashboard/control panel.
+- [x] Add minimum login + dashboard/control panel: JSON store users/sessions, `/auth/login`, protected `/dashboard`, tenant control panel payload, tests pass.
 - [ ] Link/check Vercel app project after access granted.
 
 ## MVP Sprint 1

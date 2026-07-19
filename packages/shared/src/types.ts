@@ -6,6 +6,28 @@ export type AgentKind = 'ras1-hermes' | 'ras2-openclaw';
 export type AgentStatus = 'unknown' | 'starting' | 'running' | 'degraded' | 'stopped' | 'failed';
 export type ServicePackageStatus = 'draft' | 'active' | 'deprecated';
 export type BillingStatus = 'trial' | 'active' | 'past_due' | 'cancelled';
+export type RasUserRole = 'owner' | 'admin' | 'operator' | 'viewer';
+export type RasUserStatus = 'active' | 'disabled';
+
+export interface RasUser {
+  id: string;
+  email: string;
+  displayName?: string;
+  role: RasUserRole;
+  customerId: string;
+  status: RasUserStatus;
+  password?: string;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface RasSession {
+  id: string;
+  token: string;
+  userId: string;
+  expiresAtIso: string;
+  createdAtIso: string;
+}
 
 export interface RasCustomer {
   id: string;

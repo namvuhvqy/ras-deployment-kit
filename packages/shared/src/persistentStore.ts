@@ -8,11 +8,15 @@ import type {
   RasJob,
   RasSandboxEnvironment,
   RasServicePackage,
+  RasSession,
+  RasUser,
 } from './types.js';
 
 export interface RasPersistentState {
   schemaVersion: number;
   migratedAtIso: string;
+  users: RasUser[];
+  sessions: RasSession[];
   customers: RasCustomer[];
   sandboxes: RasSandboxEnvironment[];
   agents: RasAgentInstance[];
@@ -51,6 +55,15 @@ export interface MigrationResult {
   sql: string;
 }
 
+export interface RasDashboard {
+  user: Omit<RasUser, 'password'>;
+  customer: RasCustomer;
+  sandboxes: RasSandboxEnvironment[];
+  agents: RasAgentInstance[];
+  servicePackages: RasServicePackage[];
+  connectedAccounts: ConnectedAccount[];
+}
+
 export class JsonRasStore {
   constructor(private readonly path: string) {}
 
@@ -60,6 +73,8 @@ export class JsonRasStore {
     const state: RasPersistentState = existing ?? {
       schemaVersion: RAS_SCHEMA_VERSION,
       migratedAtIso: now,
+      users: [],
+      sessions: [],
       customers: [],
       sandboxes: [],
       agents: [],
@@ -73,6 +88,8 @@ export class JsonRasStore {
     const previousVersion = state.schemaVersion ?? 0;
     state.schemaVersion = RAS_SCHEMA_VERSION;
     state.migratedAtIso = now;
+    state.users ??= [];
+    state.sessions ??= [];
     state.customers ??= [];
     state.sandboxes ??= [];
     state.agents ??= [];
@@ -93,6 +110,62 @@ export class JsonRasStore {
 
   async load(): Promise<RasPersistentState> {
     return (await this.readIfExists()) ?? (await this.createEmpty());
+  }
+
+  async upsertUser(user: RasUser): Promise<RasUser> {
+    const state = await this.load();
+    const normalized = { ...user, email: user.email.toLowerCase() };
+    const index = state.users.findIndex((row) => row.id === user.id || row.email.toLowerCase() === normalized.email);
+    if (index >= 0) state.users[index] = normalized;
+    else state.users.push(normalized);
+    await this.write(state);
+    return normalized;
+  }
+
+  async createSession(input: { userId: string; ttlMs?: number; nowIso?: string }): Promise<RasSession> {
+    const now = input.nowIso ?? new Date().toISOString();
+    const ttlMs = input.ttlMs ?? 24 * 60 * 60 * 1000;
+    const entropy = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+    const session: RasSession = {
+      id: `session_${entropy}`,
+      token: `sess_${entropy}`,
+      userId: input.userId,
+      createdAtIso: now,
+      expiresAtIso: new Date(Date.parse(now) + ttlMs).toISOString(),
+    };
+    const state = await this.load();
+    state.sessions.push(session);
+    await this.write(state);
+    return session;
+  }
+
+  async login(input: { email: string; password: string; nowIso?: string }): Promise<RasSession | undefined> {
+    const state = await this.load();
+    const email = input.email.toLowerCase();
+    const user = state.users.find(
+      (row) => row.email.toLowerCase() === email && row.status === 'active' && row.password === input.password,
+    );
+    if (!user) return undefined;
+    return this.createSession({ userId: user.id, nowIso: input.nowIso });
+  }
+
+  async getDashboardForSession(token: string, nowIso: string = new Date().toISOString()): Promise<RasDashboard | undefined> {
+    const state = await this.load();
+    const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
+    if (!session) return undefined;
+    const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
+    if (!user) return undefined;
+    const customer = state.customers.find((row) => row.id === user.customerId);
+    if (!customer) return undefined;
+    const { password: _password, ...safeUser } = user;
+    return {
+      user: safeUser,
+      customer,
+      sandboxes: state.sandboxes.filter((row) => row.customerId === customer.id),
+      agents: state.agents.filter((row) => row.customerId === customer.id),
+      servicePackages: state.servicePackages.filter((row) => row.id === customer.servicePackageId),
+      connectedAccounts: state.connectedAccounts.filter((row) => row.customerId === customer.id),
+    };
   }
 
   async upsertCustomer(customer: RasCustomer): Promise<RasCustomer> {
