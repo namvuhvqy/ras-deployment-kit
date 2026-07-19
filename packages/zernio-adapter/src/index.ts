@@ -276,7 +276,9 @@ function unwrapRecord(value: Record<string, unknown>, keys: string[]): Record<st
 }
 
 function normalizeAccountStatus(status?: string): ConnectedAccount['status'] {
-  if (status === 'expired' || status === 'revoked' || status === 'error') return status;
+  if (status === 'error') return 'error';
+  if (status === 'expired' || status === 'revoked' || status === 'disconnected') return 'disconnected';
+  if (status === 'pending') return 'pending';
   return 'connected';
 }
 

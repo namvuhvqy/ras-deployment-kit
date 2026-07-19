@@ -14,7 +14,29 @@ const server = createServer(async (req, res) => {
 
   if (req.url === '/health') {
     const state = await store.load();
-    res.end(JSON.stringify({ ok: true, service: 'ras-api', schemaVersion: state.schemaVersion }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        service: 'ras-api',
+        product: 'RAS Sandbox Agent Environment',
+        schemaVersion: state.schemaVersion,
+        counts: {
+          customers: state.customers.length,
+          sandboxes: state.sandboxes.length,
+          agents: state.agents.length,
+          servicePackages: state.servicePackages.length,
+          connectedAccounts: state.connectedAccounts.length,
+          jobs: state.jobs.length,
+        },
+      }),
+    );
+    return;
+  }
+
+  if (req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
+    const [, , customerId] = req.url.split('/');
+    const summary = await store.getConnectionSummary(decodeURIComponent(customerId));
+    res.end(JSON.stringify(summary));
     return;
   }
 

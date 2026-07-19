@@ -31,5 +31,6 @@ export class FairProfileQueue {
 }
 
 function priorityRank(priority: RasJob['priority']): number {
-  return { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 }[priority];
+  if (typeof priority === 'number') return priority;
+  return { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 }[priority] ?? 99;
 }
