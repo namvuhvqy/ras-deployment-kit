@@ -11,8 +11,11 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8080
+      RAS_DB_PATH: /data/ras-store.json
       ZERNIO_MODE: ${ZERNIO_MODE:-dry-run}
       ZERNIO_BASE_URL: ${ZERNIO_BASE_URL:-https://zernio.com/api/v1}
+    volumes:
+      - ras-data:/data
     ports:
       - "${RAS_API_PORT:-8080}:8080"
     healthcheck:
@@ -21,3 +24,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+volumes:
+  ras-data:
