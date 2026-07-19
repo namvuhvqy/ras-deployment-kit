@@ -1,12 +1,22 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
-import type { ConnectedAccount, RasCustomer, RasJob } from './types.js';
+import type {
+  ConnectedAccount,
+  RasAgentInstance,
+  RasCustomer,
+  RasJob,
+  RasSandboxEnvironment,
+  RasServicePackage,
+} from './types.js';
 
 export interface RasPersistentState {
   schemaVersion: number;
   migratedAtIso: string;
   customers: RasCustomer[];
+  sandboxes: RasSandboxEnvironment[];
+  agents: RasAgentInstance[];
+  servicePackages: RasServicePackage[];
   connectedAccounts: ConnectedAccount[];
   jobs: RasJob[];
   webhookEvents: StoredWebhookEvent[];
@@ -51,6 +61,9 @@ export class JsonRasStore {
       schemaVersion: RAS_SCHEMA_VERSION,
       migratedAtIso: now,
       customers: [],
+      sandboxes: [],
+      agents: [],
+      servicePackages: [],
       connectedAccounts: [],
       jobs: [],
       webhookEvents: [],
@@ -60,6 +73,14 @@ export class JsonRasStore {
     const previousVersion = state.schemaVersion ?? 0;
     state.schemaVersion = RAS_SCHEMA_VERSION;
     state.migratedAtIso = now;
+    state.customers ??= [];
+    state.sandboxes ??= [];
+    state.agents ??= [];
+    state.servicePackages ??= [];
+    state.connectedAccounts ??= [];
+    state.jobs ??= [];
+    state.webhookEvents ??= [];
+    state.auditLogs ??= [];
     await this.write(state);
 
     return {
@@ -83,6 +104,33 @@ export class JsonRasStore {
     return customer;
   }
 
+  async upsertSandbox(sandbox: RasSandboxEnvironment): Promise<RasSandboxEnvironment> {
+    const state = await this.load();
+    const index = state.sandboxes.findIndex((row) => row.id === sandbox.id);
+    if (index >= 0) state.sandboxes[index] = sandbox;
+    else state.sandboxes.push(sandbox);
+    await this.write(state);
+    return sandbox;
+  }
+
+  async upsertAgent(agent: RasAgentInstance): Promise<RasAgentInstance> {
+    const state = await this.load();
+    const index = state.agents.findIndex((row) => row.id === agent.id);
+    if (index >= 0) state.agents[index] = agent;
+    else state.agents.push(agent);
+    await this.write(state);
+    return agent;
+  }
+
+  async upsertServicePackage(servicePackage: RasServicePackage): Promise<RasServicePackage> {
+    const state = await this.load();
+    const index = state.servicePackages.findIndex((row) => row.id === servicePackage.id);
+    if (index >= 0) state.servicePackages[index] = servicePackage;
+    else state.servicePackages.push(servicePackage);
+    await this.write(state);
+    return servicePackage;
+  }
+
   async upsertConnectedAccount(account: ConnectedAccount): Promise<ConnectedAccount> {
     const state = await this.load();
     const index = state.connectedAccounts.findIndex(
@@ -92,6 +140,39 @@ export class JsonRasStore {
     else state.connectedAccounts.push(account);
     await this.write(state);
     return account;
+  }
+
+  async getConnectedAccount(accountId: string): Promise<ConnectedAccount | undefined> {
+    const state = await this.load();
+    return state.connectedAccounts.find((account) => account.id === accountId);
+  }
+
+  async getConnectedAccountsForCustomer(customerId: string): Promise<ConnectedAccount[]> {
+    const state = await this.load();
+    return state.connectedAccounts.filter((account) => account.customerId === customerId);
+  }
+
+  async getConnectionSummary(customerId: string): Promise<{ connected: boolean; accounts: ConnectedAccount[] }> {
+    const accounts = await this.getConnectedAccountsForCustomer(customerId);
+    return {
+      connected: accounts.some(
+        (account) =>
+          account.status === 'connected' && Boolean(account.connectedAtIso) && Boolean(account.lastVerifiedAtIso),
+      ),
+      accounts,
+    };
+  }
+
+  async setConnectedAccountVerification(
+    update: Pick<ConnectedAccount, 'id' | 'status' | 'connectedAtIso' | 'lastVerifiedAtIso'>,
+  ): Promise<ConnectedAccount> {
+    const state = await this.load();
+    const index = state.connectedAccounts.findIndex((account) => account.id === update.id);
+    if (index < 0) throw new Error(`Connected account not found: ${update.id}`);
+    const updated = { ...state.connectedAccounts[index], ...update };
+    state.connectedAccounts[index] = updated;
+    await this.write(state);
+    return updated;
   }
 
   async enqueueJob(job: RasJob): Promise<RasJob> {
