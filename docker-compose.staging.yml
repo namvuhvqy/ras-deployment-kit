@@ -25,5 +25,27 @@ services:
       retries: 3
       start_period: 20s
 
+  ras-worker:
+    image: ras-deployment-kit:staging
+    container_name: ras-worker-staging
+    restart: unless-stopped
+    command: ["node", "dist/apps/ras-worker/src/worker.js"]
+    env_file:
+      - .env.staging
+    environment:
+      NODE_ENV: production
+      RAS_DB_PATH: /data/ras-store.json
+      ZERNIO_MODE: ${ZERNIO_MODE:-dry-run}
+      ZERNIO_BASE_URL: ${ZERNIO_BASE_URL:-https://zernio.com/api/v1}
+      RAS_WORKER_BATCH_SIZE: ${RAS_WORKER_BATCH_SIZE:-20}
+      RAS_WORKER_IDLE_MS: ${RAS_WORKER_IDLE_MS:-5000}
+      RAS_WORKER_MAX_RETRIES: ${RAS_WORKER_MAX_RETRIES:-5}
+      RAS_WORKER_BASE_RETRY_MS: ${RAS_WORKER_BASE_RETRY_MS:-60000}
+    volumes:
+      - ras-data:/data
+    depends_on:
+      ras-api:
+        condition: service_healthy
+
 volumes:
   ras-data:

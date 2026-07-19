@@ -42,5 +42,10 @@ export interface RasJob<TPayload = Record<string, unknown>> {
   status: 'queued' | 'processing' | 'completed' | 'failed';
   retryCount: number;
   runAfterIso?: string;
+  processingStartedAtIso?: string;
+  completedAtIso?: string;
+  failedAtIso?: string;
+  lastError?: string;
+  result?: Record<string, unknown>;
   createdAtIso: string;
 }

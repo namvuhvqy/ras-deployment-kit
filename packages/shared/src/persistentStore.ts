@@ -110,6 +110,45 @@ export class JsonRasStore {
     );
   }
 
+  async markJobProcessing(jobId: string): Promise<RasJob> {
+    return this.updateJob(jobId, (job) => ({
+      ...job,
+      status: 'processing',
+      processingStartedAtIso: new Date().toISOString(),
+      lastError: undefined,
+    }));
+  }
+
+  async completeJob(jobId: string, result: Record<string, unknown>): Promise<RasJob> {
+    return this.updateJob(jobId, (job) => ({
+      ...job,
+      status: 'completed',
+      completedAtIso: new Date().toISOString(),
+      result,
+      lastError: undefined,
+    }));
+  }
+
+  async requeueJob(jobId: string, lastError: string, runAfterIso: string): Promise<RasJob> {
+    return this.updateJob(jobId, (job) => ({
+      ...job,
+      status: 'queued',
+      retryCount: job.retryCount + 1,
+      runAfterIso,
+      lastError,
+    }));
+  }
+
+  async failJob(jobId: string, lastError: string): Promise<RasJob> {
+    return this.updateJob(jobId, (job) => ({
+      ...job,
+      status: 'failed',
+      retryCount: job.retryCount + 1,
+      failedAtIso: new Date().toISOString(),
+      lastError,
+    }));
+  }
+
   async recordWebhookEvent(event: StoredWebhookEvent): Promise<{ inserted: boolean; event: StoredWebhookEvent }> {
     const state = await this.load();
     const duplicate = state.webhookEvents.find((row) => row.source === event.source && row.id === event.id);
@@ -129,6 +168,16 @@ export class JsonRasStore {
   private async createEmpty(): Promise<RasPersistentState> {
     await this.migrate();
     return (await this.readIfExists())!;
+  }
+
+  private async updateJob(jobId: string, updater: (job: RasJob) => RasJob): Promise<RasJob> {
+    const state = await this.load();
+    const index = state.jobs.findIndex((job) => job.id === jobId);
+    if (index < 0) throw new Error(`Job not found: ${jobId}`);
+    const updated = updater(state.jobs[index]);
+    state.jobs[index] = updated;
+    await this.write(state);
+    return updated;
   }
 
   private async readIfExists(): Promise<RasPersistentState | undefined> {
