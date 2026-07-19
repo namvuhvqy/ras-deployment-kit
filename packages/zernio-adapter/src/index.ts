@@ -19,6 +19,7 @@ export interface CreatePostInput {
   content: string;
   mediaUrls?: string[];
   scheduleAtIso?: string;
+  isDraft?: boolean;
   platformSpecificData?: Record<string, unknown>;
 }
 
@@ -38,6 +39,7 @@ export interface ZernioPostPayload {
   platforms: PlatformTargetPayload[];
   publishNow?: boolean;
   scheduledFor?: string;
+  isDraft?: boolean;
   mediaItems?: Array<{ type: MediaType; url: string }>;
   metadata?: Record<string, unknown>;
 }
@@ -92,7 +94,7 @@ export class DryRunZernioAdapter implements ZernioAdapter {
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
     return {
       zernioPostId: `dry_post_${input.profileId}_${input.platform}_${Date.now()}`,
-      status: input.scheduleAtIso ? 'scheduled' : 'queued',
+      status: input.isDraft ? 'draft' : input.scheduleAtIso ? 'scheduled' : 'queued',
     };
   }
 }
@@ -285,7 +287,7 @@ export function createPostPayload(input: CreatePostInput): ZernioPostPayload {
   return {
     content: input.content,
     platforms: [platformTarget],
-    ...(input.scheduleAtIso ? { scheduledFor: input.scheduleAtIso } : { publishNow: true }),
+    ...(input.isDraft ? { isDraft: true } : input.scheduleAtIso ? { scheduledFor: input.scheduleAtIso } : { publishNow: true }),
     ...(input.mediaUrls && input.mediaUrls.length > 0 ? { mediaItems: input.mediaUrls.map(mediaItemFromUrl) } : {}),
   };
 }

@@ -133,14 +133,16 @@ function assertPublishPostPayload(job: RasJob): CreatePostInput {
   const accountId = job.accountId ?? requiredString(payload, 'accountId');
   const mediaUrls = arrayOfStrings(payload.mediaUrls);
   const scheduleAtIso = optionalString(payload.scheduleAtIso);
+  const isDraft = optionalBoolean(payload.isDraft);
   const platformSpecificData = asOptionalRecord(payload.platformSpecificData);
   return {
     profileId: job.profileId,
     accountId,
     platform,
     content,
-    ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
+    mediaUrls,
     ...(scheduleAtIso ? { scheduleAtIso } : {}),
+    ...(isDraft !== undefined ? { isDraft } : {}),
     ...(platformSpecificData ? { platformSpecificData } : {}),
   };
 }
@@ -181,4 +183,8 @@ function optionalString(value: unknown): string | undefined {
 
 function arrayOfStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }

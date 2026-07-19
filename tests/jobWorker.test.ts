@@ -52,6 +52,30 @@ test('RasJobWorker drains due queued jobs fairly and persists completion metadat
     assert.equal(state.jobs.find((job) => job.id === 'job_a2')?.status, 'queued');
     assert.equal(sent.length, 2);
     assert.ok(sent.every((item) => item.topicId === 29));
+    assert.equal((state.jobs.find((job) => job.id === 'job_a1')?.result as Record<string, unknown>).status, 'queued');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('RasJobWorker forwards safe draft flag into publish payload', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const draftJob = makePublishJob('job_draft', 'profile_a', 'P1');
+    draftJob.payload = { ...draftJob.payload, isDraft: true };
+    await store.enqueueJob(draftJob);
+    let seenDraft;
+    const adapter = { ...noopAdapter, async createPost(input) { seenDraft = input.isDraft; return { zernioPostId: 'draft_1', status: 'draft' }; } } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    const result = await worker.runOnce();
+    const job = (await store.load()).jobs[0];
+
+    assert.deepEqual(result, { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    assert.equal(seenDraft, true);
+    assert.equal(job.result?.status, 'draft');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

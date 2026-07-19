@@ -99,6 +99,24 @@ test('createPostPayload follows documented Zernio /posts shape', () => {
   );
 });
 
+test('createPostPayload supports safe draft smoke tests', () => {
+  assert.deepEqual(
+    createPostPayload({
+      profileId: 'profile_1',
+      accountId: 'account_1',
+      platform: 'facebook',
+      content: 'Draft smoke',
+      isDraft: true,
+      platformSpecificData: { draft: true },
+    }),
+    {
+      content: 'Draft smoke',
+      platforms: [{ platform: 'facebook', accountId: 'account_1', platformSpecificData: { draft: true } }],
+      isDraft: true,
+    },
+  );
+});
+
 test('LiveZernioAdapter surfaces API errors', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'bad' }), {
