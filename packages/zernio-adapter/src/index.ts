@@ -19,6 +19,21 @@ export interface CreatePostInput {
   content: string;
   mediaUrls?: string[];
   scheduleAtIso?: string;
+  platformSpecificData?: Record<string, unknown>;
+}
+
+type MediaType = 'image' | 'video';
+
+export interface ZernioPostPayload {
+  content: string;
+  platforms: Array<{
+    platform: Platform;
+    accountId: string;
+    platformSpecificData?: Record<string, unknown>;
+  }>;
+  publishNow?: boolean;
+  scheduledFor?: string;
+  mediaItems?: Array<{ type: MediaType; url: string }>;
 }
 
 export interface CreatePostResult {
@@ -108,8 +123,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
       method: 'POST',
       body: {
         name: input.name,
-        email: input.email,
-        externalId: input.customerId,
+        ...(input.email ? { description: `RAS customer ${input.customerId} <${input.email}>` } : { description: `RAS customer ${input.customerId}` }),
       },
     });
 
@@ -156,13 +170,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
     const response = await this.request<Record<string, unknown>>('/posts', {
       method: 'POST',
-      body: {
-        content: input.content,
-        platforms: [{ platform: input.platform, accountId: input.accountId }],
-        mediaUrls: input.mediaUrls ?? [],
-        ...(input.scheduleAtIso ? { scheduledFor: input.scheduleAtIso } : {}),
-        profileId: input.profileId,
-      },
+      body: createPostPayload(input),
     });
 
     return {
@@ -246,6 +254,38 @@ function arrayFrom(value: unknown, keys?: string[]): unknown[] {
 function normalizeAccountStatus(status?: string): ConnectedAccount['status'] {
   if (status === 'expired' || status === 'revoked' || status === 'error') return status;
   return 'connected';
+}
+
+export function createPostPayload(input: CreatePostInput): ZernioPostPayload {
+  const platformTarget: ZernioPostPayload['platforms'][number] = {
+    platform: input.platform,
+    accountId: input.accountId,
+    ...(input.platformSpecificData ? { platformSpecificData: input.platformSpecificData } : {}),
+  };
+  return {
+    content: input.content,
+    platforms: [platformTarget],
+    ...(input.scheduleAtIso ? { scheduledFor: input.scheduleAtIso } : { publishNow: true }),
+    ...(input.mediaUrls && input.mediaUrls.length > 0 ? { mediaItems: input.mediaUrls.map(mediaItemFromUrl) } : {}),
+  };
+}
+
+function mediaItemFromUrl(url: string): { type: MediaType; url: string } {
+  return { type: inferMediaType(url), url };
+}
+
+function inferMediaType(url: string): MediaType {
+  const pathname = safeUrlPath(url).toLowerCase();
+  if (/\.(mp4|mov|m4v|webm)(\?|#|$)/.test(pathname)) return 'video';
+  return 'image';
+}
+
+function safeUrlPath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
 }
 
 function normalizePostStatus(status: string | undefined, scheduled: boolean): CreatePostResult['status'] {
