@@ -61,7 +61,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       {
         id: 'agent_2',
         customerId: 'cust_1',
-        sandboxId: 'sandbox_1',
+        sandboxId: 'sandbox_other',
         kind: 'ras2-openclaw',
         status: 'stopped',
         updatedAtIso: now,
@@ -172,7 +172,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.equal(lifecycle.status, 200);
     const lifecyclePayload = (await lifecycle.json()) as { lifecycle: { healthy: boolean; blockers: string[] } };
     assert.equal(lifecyclePayload.lifecycle.healthy, false);
-    assert.deepEqual(lifecyclePayload.lifecycle.blockers, ['ras2-openclaw_stopped']);
+    assert.deepEqual(lifecyclePayload.lifecycle.blockers, ['ras2-openclaw_wrong_sandbox', 'ras2-openclaw_stopped']);
 
     const missingLifecycle = await fetch(`http://127.0.0.1:${port}/customers/missing/lifecycle-status`);
     assert.equal(missingLifecycle.status, 404);

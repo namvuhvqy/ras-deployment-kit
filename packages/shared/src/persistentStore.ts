@@ -260,7 +260,10 @@ export class JsonRasStore {
     for (const kind of requiredAgentKinds) {
       const agent = agents.find((row) => row.kind === kind);
       if (!agent) blockers.push(`missing_${kind}`);
-      else if (agent.status !== 'running') blockers.push(`${kind}_${agent.status}`);
+      else {
+        if (sandbox && agent.sandboxId !== sandbox.id) blockers.push(`${kind}_wrong_sandbox`);
+        if (agent.status !== 'running') blockers.push(`${kind}_${agent.status}`);
+      }
     }
 
     return {
