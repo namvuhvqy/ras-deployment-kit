@@ -13,7 +13,6 @@ export interface ConnectUrlInput {
 }
 
 export interface CreatePostInput {
-  profileId: string;
   accountId: string;
   platform: Platform;
   content: string;
@@ -93,7 +92,7 @@ export class DryRunZernioAdapter implements ZernioAdapter {
 
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
     return {
-      zernioPostId: `dry_post_${input.profileId}_${input.platform}_${Date.now()}`,
+      zernioPostId: `dry_post_${input.accountId}_${input.platform}_${Date.now()}`,
       status: input.isDraft ? 'draft' : input.scheduleAtIso ? 'scheduled' : 'queued',
     };
   }

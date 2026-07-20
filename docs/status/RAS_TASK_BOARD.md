@@ -27,20 +27,39 @@
 - [x] Add minimum login + dashboard/control panel: JSON store users/sessions, `/auth/login`, protected `/dashboard`, tenant control panel payload, tests pass.
 - [x] Link/check Vercel app project after access granted: CLI authenticated as `namvuhvqy`, project `landingpage-ban-hang` visible with production URL `https://runagentsys.com`; see `docs/status/RAS_VERCEL_CHECK_20260720T000524Z.md`.
 
-## MVP Sprint 1
+## Latest Zernio feedback incorporated
 
-1. Product: RAS Sandbox Agent Environment scope and roadmap.
-2. API: tenant/customer/profile/account mapping endpoints.
-3. Control panel: login, tenant dashboard, env/agent health and logs.
-4. Sandbox/env: lifecycle status for per-tenant VPS/cloud sandbox and 2 RAS agents.
-5. Queue: job persistence + fair dequeue worker.
-6. Zernio add-on: tenant/profile/account mapping, connected accounts, posts/drafts, webhooks.
-   - [ ] Zernio server confirmation gate before live mode: OpenAPI/base URL version for profile/account/post/webhook; source-of-truth IDs for tenant/profile/account mapping; real webhook payload/event names/idempotency/retry/signature; rate-limit/429 reset and auth-error surfacing; Facebook/YouTube media upload URL/file-size/title/description/privacy requirements.
-7. Ops: Docker compose + VPS deploy smoke.
-8. Hardening: service packages, billing state, audit logs, smoke tests.
-   - [x] Add customer audit logs endpoint coverage on safe checkpoint branch (Backend28): `/customers/:customerId/audit-logs` returns tenant-scoped audit entries and rejects cross-tenant access.
-   - [x] Add customer billing-state endpoint coverage on safe checkpoint branch (Backend28): `/customers/:customerId/billing-state` returns tenant-scoped billing status with package pointer and rejects missing customers.
-   - [x] Add billing-state trial default coverage on safe checkpoint branch (Backend28): customers without explicit `billingStatus` surface `trial` without touching live billing.
+- Base/Auth: endpoints under `/v1`; Bearer API key.
+- IDs: local RAS `externalId` maps to `Zernio profile._id`; social account source of truth is `SocialAccount._id`; create-post scope is `platforms[].accountId`, not root `profileId`.
+- Profile create fields: only documented `name`, `description`, `color`, `isDefault`; do not invent `externalId`, `metadata`, or `email` on Zernio profile payload.
+- Webhooks: at-least-once delivery; dedup by `payload.id` / `X-Zernio-Event-Id`; verify `X-Zernio-Signature` HMAC-SHA256 over raw body when secret exists; auto-disable after 10 consecutive failures; logs retained 30 days.
+- 429: honor `Retry-After` seconds and `X-RateLimit-*`; rate limit is shared at billing/team account level, so queue throttle must be global/fair.
+- Account auth: surface `needsReconnection=true`; never show fake Connected.
+- Media/live smoke: use public HTTPS media or `/v1/media/presign`; Facebook/YouTube live test remains behind human gate.
+
+## MVP Sprint 1 — updated task board
+
+1. [x] Product: RAS Sandbox Agent Environment scope and roadmap.
+2. [x] API baseline: JSON store, auth/login, tenant dashboard, billing/audit endpoint coverage.
+3. [x] Control panel baseline: login, tenant dashboard, connection state from verified mapping only.
+4. [ ] Backend28: tenant/customer/profile/account mapping endpoints.
+5. [ ] Backend28: persistent worker hardening — global/team rate-limit bucket, retry/backoff using `Retry-After`, lifecycle audit rows.
+6. [x] Zernio29: update adapter contract to enforce `platforms[].accountId`, documented profile fields only, no root `profileId`.
+7. [ ] Zernio29: webhook receiver design — raw-body signature verify, event dedup store, retry/failure log surface.
+8. [ ] Frontend30: show integration state (`connected`, `needsReconnection`, `lastVerifiedAt`) from API summary; no UI/demo Connected state.
+9. [ ] Frontend30: add small admin screens for tenant mapping, agent health/log summary, and smoke-test status.
+10. [ ] Ops33: Docker/VPS/Vercel smoke checklist only; no production deploy without approval.
+11. [ ] Ops33: optional script-only heartbeat/watchdog, no LLM/code changes, alerts only on dirty repo/failed cron/env accidentally live.
+12. [ ] Hardening later: service packages, billing UI, audit exports, live Facebook/YouTube smoke after explicit account/platform/mode approval.
+
+## Topic assignment — small tasks only
+
+| Topic | Next small tasks | Risk | Order |
+|---|---|---|---:|
+| Backend28 - RAS API/Worker | Add local mapping model/API; add global rate-limit/retry fields; add tests for no root `profileId` assumption | Medium: schema drift, worker retry loops | 1 |
+| Zernio29 - Social Adapter | Align adapter payloads with Zernio feedback; draft webhook contract; list exact live-smoke prerequisites | High if live enabled too early | 2 |
+| Frontend30 - RAS Dashboard | Render verified connection summary; add `needsReconnection` warning; add smoke/log summary page | Medium: fake status bug if UI keeps local state | 3 |
+| Ops33 - Deploy/Smoke | Keep deploy/smoke checklist; monitor cron/dirty diff; prepare heartbeat proposal; report blockers only | Low/Medium: noisy logs/token waste | 4 |
 
 ## Human gates
 
