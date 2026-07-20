@@ -69,6 +69,29 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/mapping')) {
+    const [, , customerId] = req.url.split('/');
+    const state = await store.load();
+    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    if (!customer) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    res.end(
+      JSON.stringify({
+        ok: true,
+        mapping: {
+          customer,
+          sandbox: customer.sandboxId ? state.sandboxes.find((row) => row.id === customer.sandboxId) : undefined,
+          agents: state.agents.filter((row) => row.customerId === customer.id),
+          connectedAccounts: state.connectedAccounts.filter((row) => row.customerId === customer.id),
+        },
+      }),
+    );
+    return;
+  }
+
   if (req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
     const summary = await store.getConnectionSummary(decodeURIComponent(customerId));

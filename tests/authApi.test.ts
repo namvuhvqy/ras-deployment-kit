@@ -28,7 +28,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       },
     ],
     sessions: [],
-    customers: [{ id: 'cust_1', name: 'Shop Demo', status: 'active', createdAtIso: now }],
+    customers: [{ id: 'cust_1', name: 'Shop Demo', status: 'active', sandboxId: 'sandbox_1', createdAtIso: now }],
     sandboxes: [
       {
         id: 'sandbox_1',
@@ -95,6 +95,21 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     const payload = (await dashboard.json()) as { dashboard: { customer: { id: string }; agents: Array<{ kind: string }> } };
     assert.equal(payload.dashboard.customer.id, 'cust_1');
     assert.equal(payload.dashboard.agents[0].kind, 'ras1-hermes');
+
+    const mapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`);
+    assert.equal(mapping.status, 200);
+    const mappingPayload = (await mapping.json()) as {
+      mapping: { customer: { id: string }; sandbox: { id: string }; agents: Array<{ id: string }> };
+    };
+    assert.equal(mappingPayload.mapping.customer.id, 'cust_1');
+    assert.equal(mappingPayload.mapping.sandbox.id, 'sandbox_1');
+    assert.deepEqual(
+      mappingPayload.mapping.agents.map((agent) => agent.id),
+      ['agent_1'],
+    );
+
+    const missing = await fetch(`http://127.0.0.1:${port}/customers/missing/mapping`);
+    assert.equal(missing.status, 404);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });
