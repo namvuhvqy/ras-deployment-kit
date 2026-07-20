@@ -39,6 +39,7 @@
 8. Hardening: service packages, billing state, audit logs, smoke tests.
    - [x] Add customer audit logs endpoint coverage on safe checkpoint branch (Backend28): `/customers/:customerId/audit-logs` returns tenant-scoped audit entries and rejects cross-tenant access.
    - [x] Add customer billing-state endpoint coverage on safe checkpoint branch (Backend28): `/customers/:customerId/billing-state` returns tenant-scoped billing status with package pointer and rejects missing customers.
+   - [x] Add billing-state trial default coverage on safe checkpoint branch (Backend28): customers without explicit `billingStatus` surface `trial` without touching live billing.
 
 ## Human gates
 

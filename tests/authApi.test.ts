@@ -38,6 +38,13 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         billingStatus: 'active',
         createdAtIso: now,
       },
+      {
+        id: 'cust_trial',
+        name: 'Trial Demo',
+        status: 'trial',
+        servicePackageId: 'pkg_growth',
+        createdAtIso: now,
+      },
     ],
     sandboxes: [
       {
@@ -207,6 +214,17 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.deepEqual(billingStatePayload.billingState, {
       customerId: 'cust_1',
       status: 'active',
+      servicePackageId: 'pkg_growth',
+    });
+
+    const trialBillingState = await fetch(`http://127.0.0.1:${port}/customers/cust_trial/billing-state`);
+    assert.equal(trialBillingState.status, 200);
+    const trialBillingStatePayload = (await trialBillingState.json()) as {
+      billingState: { customerId: string; status: string; servicePackageId: string };
+    };
+    assert.deepEqual(trialBillingStatePayload.billingState, {
+      customerId: 'cust_trial',
+      status: 'trial',
       servicePackageId: 'pkg_growth',
     });
 
