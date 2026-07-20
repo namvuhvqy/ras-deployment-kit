@@ -37,6 +37,7 @@
 6. Zernio add-on: tenant/profile/account mapping, connected accounts, posts/drafts, webhooks.
 7. Ops: Docker compose + VPS deploy smoke.
 8. Hardening: service packages, billing state, audit logs, smoke tests.
+   - [x] Add customer audit logs endpoint coverage on safe checkpoint branch (Backend28): `/customers/:customerId/audit-logs` returns tenant-scoped audit entries and rejects cross-tenant access.
 
 ## Human gates
 
