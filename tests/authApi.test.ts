@@ -35,6 +35,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         status: 'active',
         sandboxId: 'sandbox_1',
         servicePackageId: 'pkg_growth',
+        billingStatus: 'active',
         createdAtIso: now,
       },
     ],
@@ -197,6 +198,20 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 
     const missingServicePackage = await fetch(`http://127.0.0.1:${port}/customers/missing/service-package`);
     assert.equal(missingServicePackage.status, 404);
+
+    const billingState = await fetch(`http://127.0.0.1:${port}/customers/cust_1/billing-state`);
+    assert.equal(billingState.status, 200);
+    const billingStatePayload = (await billingState.json()) as {
+      billingState: { customerId: string; status: string; servicePackageId: string };
+    };
+    assert.deepEqual(billingStatePayload.billingState, {
+      customerId: 'cust_1',
+      status: 'active',
+      servicePackageId: 'pkg_growth',
+    });
+
+    const missingBillingState = await fetch(`http://127.0.0.1:${port}/customers/missing/billing-state`);
+    assert.equal(missingBillingState.status, 404);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });
