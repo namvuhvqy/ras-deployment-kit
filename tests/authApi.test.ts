@@ -45,6 +45,13 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         servicePackageId: 'pkg_growth',
         createdAtIso: now,
       },
+      {
+        id: 'cust_missing_package',
+        name: 'Missing Package Demo',
+        status: 'active',
+        servicePackageId: 'pkg_missing',
+        createdAtIso: now,
+      },
     ],
     sandboxes: [
       {
@@ -205,6 +212,13 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 
     const missingServicePackage = await fetch(`http://127.0.0.1:${port}/customers/missing/service-package`);
     assert.equal(missingServicePackage.status, 404);
+
+    const unconfiguredServicePackage = await fetch(
+      `http://127.0.0.1:${port}/customers/cust_missing_package/service-package`,
+    );
+    assert.equal(unconfiguredServicePackage.status, 404);
+    const unconfiguredServicePackagePayload = (await unconfiguredServicePackage.json()) as { error: string };
+    assert.equal(unconfiguredServicePackagePayload.error, 'service_package_not_found');
 
     const billingState = await fetch(`http://127.0.0.1:${port}/customers/cust_1/billing-state`);
     assert.equal(billingState.status, 200);
