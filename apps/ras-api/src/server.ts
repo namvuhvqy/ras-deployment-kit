@@ -104,6 +104,22 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/audit-logs')) {
+    const [, , customerId] = req.url.split('/');
+    const state = await store.load();
+    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    if (!customer) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    const auditLogs = state.auditLogs
+      .filter((row) => row.customerId === customer.id)
+      .sort((left, right) => Date.parse(right.createdAtIso) - Date.parse(left.createdAtIso));
+    res.end(JSON.stringify({ ok: true, auditLogs }));
+    return;
+  }
+
   if (req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
     const summary = await store.getConnectionSummary(decodeURIComponent(customerId));

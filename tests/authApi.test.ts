@@ -62,7 +62,35 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     connectedAccounts: [],
     jobs: [],
     webhookEvents: [],
-    auditLogs: [],
+    auditLogs: [
+      {
+        id: 'audit_older',
+        customerId: 'cust_1',
+        action: 'customer.created',
+        targetType: 'customer',
+        targetId: 'cust_1',
+        metadata: { source: 'test' },
+        createdAtIso: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'audit_newer',
+        customerId: 'cust_1',
+        action: 'agent.checked',
+        targetType: 'agent',
+        targetId: 'agent_1',
+        metadata: { source: 'test' },
+        createdAtIso: '2026-01-02T00:00:00.000Z',
+      },
+      {
+        id: 'audit_other_customer',
+        customerId: 'cust_other',
+        action: 'customer.created',
+        targetType: 'customer',
+        targetId: 'cust_other',
+        metadata: { source: 'test' },
+        createdAtIso: '2026-01-03T00:00:00.000Z',
+      },
+    ],
   };
 
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
@@ -127,6 +155,18 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 
     const missingLifecycle = await fetch(`http://127.0.0.1:${port}/customers/missing/lifecycle-status`);
     assert.equal(missingLifecycle.status, 404);
+
+    const auditLogs = await fetch(`http://127.0.0.1:${port}/customers/cust_1/audit-logs`);
+    assert.equal(auditLogs.status, 200);
+    const auditLogsPayload = (await auditLogs.json()) as { auditLogs: Array<{ id: string; customerId: string }> };
+    assert.deepEqual(
+      auditLogsPayload.auditLogs.map((log) => log.id),
+      ['audit_newer', 'audit_older'],
+    );
+    assert.ok(auditLogsPayload.auditLogs.every((log) => log.customerId === 'cust_1'));
+
+    const missingAuditLogs = await fetch(`http://127.0.0.1:${port}/customers/missing/audit-logs`);
+    assert.equal(missingAuditLogs.status, 404);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });
