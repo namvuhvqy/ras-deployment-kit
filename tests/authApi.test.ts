@@ -28,7 +28,16 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       },
     ],
     sessions: [],
-    customers: [{ id: 'cust_1', name: 'Shop Demo', status: 'active', sandboxId: 'sandbox_1', createdAtIso: now }],
+    customers: [
+      {
+        id: 'cust_1',
+        name: 'Shop Demo',
+        status: 'active',
+        sandboxId: 'sandbox_1',
+        servicePackageId: 'pkg_growth',
+        createdAtIso: now,
+      },
+    ],
     sandboxes: [
       {
         id: 'sandbox_1',
@@ -58,7 +67,19 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         updatedAtIso: now,
       },
     ],
-    servicePackages: [],
+    servicePackages: [
+      {
+        id: 'pkg_growth',
+        name: 'Growth Sandbox',
+        status: 'active',
+        monthlyPriceVnd: 5000000,
+        includedAgents: 2,
+        includedSocialAccounts: 5,
+        features: ['2 RAS agents', 'Zernio add-on'],
+        createdAtIso: now,
+        updatedAtIso: now,
+      },
+    ],
     connectedAccounts: [],
     jobs: [],
     webhookEvents: [],
@@ -167,6 +188,15 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 
     const missingAuditLogs = await fetch(`http://127.0.0.1:${port}/customers/missing/audit-logs`);
     assert.equal(missingAuditLogs.status, 404);
+
+    const servicePackage = await fetch(`http://127.0.0.1:${port}/customers/cust_1/service-package`);
+    assert.equal(servicePackage.status, 200);
+    const servicePackagePayload = (await servicePackage.json()) as { servicePackage: { id: string; includedAgents: number } };
+    assert.equal(servicePackagePayload.servicePackage.id, 'pkg_growth');
+    assert.equal(servicePackagePayload.servicePackage.includedAgents, 2);
+
+    const missingServicePackage = await fetch(`http://127.0.0.1:${port}/customers/missing/service-package`);
+    assert.equal(missingServicePackage.status, 404);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });

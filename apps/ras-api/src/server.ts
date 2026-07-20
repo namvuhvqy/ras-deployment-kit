@@ -120,6 +120,27 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/service-package')) {
+    const [, , customerId] = req.url.split('/');
+    const state = await store.load();
+    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    if (!customer) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    const servicePackage = customer.servicePackageId
+      ? state.servicePackages.find((row) => row.id === customer.servicePackageId)
+      : undefined;
+    if (!servicePackage) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'service_package_not_found' }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, servicePackage }));
+    return;
+  }
+
   if (req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
     const summary = await store.getConnectionSummary(decodeURIComponent(customerId));
