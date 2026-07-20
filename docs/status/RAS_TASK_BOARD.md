@@ -25,7 +25,7 @@
 - [x] Add VPS deploy key / non-interactive SSH.
 - [x] Fix fake Connected bug: connection state must come from real connected account mapping + verification, never from click/demo state.
 - [x] Add minimum login + dashboard/control panel: JSON store users/sessions, `/auth/login`, protected `/dashboard`, tenant control panel payload, tests pass.
-- [ ] Link/check Vercel app project after access granted.
+- [x] Link/check Vercel app project after access granted: CLI authenticated as `namvuhvqy`, project `landingpage-ban-hang` visible with production URL `https://runagentsys.com`; see `docs/status/RAS_VERCEL_CHECK_20260720T000524Z.md`.
 
 ## MVP Sprint 1
 
