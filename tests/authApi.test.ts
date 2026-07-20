@@ -49,6 +49,14 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         status: 'running',
         updatedAtIso: now,
       },
+      {
+        id: 'agent_2',
+        customerId: 'cust_1',
+        sandboxId: 'sandbox_1',
+        kind: 'ras2-openclaw',
+        status: 'stopped',
+        updatedAtIso: now,
+      },
     ],
     servicePackages: [],
     connectedAccounts: [],
@@ -105,11 +113,20 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.equal(mappingPayload.mapping.sandbox.id, 'sandbox_1');
     assert.deepEqual(
       mappingPayload.mapping.agents.map((agent) => agent.id),
-      ['agent_1'],
+      ['agent_1', 'agent_2'],
     );
 
     const missing = await fetch(`http://127.0.0.1:${port}/customers/missing/mapping`);
     assert.equal(missing.status, 404);
+
+    const lifecycle = await fetch(`http://127.0.0.1:${port}/customers/cust_1/lifecycle-status`);
+    assert.equal(lifecycle.status, 200);
+    const lifecyclePayload = (await lifecycle.json()) as { lifecycle: { healthy: boolean; blockers: string[] } };
+    assert.equal(lifecyclePayload.lifecycle.healthy, false);
+    assert.deepEqual(lifecyclePayload.lifecycle.blockers, ['ras2-openclaw_stopped']);
+
+    const missingLifecycle = await fetch(`http://127.0.0.1:${port}/customers/missing/lifecycle-status`);
+    assert.equal(missingLifecycle.status, 404);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });

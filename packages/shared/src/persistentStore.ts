@@ -64,6 +64,14 @@ export interface RasDashboard {
   connectedAccounts: ConnectedAccount[];
 }
 
+export interface CustomerLifecycleStatus {
+  customer: RasCustomer;
+  sandbox?: RasSandboxEnvironment;
+  agents: RasAgentInstance[];
+  healthy: boolean;
+  blockers: string[];
+}
+
 export class JsonRasStore {
   constructor(private readonly path: string) {}
 
@@ -233,6 +241,34 @@ export class JsonRasStore {
           account.status === 'connected' && Boolean(account.connectedAtIso) && Boolean(account.lastVerifiedAtIso),
       ),
       accounts,
+    };
+  }
+
+  async getCustomerLifecycleStatus(customerId: string): Promise<CustomerLifecycleStatus | undefined> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) return undefined;
+
+    const sandbox = customer.sandboxId ? state.sandboxes.find((row) => row.id === customer.sandboxId) : undefined;
+    const agents = state.agents.filter((row) => row.customerId === customer.id);
+    const blockers: string[] = [];
+
+    if (!sandbox) blockers.push('missing_sandbox');
+    else if (sandbox.status !== 'running') blockers.push(`sandbox_${sandbox.status}`);
+
+    const requiredAgentKinds: RasAgentInstance['kind'][] = ['ras1-hermes', 'ras2-openclaw'];
+    for (const kind of requiredAgentKinds) {
+      const agent = agents.find((row) => row.kind === kind);
+      if (!agent) blockers.push(`missing_${kind}`);
+      else if (agent.status !== 'running') blockers.push(`${kind}_${agent.status}`);
+    }
+
+    return {
+      customer,
+      sandbox,
+      agents,
+      healthy: blockers.length === 0,
+      blockers,
     };
   }
 

@@ -92,6 +92,18 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/lifecycle-status')) {
+    const [, , customerId] = req.url.split('/');
+    const lifecycle = await store.getCustomerLifecycleStatus(decodeURIComponent(customerId));
+    if (!lifecycle) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, lifecycle }));
+    return;
+  }
+
   if (req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
     const summary = await store.getConnectionSummary(decodeURIComponent(customerId));
