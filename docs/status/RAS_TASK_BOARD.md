@@ -35,6 +35,7 @@
 4. Sandbox/env: lifecycle status for per-tenant VPS/cloud sandbox and 2 RAS agents.
 5. Queue: job persistence + fair dequeue worker.
 6. Zernio add-on: tenant/profile/account mapping, connected accounts, posts/drafts, webhooks.
+   - [ ] Zernio server confirmation gate before live mode: OpenAPI/base URL version for profile/account/post/webhook; source-of-truth IDs for tenant/profile/account mapping; real webhook payload/event names/idempotency/retry/signature; rate-limit/429 reset and auth-error surfacing; Facebook/YouTube media upload URL/file-size/title/description/privacy requirements.
 7. Ops: Docker compose + VPS deploy smoke.
 8. Hardening: service packages, billing state, audit logs, smoke tests.
    - [x] Add customer audit logs endpoint coverage on safe checkpoint branch (Backend28): `/customers/:customerId/audit-logs` returns tenant-scoped audit entries and rejects cross-tenant access.
