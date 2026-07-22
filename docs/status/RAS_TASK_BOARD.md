@@ -43,6 +43,7 @@ web lead or sale lead
 - [x] Fix fake Connected rule: frontend must not claim connected without verified mapping.
 - [x] Add Vercel/runagentsys.com project visibility check.
 - [x] Lock MVP decision: 2 service lines, 1 shared backend/control panel.
+- [x] Lock split-repo API boundary: frontend summary route must proxy RAS backend connection summary before any Zernio fallback.
 
 ## MVP Sprint 1 — next execution order
 
@@ -55,8 +56,8 @@ web lead or sale lead
 7. [ ] Backend28: add `AgentStatus` model for RAS1/RAS2 heartbeat/log summary.
 8. [ ] Zernio29: connect/status API must resolve through assigned profile slot.
 9. [ ] Zernio29: webhook receiver: raw-body signature verify, event dedup, failure log surface.
-10. [ ] Frontend30: remove/label static demo account management from production path.
-11. [ ] Frontend30: customer dashboard shows package/profile/integration status from API.
+10. [>] Frontend30: remove/label static demo account management from production path.
+11. [>] Frontend30: customer dashboard shows package/profile/integration status from API; first boundary is `/api/integrations/summary` → RAS backend `/customers/{id}/connection-summary`.
 12. [ ] Frontend30: admin dashboard can create customer and assign profile/VPS.
 13. [ ] Ops33: smoke test full flow locally: create customer → assign slot/VPS → customer dashboard → connect/status.
 14. [ ] Ops33: keep no-prod-deploy/no-live-credential gate until explicit approval.
@@ -81,3 +82,17 @@ runagentsys/
   packages/shared
   packages/zernio-adapter
 ```
+
+## Topic sync status
+
+Topics are synced to the current MVP architecture and API boundary in this task board. Cron/watchdog agents should be treated as smoke/report agents only, not primary coders:
+
+| Topic | Current synced scope |
+|---|---|
+| PMO27 | Track locked 2-service MVP, PR/merge/deploy gates, and cross-topic summary. |
+| Backend28 | Own RAS API contract and customer/profile/VPS/agent state. |
+| Zernio29 | Own adapter/webhook/connect/status through assigned profile slot, no live credential without gate. |
+| Frontend30 | Own `runagentsys.com` UI and API proxies to RAS backend, no fake connected state. |
+| Ops33 | Own local/public smoke, dirty repo reports, and deploy checklist. |
+
+Current watchdog state may be paused; resume only after prompts match the scopes above.

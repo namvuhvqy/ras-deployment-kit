@@ -47,7 +47,7 @@ Dashboard shows real status and next action
 
 ## 3. Priority roadmap
 
-1. **Lock MVP docs and API contract** around customer → account → profile slot → integration.
+1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state.
 2. **Customer/order/package minimal API**: create/list/update customer and package status.
 3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled.
 4. **Assign profile to customer**: admin/sale action, audited.
@@ -55,7 +55,7 @@ Dashboard shows real status and next action
 6. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms.
 7. **VPS assignment model** for the 2-agent service: IP/host label/status/notes, no auto provisioning yet.
 8. **Agent status model**: RAS1/RAS2 heartbeat/log summary.
-9. **Frontend dashboard** calls real APIs; no static/demo customer data in production path.
+9. **Frontend dashboard** calls real APIs; no static/demo customer data in production path. Current split-repo rule: frontend may return safe empty state when backend env is missing, but only backend-verified accounts can render as connected.
 10. **End-to-end smoke test**: sale creates account → assigns slot/VPS → customer sees dashboard → connect action returns verified status.
 11. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
 
@@ -87,3 +87,14 @@ Dashboard shows real status and next action
 - Keep one shared backend for both service lines.
 - If separate repos slow down E2E tests, migrate toward one monorepo.
 - Production deploy, live credentials, live publishing, and VPS mutations require explicit approval.
+
+## 7. Split-repo sync rule
+
+Short term the landing page/webapp repo and RAS backend repo can remain separate. They are considered synced only when all are true:
+
+1. Backend `npm run check` passes.
+2. Frontend `npm run lint && npm run build` passes.
+3. Frontend integration routes call RAS backend contract first, not direct demo state.
+4. Public `runagentsys.com` smoke confirms the expected routes exist after deployment.
+
+If this boundary keeps breaking, move to a monorepo with `apps/web`, `apps/api`, `apps/worker`, and shared packages.

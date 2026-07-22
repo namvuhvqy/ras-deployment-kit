@@ -106,6 +106,28 @@ npm run check
 
 Expected result: TypeScript build passes and all Node tests pass.
 
+## Frontend ↔ backend API contract
+
+`runagentsys.com` is the customer-facing webapp. It must call the RunAgentSys backend for customer/package/profile/VPS/integration state; the webapp must not treat a local click or demo response as a verified connection.
+
+Current MVP boundary:
+
+| Frontend route/use | Backend source of truth | Purpose |
+|---|---|---|
+| `GET /api/integrations/summary` | `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` | Render verified social/platform connection state. |
+| customer dashboard | `GET /dashboard` or customer-scoped dashboard endpoint | Render package, assigned profile slot, VPS, agent, and onboarding state. |
+| account/profile mapping | `GET /mappings/customers/{customerId}` and `GET /customers/{customerId}/mapping` | Read RAS customer ↔ Zernio/profile/VPS mapping. |
+| connect action | backend/Zernio adapter through assigned profile slot | Open OAuth/connect only for the customer/profile slot that RAS assigned. |
+
+Frontend env expected by the current split-repo setup:
+
+```bash
+RAS_API_BASE=http://localhost:8080
+RAS_CUSTOMER_ID=demo
+```
+
+`ZERNIO_API_KEY` remains a fallback/integration credential, not the primary frontend source of truth. If neither `RAS_API_BASE` nor `ZERNIO_API_KEY` is configured, frontend API routes must return safe empty state instead of fake `Connected`.
+
 ## Topic lanes
 
 | Topic | Role |
