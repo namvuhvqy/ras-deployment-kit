@@ -31,6 +31,7 @@ export interface RasSession {
 
 export interface RasCustomer {
   id: string;
+  tenantId?: string;
   name: string;
   email?: string;
   zernioProfileId?: string;

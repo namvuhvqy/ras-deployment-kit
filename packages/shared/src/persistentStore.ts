@@ -24,6 +24,8 @@ export interface RasPersistentState {
   connectedAccounts: ConnectedAccount[];
   jobs: RasJob[];
   webhookEvents: StoredWebhookEvent[];
+  webhookFailures: StoredWebhookFailure[];
+  webhookStatus: StoredWebhookStatus;
   auditLogs: StoredAuditLog[];
 }
 
@@ -36,6 +38,22 @@ export interface StoredWebhookEvent {
   payload: Record<string, unknown>;
   processedAtIso?: string;
   createdAtIso: string;
+  signatureStatus?: 'verified' | 'skipped';
+}
+
+export interface StoredWebhookFailure {
+  id: string;
+  source: string;
+  eventId?: string;
+  reason: string;
+  statusCode: number;
+  createdAtIso: string;
+}
+
+export interface StoredWebhookStatus {
+  enabled: boolean;
+  consecutiveFailures: number;
+  disabledAtIso?: string;
 }
 
 export interface StoredAuditLog {
@@ -72,6 +90,47 @@ export interface CustomerLifecycleStatus {
   blockers: string[];
 }
 
+export interface CustomerMapping {
+  tenantId?: string;
+  customerId: string;
+  zernioProfileId?: string;
+  accounts: AccountMapping[];
+}
+
+export interface AccountMapping {
+  accountId: string;
+  customerId: string;
+  platform: ConnectedAccount['platform'];
+  zernioProfileId?: string;
+  zernioAccountId: string;
+  handle?: string;
+  username?: string;
+  status: ConnectedAccount['status'];
+  connectedAtIso?: string;
+  lastVerifiedAtIso?: string;
+  createPostScope: {
+    platforms: Array<{ platform: ConnectedAccount['platform']; accountId: string }>;
+  };
+}
+
+function toAccountMapping(account: ConnectedAccount): AccountMapping {
+  return {
+    accountId: account.id,
+    customerId: account.customerId,
+    platform: account.platform,
+    zernioProfileId: account.zernioProfileId,
+    zernioAccountId: account.zernioAccountId,
+    handle: account.handle,
+    username: account.username,
+    status: account.status,
+    connectedAtIso: account.connectedAtIso,
+    lastVerifiedAtIso: account.lastVerifiedAtIso,
+    createPostScope: {
+      platforms: [{ platform: account.platform, accountId: account.zernioAccountId }],
+    },
+  };
+}
+
 export class JsonRasStore {
   constructor(private readonly path: string) {}
 
@@ -90,6 +149,8 @@ export class JsonRasStore {
       connectedAccounts: [],
       jobs: [],
       webhookEvents: [],
+      webhookFailures: [],
+      webhookStatus: { enabled: true, consecutiveFailures: 0 },
       auditLogs: [],
     };
 
@@ -105,7 +166,10 @@ export class JsonRasStore {
     state.connectedAccounts ??= [];
     state.jobs ??= [];
     state.webhookEvents ??= [];
+    state.webhookFailures ??= [];
+    state.webhookStatus ??= { enabled: true, consecutiveFailures: 0 };
     state.auditLogs ??= [];
+    this.pruneWebhookLogs(state, now);
     await this.write(state);
 
     return {
@@ -185,6 +249,18 @@ export class JsonRasStore {
     return customer;
   }
 
+  async getCustomerMapping(customerId: string): Promise<CustomerMapping | undefined> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) return undefined;
+    return {
+      tenantId: customer.tenantId,
+      customerId: customer.id,
+      zernioProfileId: customer.zernioProfileId,
+      accounts: state.connectedAccounts.filter((row) => row.customerId === customer.id).map(toAccountMapping),
+    };
+  }
+
   async upsertSandbox(sandbox: RasSandboxEnvironment): Promise<RasSandboxEnvironment> {
     const state = await this.load();
     const index = state.sandboxes.findIndex((row) => row.id === sandbox.id);
@@ -221,6 +297,17 @@ export class JsonRasStore {
     else state.connectedAccounts.push(account);
     await this.write(state);
     return account;
+  }
+
+  async upsertAccountMapping(account: ConnectedAccount): Promise<AccountMapping> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === account.customerId);
+    if (!customer) throw new Error(`Customer not found: ${account.customerId}`);
+    if (customer.zernioProfileId && account.zernioProfileId && customer.zernioProfileId !== account.zernioProfileId) {
+      throw new Error(`Zernio profile mismatch: ${account.zernioProfileId}`);
+    }
+    const saved = await this.upsertConnectedAccount(account);
+    return toAccountMapping(saved);
   }
 
   async getConnectedAccount(accountId: string): Promise<ConnectedAccount | undefined> {
@@ -347,8 +434,46 @@ export class JsonRasStore {
     const duplicate = state.webhookEvents.find((row) => row.source === event.source && row.id === event.id);
     if (duplicate) return { inserted: false, event: duplicate };
     state.webhookEvents.push(event);
+    state.webhookStatus = { enabled: true, consecutiveFailures: 0 };
+    this.pruneWebhookLogs(state);
     await this.write(state);
     return { inserted: true, event };
+  }
+
+  async recordWebhookFailure(
+    failure: Omit<StoredWebhookFailure, 'id' | 'createdAtIso'> & { createdAtIso?: string },
+  ): Promise<StoredWebhookStatus> {
+    const state = await this.load();
+    const createdAtIso = failure.createdAtIso ?? new Date().toISOString();
+    const current = state.webhookStatus ?? { enabled: true, consecutiveFailures: 0 };
+    const consecutiveFailures = failure.reason === 'webhook_disabled' ? current.consecutiveFailures : current.consecutiveFailures + 1;
+    state.webhookFailures.push({
+      id: `webhook_failure_${Date.now()}_${state.webhookFailures.length}`,
+      source: failure.source,
+      eventId: failure.eventId,
+      reason: failure.reason,
+      statusCode: failure.statusCode,
+      createdAtIso,
+    });
+    state.webhookStatus = {
+      enabled: current.enabled && consecutiveFailures < 10,
+      consecutiveFailures,
+      disabledAtIso: current.disabledAtIso ?? (consecutiveFailures >= 10 ? createdAtIso : undefined),
+    };
+    this.pruneWebhookLogs(state, createdAtIso);
+    await this.write(state);
+    return state.webhookStatus;
+  }
+
+  async getWebhookStatus(): Promise<StoredWebhookStatus & { recentEvents: StoredWebhookEvent[]; recentFailures: StoredWebhookFailure[] }> {
+    const state = await this.load();
+    this.pruneWebhookLogs(state);
+    await this.write(state);
+    return {
+      ...(state.webhookStatus ?? { enabled: true, consecutiveFailures: 0 }),
+      recentEvents: [...state.webhookEvents].sort((left, right) => Date.parse(right.createdAtIso) - Date.parse(left.createdAtIso)),
+      recentFailures: [...state.webhookFailures].sort((left, right) => Date.parse(right.createdAtIso) - Date.parse(left.createdAtIso)),
+    };
   }
 
   async appendAuditLog(log: StoredAuditLog): Promise<StoredAuditLog> {
@@ -371,6 +496,12 @@ export class JsonRasStore {
     state.jobs[index] = updated;
     await this.write(state);
     return updated;
+  }
+
+  private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {
+    const cutoff = Date.parse(nowIso) - 30 * 24 * 60 * 60 * 1000;
+    state.webhookEvents = (state.webhookEvents ?? []).filter((row) => Date.parse(row.createdAtIso) >= cutoff);
+    state.webhookFailures = (state.webhookFailures ?? []).filter((row) => Date.parse(row.createdAtIso) >= cutoff);
   }
 
   private async readIfExists(): Promise<RasPersistentState | undefined> {
