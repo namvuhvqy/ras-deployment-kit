@@ -1,93 +1,89 @@
-# RAS Sandbox — Product Scope & Roadmap
+# RunAgentSys / RAS — MVP Product Scope & Roadmap
 
-Updated: 2026-07-19
+Updated: 2026-07-22
 Owner: Nam Vũ / RunAgentSys
-Status: PRODUCT SCOPE LOCKED FOR NEXT BUILD
+Status: LOCKED FOR MVP EXECUTION
 
-## 1. Product scope
+## 1. MVP product scope
 
-The primary product is **RAS Sandbox Agent Environment**: a SaaS web application and control panel for provisioning and operating isolated automation environments.
+RunAgentSys MVP has **two service lines** managed by one backend/control panel:
 
-Each tenant/customer owns a separate VPS/cloud sandbox environment containing **2 RAS agents**:
+1. **RunAgentSys Webapp / Zernio Integration**
+   - Customer has account on `runagentsys.com`.
+   - Customer connects Telegram/WhatsApp/Facebook/Zalo/other platforms through the dashboard.
+   - Backend uses prepared Zernio/API profile slots.
 
-1. **RAS1 — Hermes Main**: customer-care, routing, CRM/leads, operations brain.
-2. **RAS2 — OpenClaw/worker agent**: content, media, campaign assets, publishing drafts, workflow automation.
+2. **Managed RAS VPS 2-Agent Setup**
+   - Team builds or assigns a VPS with RAS1 + RAS2.
+   - Customer may receive SSH access, but normal operation/integration should be visible on `runagentsys.com`.
 
-The web application is a **control panel/dashboard**, not a landing page. Its core job is to manage:
+Both service lines share:
 
-- Tenant/customer records.
-- Sandbox/env provisioning and lifecycle.
-- Agent status, health, and logs.
-- Service packages and billing state.
-- Integrations and connected add-ons.
-- Audit trail, smoke tests, and operational hardening.
+- Customer/account records.
+- Package/order/onboarding state.
+- Profile slot assignment.
+- Integration status.
+- VPS/agent status when included.
 
-## 2. Explicit non-goals
+## 2. MVP sales/onboarding flow
 
-RAS is **not**:
+```text
+Customer registers on web OR sale creates lead
+  ↓
+Sale/Admin creates customer account
+  ↓
+Admin assigns package
+  ↓
+Admin assigns prepared profile slot and/or VPS
+  ↓
+Customer logs in to runagentsys.com
+  ↓
+Customer connects platforms allowed by package
+  ↓
+Backend calls Zernio/API behind the scenes
+  ↓
+Dashboard shows real status and next action
+```
 
-- A landing-page-only project.
-- A generic marketing website.
-- A Zernio clone.
-- A product where Zernio is the backend for the entire RAS system.
+## 3. Priority roadmap
 
-## 3. Zernio role
+1. **Lock MVP docs and API contract** around customer → account → profile slot → integration.
+2. **Customer/order/package minimal API**: create/list/update customer and package status.
+3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled.
+4. **Assign profile to customer**: admin/sale action, audited.
+5. **Customer dashboard API**: `me`, package, assigned profile, integration summary.
+6. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms.
+7. **VPS assignment model** for the 2-agent service: IP/host label/status/notes, no auto provisioning yet.
+8. **Agent status model**: RAS1/RAS2 heartbeat/log summary.
+9. **Frontend dashboard** calls real APIs; no static/demo customer data in production path.
+10. **End-to-end smoke test**: sale creates account → assigns slot/VPS → customer sees dashboard → connect action returns verified status.
+11. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
 
-**Zernio / runagentsys.com is a social operations add-on / white-label backend**, used for:
+## 4. Non-goals for MVP
 
-- Connected social accounts.
-- Media handling.
-- Posts/drafts/scheduling.
-- Inbox/events where supported.
-- Social operations workflows.
-
-RAS must integrate Zernio through a tenant/profile/account mapping layer. RAS should not rebuild Zernio, and should not depend on undocumented Zernio fields.
-
-Current confirmed OpenAPI constraints:
-
-- `POST /v1/profiles` documents only `name`, `description`, `color`, `isDefault`.
-- Do not send undocumented profile fields such as `externalId`, `metadata`, or `email`.
-- Store RAS customer/tenant to Zernio `profile._id` mapping locally.
-- `POST /v1/posts` does not accept root `profileId`.
-- `platforms` must be an array of objects such as `{ platform, accountId }`, not strings.
-- Platform-specific settings belong in `platforms[].platformSpecificData`.
-- 429 handling: `Retry-After` is seconds; `X-RateLimit-Reset` is a Unix timestamp in seconds; limits are account-wide.
-
-## 4. Priority roadmap
-
-1. **Lock product scope**: RAS Sandbox Agent Environment.
-2. **Fix fake Connected bug**: UI/API must not show `Connected` unless a real account mapping exists and status is verified.
-3. **Build minimum login + dashboard/control panel**.
-4. **Manage sandbox/env + 2 agents + health/logs**.
-5. **Add service/package management**.
-6. **Integrate Zernio as tenant/profile/account add-on mapping**.
-7. **Hardening**: webhooks, persistent queue/worker, billing, audit logs, staging smoke tests.
+- Auto-create all VPS resources after payment.
+- Full self-serve checkout-to-provision automation.
+- Complex billing/subscription logic.
+- Enterprise RBAC/multi-tenant admin complexity.
+- Rebuilding Zernio social backend.
+- Forcing business customers to use SSH as the main integration workflow.
 
 ## 5. Topic routing
 
-Use the existing Telegram topic IDs as execution lanes:
-
 | Topic | Purpose |
 |---|---|
-| **RAS PMO / Decisions** | Overall coordination, scope, roadmap, priorities, decisions |
-| **RAS Core / Backend** | API, DB, queue, persistent worker, core domain |
-| **RAS Zernio Integration** | Zernio profile/account/post/webhook, tenant/profile/account mapping |
-| **RAS Landing / Vercel / Frontend** | Vercel app, login, dashboard, control panel, connection state UI |
-| **RAS Marketing / Content** | Website copy, content, campaigns, positioning, social marketing ops |
-| **RAS Sales / Customer Onboarding** | Leads, packages, customer onboarding, CRM/CSKH handoff |
-| **RAS Ops / Logs / Support** | VPS, deploy, smoke tests, logs, support operations |
-
-Short topic labels can still be used in docs when helpful:
-
-- **RAS Sandbox — Product Scope & Roadmap** → PMO27
-- **RAS Sandbox — Agent Env & Control Panel** → Backend28 / Frontend30 / Ops33 depending on task
-- **RAS Sandbox — Zernio Add-on / White-label Social** → Zernio29
+| PMO27 | Scope, roadmap, decisions, human gates |
+| Backend28 | Customer/order/profile slot/VPS/agent APIs |
+| Zernio29 | Zernio profile/account/webhook/connect/status |
+| Frontend30 | Webapp, customer dashboard, admin screens, real status UI |
+| Marketing31 | Sales copy and packaging for 2 service lines |
+| Sales32 | Lead → account → onboarding workflow |
+| Ops33 | VPS setup, smoke tests, deploy checks, logs |
 
 ## 6. Implementation guardrails
 
-- Prefer clean, small modules over over-complex pipelines.
-- Keep RAS core domain types independent from Zernio transport details.
-- Treat Zernio IDs as external references, never as RAS primary identity.
-- Any missing or undocumented Zernio behavior must be confirmed from Zernio docs/admin before coding live assumptions.
-- Production/VPS mutations require explicit approval unless the action was already approved for the current task.
-- Every live integration change needs a staging smoke test and read-back verification.
+- Build only the few customer/profile APIs needed to sell and onboard first customers.
+- Prepared profile/API slots are acceptable: sell/assign them, then create more when inventory runs out.
+- Keep one shared backend for both service lines.
+- If separate repos slow down E2E tests, migrate toward one monorepo.
+- Production deploy, live credentials, live publishing, and VPS mutations require explicit approval.
