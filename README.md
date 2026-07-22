@@ -1,14 +1,119 @@
-# RAS Product / Deployment Kit
+# RunAgentSys / RAS Product & Deployment Kit
 
-This workspace folder contains the clean product planning artifacts for RunAgentSys RAS deployment package.
+This repository contains the product architecture, implementation docs, backend/domain code, adapter tests, and deployment planning artifacts for the RunAgentSys / RAS MVP.
 
-RAS package = customer VPS/cloud + RAS1 Hermes Main + RAS2 OpenClaw + Zernio OAuth/secrets + gog CLI + iSocial workflows + customizable CSKH chatbot template.
+## Locked MVP direction
 
-Do not copy runtime folders such as `.hermes` or `.hermes-cskh` wholesale into a public repo because they may contain secrets, logs, backups, credentials, and state.
+RunAgentSys MVP has **two service lines** managed by **one shared backend/control panel**.
 
-Docs:
-- `docs/ARCHITECTURE_DECISION_LOCKED.md` — final MVP architecture decision to follow
-- `docs/RAS_DEPLOYMENT_ARCHITECTURE.md`
-- `docs/IMPLEMENTATION_PLAN.md`
-- `pricing/RAS_PRICING_MODEL.md`
-- `frontend-audit/RUNAGENTSYS_FRONTEND_AUDIT.md`
+```text
+RunAgentSys
+  ├─ Service A: Webapp / Zernio Integration
+  │    ├─ Customer account on runagentsys.com
+  │    ├─ Customer connects supported platforms from the dashboard
+  │    └─ Backend maps customer to prepared Zernio/API profile slots
+  │
+  └─ Service B: Managed RAS VPS 2-Agent Setup
+       ├─ Team prepares/assigns a VPS or sandbox
+       ├─ VPS contains RAS1 + RAS2 agents
+       └─ Customer sees package/onboarding/agent status on runagentsys.com
+```
+
+The two services are sold separately, but they share the same backend records:
+
+- `Customer`
+- `Order` / `Package`
+- `ProfileSlot`
+- `Integration`
+- `VpsAssignment`
+- `AgentStatus`
+- audit/onboarding state
+
+## Customer onboarding flow
+
+```text
+Lead arrives from web or sale conversation
+  ↓
+Sale/Admin creates customer account
+  ↓
+Admin assigns package:
+  - zernio_webapp
+  - ras_vps_2_agent
+  - hybrid
+  ↓
+Admin assigns prepared Zernio/API profile slot and/or VPS
+  ↓
+Customer logs in to runagentsys.com
+  ↓
+Customer connects allowed platforms
+  ↓
+Backend/Zernio verifies real status
+  ↓
+Dashboard shows integration, VPS, agent, and onboarding state
+```
+
+Customers should not need to understand Zernio. Zernio is an internal/partner integration backend behind RunAgentSys UX.
+
+## Service lines
+
+| Service | Customer promise | MVP delivery mode |
+|---|---|---|
+| **RunAgentSys Webapp / Zernio Integration** | Customer gets a web account and connects social/platform channels through `runagentsys.com` | Prepared profile/API slots assigned by admin |
+| **Managed RAS VPS 2-Agent Setup** | Customer gets a managed automation VPS/sandbox with RAS1 + RAS2 configured for their business | Manual/admin-assisted VPS assignment first |
+| **Hybrid** | Customer gets both the webapp integration layer and a dedicated RAS VPS setup | Shared customer/account/backend record |
+
+## What this repo is for
+
+- Locking architecture decisions and product scope.
+- Backend/domain implementation for customers, packages, profile slots, integrations, VPS assignments, agent status, queues, audit, and webhooks.
+- Zernio adapter contracts and tests.
+- Operational checklists for local/VPS/Vercel smoke tests.
+- Keeping implementation aligned with the approved MVP flow.
+
+## What this repo is not
+
+- Not a landing-page-only project.
+- Not a VPS rental-only product.
+- Not a source-code resale package.
+- Not a Zernio clone.
+- Not a place to store runtime secrets, `.hermes`, `.hermes-cskh`, logs, backups, OAuth tokens, or customer credential state.
+
+## Current implementation guardrails
+
+- Keep modules small and business-flow-first.
+- Prepared profile/API slots are acceptable for MVP: create a few, sell/assign them, then create more when needed.
+- Do not fake `Connected` state in UI. Only show connected when backend has verified mapping/status.
+- Do not use undocumented Zernio fields.
+- Keep Zernio IDs as external references, not RAS primary IDs.
+- Production deploy, live credentials, live social publishing, and VPS mutations require explicit human approval.
+- Prefer strong local tests and smoke checks before any production action.
+
+## Important docs
+
+- `docs/ARCHITECTURE_DECISION_LOCKED.md` — locked MVP architecture decision.
+- `docs/PRODUCT_SCOPE_ROADMAP.md` — current MVP product scope and execution roadmap.
+- `docs/status/RAS_TASK_BOARD.md` — topic-based task board and execution order.
+- `docs/RAS_DEPLOYMENT_ARCHITECTURE.md` — deployment architecture notes.
+- `docs/IMPLEMENTATION_PLAN.md` — implementation plan.
+- `pricing/RAS_PRICING_MODEL.md` — pricing/package model.
+- `frontend-audit/RUNAGENTSYS_FRONTEND_AUDIT.md` — frontend audit notes.
+
+## Local verification
+
+```bash
+npm run check
+```
+
+Expected result: TypeScript build passes and all Node tests pass.
+
+## Topic lanes
+
+| Topic | Role |
+|---|---|
+| PMO27 | Scope, roadmap, decisions, human gates |
+| Backend28 | Customer/order/profile slot/VPS/agent APIs |
+| Zernio29 | Zernio profile/account/webhook/connect/status |
+| Frontend30 | Webapp, customer dashboard, admin screens, real status UI |
+| Marketing31 | Sales copy and packaging for the two service lines |
+| Sales32 | Lead → account → onboarding workflow |
+| Ops33 | VPS setup, smoke tests, deploy checks, logs/support |
