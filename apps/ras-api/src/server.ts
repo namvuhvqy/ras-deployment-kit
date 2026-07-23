@@ -65,6 +65,29 @@ function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | '
   );
 }
 
+async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ refreshed: boolean; reason?: string; accountCount?: number }> {
+  const state = await store.load();
+  const customer = state.customers.find((row) => row.id === customerId);
+  if (!customer) return { refreshed: false, reason: 'customer_not_found' };
+  if (!customer.zernioProfileId) return { refreshed: false, reason: 'missing_zernio_profile_id' };
+
+  const nowIso = new Date().toISOString();
+  const accounts = await adapter.listAccounts(customer.zernioProfileId);
+  for (const account of accounts) {
+    await store.upsertAccountMapping({
+      ...account,
+      id: account.id || `${customer.id}_${account.platform}_${account.zernioAccountId}`,
+      customerId: customer.id,
+      zernioProfileId: customer.zernioProfileId,
+      profileId: customer.zernioProfileId,
+      status: account.status,
+      connectedAtIso: account.connectedAtIso ?? (account.status === 'connected' ? nowIso : undefined),
+      lastVerifiedAtIso: nowIso,
+    });
+  }
+  return { refreshed: true, accountCount: accounts.length };
+}
+
 const server = createServer(async (req, res) => {
   await ready;
   res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -360,10 +383,46 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
-    const summary = await store.getConnectionSummary(decodeURIComponent(customerId));
-    res.end(JSON.stringify(summary));
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const sync = await refreshZernioAccountsForCustomer(decodedCustomerId);
+    const summary = await store.getConnectionSummary(decodedCustomerId);
+    res.end(JSON.stringify({ ...summary, customerId: decodedCustomerId, sync }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/demo/customer-zernio-profile') {
+    const body = await readJsonBody(req);
+    const customerId = stringField(body, 'customerId') ?? 'demo_khach_2';
+    const zernioProfileId = stringField(body, 'zernioProfileId') ?? '6a2d49446d68ffa8630cf8e6';
+    const name = stringField(body, 'name') ?? 'Khách 2 Demo';
+    const nowIso = new Date().toISOString();
+    const existing = (await store.load()).customers.find((row) => row.id === customerId);
+    const customer = await store.upsertCustomer({
+      ...existing,
+      id: customerId,
+      name,
+      tenantId: stringField(body, 'tenantId') ?? existing?.tenantId ?? customerId,
+      email: stringField(body, 'email') ?? existing?.email,
+      zernioProfileId,
+      status: 'active',
+      createdAtIso: existing?.createdAtIso ?? nowIso,
+      updatedAtIso: nowIso,
+    });
+    const sync = await refreshZernioAccountsForCustomer(customer.id);
+    await store.appendAuditLog({
+      id: `audit_${Date.now()}`,
+      customerId: customer.id,
+      action: 'customer.zernio_profile_mapped',
+      targetType: 'zernio_profile',
+      targetId: customer.zernioProfileId,
+      metadata: { source: 'demo/customer-zernio-profile', sync },
+      createdAtIso: nowIso,
+    });
+    const summary = await store.getConnectionSummary(customer.id);
+    res.statusCode = existing ? 200 : 201;
+    res.end(JSON.stringify({ ok: true, customer, summary: { ...summary, customerId: customer.id, sync } }));
     return;
   }
 
