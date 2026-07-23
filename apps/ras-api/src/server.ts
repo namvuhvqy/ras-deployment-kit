@@ -388,7 +388,18 @@ const server = createServer(async (req, res) => {
     const decodedCustomerId = decodeURIComponent(customerId);
     const sync = await refreshZernioAccountsForCustomer(decodedCustomerId);
     const summary = await store.getConnectionSummary(decodedCustomerId);
-    res.end(JSON.stringify({ ...summary, customerId: decodedCustomerId, sync }));
+    const integrations = summary.accounts.map((account) => ({
+      id: account.id,
+      platform: account.platform,
+      connected:
+        account.status === 'connected' && Boolean(account.connectedAtIso) && Boolean(account.lastVerifiedAtIso),
+      needsReconnection: account.status === 'disconnected' || account.status === 'error',
+      lastVerifiedAt: account.lastVerifiedAtIso ?? null,
+      accountId: account.zernioAccountId,
+      username: account.username ?? account.handle ?? null,
+      capabilities: account.capabilities ?? [],
+    }));
+    res.end(JSON.stringify({ ...summary, integrations, customerId: decodedCustomerId, sync }));
     return;
   }
 
