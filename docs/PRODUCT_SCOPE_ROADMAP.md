@@ -12,6 +12,16 @@ Status: LOCKED FOR MVP EXECUTION
 - Production frontend `https://runagentsys.com/api/integrations/summary` now proxies the RAS backend and returns `source: "ras-backend"` with verified Facebook integration state for the demo customer.
 - Next MVP focus: customer portal/account-management screens backed by real RAS customer/session APIs.
 
+## 0.1 Protected dashboard rollout checkpoint — 2026-07-23
+
+- [x] Step 1 docs: RFC/API contract written in `docs/ARCH.md` for a protected `/dashboard` that derives `customerId` from session token.
+- [x] Step 1 docs: Base Plan schema documented as VPS/sandbox + exactly 2 default RAS agents (`ras1-hermes`, `ras2-openclaw`).
+- [x] Step 1 docs: Add-ons schema documented with inactive-safe `active: false` behavior for modules such as Zernio and Social Automation.
+- [x] Step 1 docs: Backward-compatibility rule locked — keep `/customer-portal` demo path for smoke testing until protected `/dashboard` passes end-to-end.
+- [ ] Step 1 implementation: add TypeScript schema/types, store defaults, and contract tests.
+- [ ] Step 2: homepage Login link and `/login` UI connected to `/auth/login`.
+- [ ] Step 3: protected `/dashboard` UI rendering Base VPS → 2 Agent RAS → Add-ons widget/banner.
+
 ## 1. MVP product scope
 
 RunAgentSys MVP has **two service lines** managed by one backend/control panel:
@@ -55,7 +65,7 @@ Dashboard shows real status and next action
 
 ## 3. Priority roadmap
 
-1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state.
+1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state. ✅ Protected dashboard RFC/API contract added in `docs/ARCH.md` for Base VPS + 2 Agent RAS + Add-ons while preserving `/customer-portal` demo smoke path.
 2. **Customer/order/package minimal API**: create/list/update customer and package status, including service line (`zernio_webapp`, `ras_vps_2_agent`, `hybrid`).
 3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled.
 4. **Assign profile to customer**: admin/sale action, audited.

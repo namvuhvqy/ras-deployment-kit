@@ -91,6 +91,7 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 ## Important docs
 
 - `docs/ARCHITECTURE_DECISION_LOCKED.md` — locked MVP architecture decision.
+- `docs/ARCH.md` — protected customer dashboard RFC/API contract for Base VPS + 2 Agent RAS + modular Add-ons.
 - `docs/PRODUCT_SCOPE_ROADMAP.md` — current MVP product scope and execution roadmap.
 - `docs/status/RAS_TASK_BOARD.md` — topic-based task board and execution order.
 - `docs/RAS_DEPLOYMENT_ARCHITECTURE.md` — deployment architecture notes.
