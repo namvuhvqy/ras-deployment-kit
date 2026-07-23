@@ -68,8 +68,8 @@ Dashboard shows real status and next action
 
 1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state. ✅ Protected dashboard RFC/API contract added in `docs/ARCH.md` for Base VPS + 2 Agent RAS + Add-ons while preserving `/customer-portal` demo smoke path.
 2. **Customer/order/package minimal API**: create/list/update customer and package status, including service line (`zernio_webapp`, `ras_vps_2_agent`, `hybrid`).
-3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled.
-4. **Assign profile to customer**: admin/sale action, audited.
+3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled. Quotas such as “5 connected accounts” are enforced by RAS DB/UI, not by Zernio profile settings.
+4. **Assign profile to customer**: admin/sale action, audited. Allocate multiple Zernio profiles when a package needs multiple accounts on the same platform, because Zernio allows one account per platform per profile.
 5. **Login/session MVP**: Google OAuth-only customer login plus admin-assisted account activation; keep RBAC simple at first. Do not build Email/Password or password reset flows.
 6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status.
 7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources.

@@ -304,10 +304,16 @@ Technical assumptions from current Zernio references:
 - RAS should keep `customerId ↔ zernioProfileId` in its own database.
 - Connected accounts are later handled as `Zernio accountId` records under the assigned profile.
 
-Open commercial/technical question for Zernio:
+Resolved Zernio quota/provisioning decision:
 
-- Whether account/profile limits, API keys, billing, and white-label tenant separation can be enforced per RAS customer by Zernio plan/API key, or must be enforced entirely by RAS.
-- Until confirmed, RAS should enforce package limits locally with `ProfileSlot.allowedPlatforms`, `maxConnectedAccounts`, billing status, queue limits, and UI gating.
+- Zernio profiles are tenant containers only. They do not have per-profile quota fields such as `slots`, `maxAccounts`, or `allowedConnections`.
+- Zernio account limits/billing are enforced at the billing-owner/team level, based on the total number of active social accounts across the team.
+- Customer package quota such as “5 connected accounts” is RAS-owned business logic, not Zernio configuration.
+- RAS must enforce package limits locally with `ProfileSlot.allowedPlatforms`, `maxConnectedAccounts`, billing status, queue limits, and UI gating.
+- On payment webhook success, RAS can create profile containers with `POST /v1/profiles` and persist the profile/API-key mapping before the customer connects any social account.
+- Idle profiles are acceptable: a profile/API key can remain pending in RAS DB until the customer later connects social accounts.
+- Connect flow: when the customer clicks `Connect account`, RAS calls Zernio `GET /v1/connect/{platform}?profileId=...` to obtain the OAuth `authUrl`.
+- Important platform rule: one account per platform per Zernio profile. If a customer needs multiple accounts on the same platform, RAS must allocate multiple Zernio profiles; if they need different platforms, one profile can be enough.
 
 ## 10. Acceptance criteria for Step 1
 
