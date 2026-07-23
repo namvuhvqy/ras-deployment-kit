@@ -1,8 +1,16 @@
 # RunAgentSys / RAS — MVP Product Scope & Roadmap
 
-Updated: 2026-07-22
+Updated: 2026-07-23
 Owner: Nam Vũ / RunAgentSys
 Status: LOCKED FOR MVP EXECUTION
+
+## 0. Current integration checkpoint — 2026-07-23
+
+- Public RAS API base URL is live at `https://ras-api.runagentsys.com`.
+- Smoke passed for public backend health and customer connection summary.
+- Vercel production env is set to `RAS_API_BASE=https://ras-api.runagentsys.com` and `RAS_CUSTOMER_ID=demo_khach_2`.
+- Production frontend `https://runagentsys.com/api/integrations/summary` now proxies the RAS backend and returns `source: "ras-backend"` with verified Facebook integration state for the demo customer.
+- Next MVP focus: customer portal/account-management screens backed by real RAS customer/session APIs.
 
 ## 1. MVP product scope
 

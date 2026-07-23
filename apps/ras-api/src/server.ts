@@ -72,20 +72,28 @@ async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ r
   if (!customer.zernioProfileId) return { refreshed: false, reason: 'missing_zernio_profile_id' };
 
   const nowIso = new Date().toISOString();
-  const accounts = await adapter.listAccounts(customer.zernioProfileId);
-  for (const account of accounts) {
-    await store.upsertAccountMapping({
-      ...account,
-      id: account.id || `${customer.id}_${account.platform}_${account.zernioAccountId}`,
-      customerId: customer.id,
-      zernioProfileId: customer.zernioProfileId,
-      profileId: customer.zernioProfileId,
-      status: account.status,
-      connectedAtIso: account.connectedAtIso ?? (account.status === 'connected' ? nowIso : undefined),
-      lastVerifiedAtIso: nowIso,
-    });
+  try {
+    const accounts = await adapter.listAccounts(customer.zernioProfileId);
+    for (const account of accounts) {
+      await store.upsertAccountMapping({
+        ...account,
+        id: account.id || `${customer.id}_${account.platform}_${account.zernioAccountId}`,
+        customerId: customer.id,
+        zernioProfileId: customer.zernioProfileId,
+        profileId: customer.zernioProfileId,
+        status: account.status,
+        connectedAtIso: account.connectedAtIso ?? (account.status === 'connected' ? nowIso : undefined),
+        lastVerifiedAtIso: nowIso,
+      });
+    }
+    return { refreshed: true, accountCount: accounts.length };
+  } catch (error) {
+    const status = typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined;
+    return {
+      refreshed: false,
+      reason: status ? `zernio_sync_failed_${status}` : 'zernio_sync_failed',
+    };
   }
-  return { refreshed: true, accountCount: accounts.length };
 }
 
 const server = createServer(async (req, res) => {
