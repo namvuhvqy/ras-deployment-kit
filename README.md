@@ -22,6 +22,7 @@ RunAgentSys
 The two services are sold separately, but they share the same backend records:
 
 - `Customer`
+- `UserIdentity` / Google OAuth subject mapping
 - `Order` / `Package`
 - `ProfileSlot`
 - `Integration`
@@ -43,7 +44,7 @@ Admin assigns package:
   ↓
 Admin assigns prepared Zernio/API profile slot and/or VPS
   ↓
-Customer logs in to runagentsys.com
+Customer logs in to runagentsys.com with Google OAuth
   ↓
 Customer connects allowed platforms
   ↓
@@ -82,6 +83,7 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 
 - Keep modules small and business-flow-first.
 - Prepared profile/API slots are acceptable for MVP: create a few, sell/assign them, then create more when needed.
+- Login is Google OAuth-only: `/login` has exactly one `Continue with Google` CTA. Do not build Email/Password, Forgot Password, password reset, or local-password fallback flows.
 - Do not fake `Connected` state in UI. Only show connected when backend has verified mapping/status.
 - Do not use undocumented Zernio fields.
 - Keep Zernio IDs as external references, not RAS primary IDs.

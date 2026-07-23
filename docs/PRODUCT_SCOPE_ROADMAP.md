@@ -19,7 +19,8 @@ Status: LOCKED FOR MVP EXECUTION
 - [x] Step 1 docs: Add-ons schema documented with inactive-safe `active: false` behavior for modules such as Zernio and Social Automation.
 - [x] Step 1 docs: Backward-compatibility rule locked — keep `/customer-portal` demo path for smoke testing until protected `/dashboard` passes end-to-end.
 - [ ] Step 1 implementation: add TypeScript schema/types, store defaults, and contract tests.
-- [ ] Step 2: homepage Login link and `/login` UI connected to `/auth/login`.
+- [x] Step 2 scope update: Login is Google OAuth-only. `/login` must show exactly one `Continue with Google` CTA; no Email, Password, Forgot Password, password reset, or local-password fallback now or later.
+- [ ] Step 2 implementation: homepage Login link and `/login` UI connected to `/auth/google` + `/auth/google/callback`, then redirect to `/dashboard` after session creation.
 - [ ] Step 3: protected `/dashboard` UI rendering Base VPS → 2 Agent RAS → Add-ons widget/banner.
 
 ## 1. MVP product scope
@@ -46,7 +47,7 @@ Both service lines share:
 ## 2. MVP sales/onboarding flow
 
 ```text
-Customer registers on web OR sale creates lead
+Customer signs in with Google OR sale creates lead
   ↓
 Sale/Admin creates customer account
   ↓
@@ -54,7 +55,7 @@ Admin assigns package
   ↓
 Admin assigns prepared profile slot and/or VPS
   ↓
-Customer logs in to runagentsys.com
+Customer logs in to runagentsys.com with Google OAuth
   ↓
 Customer connects platforms allowed by package
   ↓
@@ -69,7 +70,7 @@ Dashboard shows real status and next action
 2. **Customer/order/package minimal API**: create/list/update customer and package status, including service line (`zernio_webapp`, `ras_vps_2_agent`, `hybrid`).
 3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled.
 4. **Assign profile to customer**: admin/sale action, audited.
-5. **Login/session MVP**: customer login plus admin-assisted account activation; keep RBAC simple at first.
+5. **Login/session MVP**: Google OAuth-only customer login plus admin-assisted account activation; keep RBAC simple at first. Do not build Email/Password or password reset flows.
 6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status.
 7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources.
 8. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms.

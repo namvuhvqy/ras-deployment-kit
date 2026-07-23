@@ -22,7 +22,7 @@ The existing demo route must remain untouched during Step 1 and early Step 2.
 |---|---|---|
 | `/customer-portal` | Keep | Public/demo smoke path for `demo_khach_2` while protected dashboard is built. |
 | `/dashboard` | New protected route | Authenticated customer dashboard driven by session token. |
-| `/auth/login` | Existing/future login API | Issues a session token/cookie for customer dashboard access. |
+| `/auth/google` + `/auth/google/callback` | New Google OAuth-only login | Creates/loads the user and customer from the Google profile, then issues a session token/cookie and redirects to `/dashboard`. |
 
 The demo route can only be hidden or cleaned up after `/dashboard` passes production smoke end-to-end.
 
@@ -228,12 +228,88 @@ Missing optional fields must render as safe empty/unknown states, not crash.
    - invalid token returns 401,
    - valid token returns only session customer data,
    - inactive add-ons return `active: false`.
-4. Build `/login` UI.
+4. Build Google OAuth-only `/login` UI: exactly one CTA, `Continue with Google`; no email field, no password field, no forgot-password flow.
 5. Build `/dashboard` UI against the protected contract.
 6. Smoke `/dashboard` production.
 7. Only then hide or clean up the old demo route.
 
-## 8. Acceptance criteria for Step 1
+## 8. Login scope — Google OAuth only
+
+RunAgentSys login is intentionally **not** an email/password product flow.
+
+Approved scope:
+
+- `/login` renders exactly one primary action: `Continue with Google`.
+- Do not build Email, Password, Forgot Password, password reset, or local-password fallback flows in a later phase.
+- User clicks Google login.
+- Backend validates Google OAuth profile.
+- Backend creates or loads a local `User` by Google subject/email.
+- Backend creates or loads the customer mapping for that user.
+- Backend issues the RunAgentSys session cookie/token.
+- Backend redirects to `/dashboard`.
+
+Required local mapping fields:
+
+```ts
+export interface RasUserIdentity {
+  id: string;
+  provider: 'google';
+  providerSubject: string; // Google sub
+  email: string;
+  emailVerified: boolean;
+  displayName?: string;
+  avatarUrl?: string;
+  customerId: string;
+  status: 'active' | 'disabled';
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+```
+
+## 9. Zernio add-on provisioning model — Profile/API slot pool first
+
+Zernio remains an internal/partner social-operations add-on behind RunAgentSys. Customers should not need to understand Zernio directly.
+
+Approved MVP model:
+
+- Maintain a `ProfileSlot` pool in RAS.
+- Each slot maps one RAS customer to one Zernio `profileId`.
+- RAS stores only external Zernio IDs and slot status; OAuth/platform tokens stay inside Zernio.
+- For MVP, prepared slots are acceptable: create a small number of Zernio profiles ahead of time, mark them `available`, then assign to customers after payment/order activation.
+- Do not create hundreds of unused slots up front.
+- Automatic profile creation after payment can be added later through the same slot API: if no slot is available, create one via `POST /v1/profiles`, then assign it.
+
+```ts
+export type RasProfileSlotStatus = 'available' | 'reserved' | 'assigned' | 'disabled';
+
+export interface RasProfileSlot {
+  id: string;
+  provider: 'zernio';
+  zernioProfileId: string;
+  status: RasProfileSlotStatus;
+  assignedCustomerId?: string;
+  planKey?: RasAddonKey;
+  allowedPlatforms?: string[];
+  maxConnectedAccounts?: number;
+  notes?: string;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+```
+
+Technical assumptions from current Zernio references:
+
+- `POST /v1/profiles` supports profile creation with documented fields such as `name`, `description`, `color`, and `isDefault`.
+- RAS must not depend on undocumented Zernio profile fields like `externalId`, `metadata`, or `email`.
+- RAS should keep `customerId ↔ zernioProfileId` in its own database.
+- Connected accounts are later handled as `Zernio accountId` records under the assigned profile.
+
+Open commercial/technical question for Zernio:
+
+- Whether account/profile limits, API keys, billing, and white-label tenant separation can be enforced per RAS customer by Zernio plan/API key, or must be enforced entirely by RAS.
+- Until confirmed, RAS should enforce package limits locally with `ProfileSlot.allowedPlatforms`, `maxConnectedAccounts`, billing status, queue limits, and UI gating.
+
+## 10. Acceptance criteria for Step 1
 
 - RFC/API contract is documented.
 - README links to the protected dashboard contract.
