@@ -48,16 +48,18 @@ Dashboard shows real status and next action
 ## 3. Priority roadmap
 
 1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state.
-2. **Customer/order/package minimal API**: create/list/update customer and package status.
+2. **Customer/order/package minimal API**: create/list/update customer and package status, including service line (`zernio_webapp`, `ras_vps_2_agent`, `hybrid`).
 3. **ProfileSlot pool API**: create a few prepared slots, mark available/assigned/disabled.
 4. **Assign profile to customer**: admin/sale action, audited.
-5. **Customer dashboard API**: `me`, package, assigned profile, integration summary.
-6. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms.
-7. **VPS assignment model** for the 2-agent service: IP/host label/status/notes, no auto provisioning yet.
-8. **Agent status model**: RAS1/RAS2 heartbeat/log summary.
-9. **Frontend dashboard** calls real APIs; no static/demo customer data in production path. Current split-repo rule: frontend may return safe empty state when backend env is missing, but only backend-verified accounts can render as connected.
-10. **End-to-end smoke test**: sale creates account → assigns slot/VPS → customer sees dashboard → connect action returns verified status.
-11. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
+5. **Login/session MVP**: customer login plus admin-assisted account activation; keep RBAC simple at first.
+6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status.
+7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources.
+8. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms.
+9. **VPS assignment model** for the 2-agent service: IP/host label/status/notes, no auto provisioning yet.
+10. **Agent status model**: RAS1/RAS2 heartbeat/log summary.
+11. **Frontend dashboard** calls real APIs; no static/demo customer data in production path. Current split-repo rule: frontend may return safe empty state when backend env is missing, but only backend-verified accounts can render as connected.
+12. **End-to-end smoke test**: sale creates account → assigns package/slot/VPS → customer logs in → sees dashboard → connect action returns verified status.
+13. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
 
 ## 4. Non-goals for MVP
 

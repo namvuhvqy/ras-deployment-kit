@@ -126,7 +126,22 @@ RAS_API_BASE=http://localhost:8080
 RAS_CUSTOMER_ID=demo
 ```
 
+Production status as of 2026-07-23: Vercel for `runagentsys.com` does **not** yet have `RAS_API_BASE` / `RAS_CUSTOMER_ID`, so `/api/integrations/summary` correctly returns `source: "safe-empty"` instead of pretending a connection exists. Do not set `RAS_API_BASE=localhost` on Vercel; only set it after the RAS backend has a reachable HTTPS URL.
+
 `ZERNIO_API_KEY` remains a fallback/integration credential, not the primary frontend source of truth. If neither `RAS_API_BASE` nor `ZERNIO_API_KEY` is configured, frontend API routes must return safe empty state instead of fake `Connected`.
+
+## Next customer portal scope
+
+After the integration-summary path is deployed behind a real backend URL, the next product slice is **customer portal MVP**:
+
+1. Login/session screen for customers and admin-assisted onboarding.
+2. Account/service management page backed by RAS APIs, not static cards.
+3. Package/service status: `zernio_webapp`, `ras_vps_2_agent`, or `hybrid`.
+4. Renewal/expiry fields: start date, expiry date, renewal status, payment/manual follow-up note.
+5. Assigned resources: Zernio profile/account slot, VPS assignment, RAS1/RAS2 agent status.
+6. Audit trail: who assigned/changed customer package, profile slot, VPS, or renewal status.
+
+Current frontend `/account-management` is a useful visual baseline only; it is not yet a real authenticated customer/admin management screen.
 
 ## Topic lanes
 
