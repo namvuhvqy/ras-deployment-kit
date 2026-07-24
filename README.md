@@ -111,6 +111,26 @@ npm run check
 
 Expected result: TypeScript build passes and all Node tests pass.
 
+## Google OAuth 2.0 login
+
+RAS login is Google OAuth-only. The backend exposes these auth routes before the final 404 fallback:
+
+| Route | Purpose |
+|---|---|
+| `GET /auth/google` | Builds the Google authorization URL using scope `openid email profile`. |
+| `POST /auth/google/callback` | Exchanges Google code, reads Google profile, upserts user/customer, creates a session token, and returns dashboard redirect metadata. |
+| `GET /dashboard` | Requires `Authorization: Bearer <token>` and returns tenant dashboard data. |
+
+Required backend env keys are documented in `.env.example`:
+
+```bash
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+GOOGLE_OAUTH_CALLBACK_URL=http://localhost:8080/auth/google/callback
+```
+
+Do not commit real Client IDs/Secrets. Frontend `/login` must show only one CTA: `Continue with Google`.
+
 ## Frontend ↔ backend API contract
 
 `runagentsys.com` is the customer-facing webapp. It must call the RunAgentSys backend for customer/package/profile/VPS/integration state; the webapp must not treat a local click or demo response as a verified connection.

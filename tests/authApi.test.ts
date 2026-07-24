@@ -249,3 +249,96 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('Google OAuth callback upserts user/customer and returns a session token', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-google-oauth-'));
+  const dbPath = join(dir, 'ras-store.json');
+  const port = 19_080 + Math.floor(Math.random() * 1000);
+  const state = {
+    schemaVersion: 1,
+    migratedAtIso: now,
+    users: [],
+    sessions: [],
+    customers: [],
+    sandboxes: [],
+    agents: [],
+    servicePackages: [],
+    connectedAccounts: [],
+    jobs: [],
+    webhookEvents: [],
+    auditLogs: [],
+  };
+  await writeFile(dbPath, `${JSON.stringify(state, null, 2)}
+`);
+
+  const mockGoogle = `
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      const value = String(url);
+      if (value === 'https://oauth2.googleapis.com/token') {
+        return new Response(JSON.stringify({ access_token: 'google_access_test' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (value === 'https://openidconnect.googleapis.com/v1/userinfo') {
+        return new Response(JSON.stringify({ email: 'owner@example.com', email_verified: true, name: 'Owner Google' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return originalFetch(url, init);
+    };
+    await import('./dist/apps/ras-api/src/server.js');
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', mockGoogle], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      RAS_DB_PATH: dbPath,
+      GOOGLE_OAUTH_CLIENT_ID: 'client_test',
+      GOOGLE_OAUTH_CLIENT_SECRET: 'secret_test',
+      GOOGLE_OAUTH_CALLBACK_URL: 'http://127.0.0.1/callback',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('server did not start')), 5000);
+      child.stdout.on('data', (chunk) => {
+        if (String(chunk).includes('ras-api listening')) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on('error', reject);
+    });
+
+    const authStart = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
+    assert.equal(authStart.status, 200);
+    const authStartPayload = (await authStart.json()) as { authUrl: string };
+    const authUrl = new URL(authStartPayload.authUrl);
+    assert.equal(authUrl.hostname, 'accounts.google.com');
+    assert.equal(authUrl.searchParams.get('scope'), 'openid email profile');
+    assert.equal(authUrl.searchParams.get('client_id'), 'client_test');
+
+    const callback = await fetch(`http://127.0.0.1:${port}/auth/google/callback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'google_code_test', state: authUrl.searchParams.get('state') }),
+    });
+    assert.equal(callback.status, 200);
+    const callbackPayload = (await callback.json()) as { token: string; customerId: string; redirectTo: string };
+    assert.ok(callbackPayload.token.startsWith('sess_'));
+    assert.equal(callbackPayload.redirectTo, '/dashboard');
+    assert.ok(callbackPayload.customerId.startsWith('cust_owner_example_com'));
+
+    const dashboard = await fetch(`http://127.0.0.1:${port}/dashboard`, {
+      headers: { authorization: `Bearer ${callbackPayload.token}` },
+    });
+    assert.equal(dashboard.status, 200);
+    const dashboardPayload = (await dashboard.json()) as { dashboard: { customer: { id: string; email: string } } };
+    assert.equal(dashboardPayload.dashboard.customer.id, callbackPayload.customerId);
+    assert.equal(dashboardPayload.dashboard.customer.email, 'owner@example.com');
+  } finally {
+    child.kill();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

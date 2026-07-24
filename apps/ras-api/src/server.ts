@@ -62,6 +62,66 @@ function numberField(body: Record<string, unknown>, field: string): number | und
   return undefined;
 }
 
+const GOOGLE_OAUTH_SCOPE = 'openid email profile';
+const googleOAuthStates = new Map<string, { redirectTo: string; createdAtMs: number }>();
+
+function publicBaseUrl(req: IncomingMessage): string {
+  const proto = firstHeader(req, 'x-forwarded-proto') ?? 'http';
+  const host = firstHeader(req, 'x-forwarded-host') ?? firstHeader(req, 'host') ?? `127.0.0.1:${port}`;
+  return `${proto}://${host}`;
+}
+
+function googleCallbackUrl(req: IncomingMessage): string {
+  return process.env.GOOGLE_OAUTH_CALLBACK_URL ?? `${publicBaseUrl(req)}/auth/google/callback`;
+}
+
+function createOAuthState(redirectTo: string): string {
+  const state = `oauth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  googleOAuthStates.set(state, { redirectTo, createdAtMs: Date.now() });
+  return state;
+}
+
+function consumeOAuthState(state: string | undefined): { redirectTo: string } | undefined {
+  if (!state) return undefined;
+  const stored = googleOAuthStates.get(state);
+  if (!stored) return undefined;
+  googleOAuthStates.delete(state);
+  if (Date.now() - stored.createdAtMs > 10 * 60 * 1000) return undefined;
+  return { redirectTo: stored.redirectTo };
+}
+
+async function exchangeGoogleCode(req: IncomingMessage, code: string): Promise<string> {
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error('google_oauth_not_configured');
+  const body = new URLSearchParams({
+    code,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: googleCallbackUrl(req),
+    grant_type: 'authorization_code',
+  });
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!response.ok) throw new Error(`google_token_exchange_failed_${response.status}`);
+  const payload = (await response.json()) as { access_token?: string };
+  if (!payload.access_token) throw new Error('google_access_token_missing');
+  return payload.access_token;
+}
+
+async function fetchGoogleProfile(accessToken: string): Promise<{ email: string; displayName?: string }> {
+  const response = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) throw new Error(`google_userinfo_failed_${response.status}`);
+  const profile = (await response.json()) as { email?: string; email_verified?: boolean; name?: string };
+  if (!profile.email || profile.email_verified === false) throw new Error('google_email_unverified');
+  return { email: profile.email, displayName: profile.name };
+}
+
 function objectField(body: Record<string, unknown>, field: string): Record<string, string> | undefined {
   const value = body[field];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -212,6 +272,65 @@ const server = createServer(async (req, res) => {
       return;
     }
     res.end(JSON.stringify({ ok: true, token: session.token, expiresAtIso: session.expiresAtIso }));
+    return;
+  }
+
+  // Keep Google OAuth routes above all customer/dashboard routes and the final 404 fallback.
+  if (req.method === 'GET' && req.url?.startsWith('/auth/google')) {
+    const url = new URL(req.url, publicBaseUrl(req));
+    if (url.pathname !== '/auth/google') {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+      return;
+    }
+    const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+    if (!clientId) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'google_oauth_not_configured' }));
+      return;
+    }
+    const redirectTo = url.searchParams.get('redirectTo') || '/dashboard';
+    const state = createOAuthState(redirectTo);
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', clientId);
+    authUrl.searchParams.set('redirect_uri', googleCallbackUrl(req));
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', GOOGLE_OAUTH_SCOPE);
+    authUrl.searchParams.set('state', state);
+    authUrl.searchParams.set('access_type', 'offline');
+    authUrl.searchParams.set('prompt', 'select_account');
+    res.end(JSON.stringify({ ok: true, authUrl: authUrl.toString() }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/auth/google/callback') {
+    const body = await readJsonBody(req);
+    const code = stringField(body, 'code');
+    const state = consumeOAuthState(stringField(body, 'state'));
+    if (!code || !state) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_google_oauth_callback' }));
+      return;
+    }
+    try {
+      const accessToken = await exchangeGoogleCode(req, code);
+      const profile = await fetchGoogleProfile(accessToken);
+      const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
+      const dashboard = await store.getDashboardForSession(session.token);
+      if (!dashboard) throw new Error('google_session_dashboard_missing');
+      res.end(
+        JSON.stringify({
+          ok: true,
+          token: session.token,
+          expiresAtIso: session.expiresAtIso,
+          customerId: dashboard.customer.id,
+          redirectTo: state.redirectTo,
+        }),
+      );
+    } catch (error) {
+      res.statusCode = 502;
+      res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
+    }
     return;
   }
 

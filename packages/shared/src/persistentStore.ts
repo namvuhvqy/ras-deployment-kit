@@ -216,6 +216,57 @@ export class JsonRasStore {
     return session;
   }
 
+
+  async upsertGoogleUser(input: { email: string; displayName?: string; nowIso?: string }): Promise<RasUser> {
+    const state = await this.load();
+    const now = input.nowIso ?? new Date().toISOString();
+    const email = input.email.toLowerCase();
+    const existing = state.users.find((row) => row.email.toLowerCase() === email);
+    if (existing) {
+      const updated: RasUser = {
+        ...existing,
+        displayName: input.displayName ?? existing.displayName,
+        status: 'active',
+        updatedAtIso: now,
+      };
+      await this.upsertUser(updated);
+      return updated;
+    }
+
+    const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
+    const entropy = Math.random().toString(36).slice(2, 8);
+    const customerId = `cust_${slug}_${entropy}`;
+    const user: RasUser = {
+      id: `user_${slug}_${entropy}`,
+      email,
+      displayName: input.displayName,
+      role: 'owner',
+      customerId,
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    };
+    await this.upsertCustomer({
+      id: customerId,
+      name: input.displayName ?? email,
+      email,
+      status: 'pending',
+      billingStatus: 'trial',
+      packageStatus: 'pending',
+      maxConnectedAccounts: 0,
+      activeConnectedAccounts: 0,
+      addOnStatus: {},
+      createdAtIso: now,
+      updatedAtIso: now,
+    });
+    return this.upsertUser(user);
+  }
+
+  async createSessionForGoogleUser(input: { email: string; displayName?: string; nowIso?: string; ttlMs?: number }): Promise<RasSession> {
+    const user = await this.upsertGoogleUser(input);
+    return this.createSession({ userId: user.id, nowIso: input.nowIso, ttlMs: input.ttlMs });
+  }
+
   async login(input: { email: string; password: string; nowIso?: string }): Promise<RasSession | undefined> {
     const state = await this.load();
     const email = input.email.toLowerCase();
