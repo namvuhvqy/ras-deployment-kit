@@ -124,6 +124,142 @@ test('mapping endpoints create tenant/customer/profile/account links without roo
   });
 });
 
+test('billing entitlement provisioning stores dynamic quota and creates the first Zernio profile lazily', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_entitled',
+      name: 'Entitled Shop',
+      email: 'owner@entitled.test',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/billing/entitlements/provision`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        customerId: 'cust_entitled',
+        maxConnectedAccounts: 3,
+        packageStatus: 'active',
+        addOnStatus: { zernio: 'active' },
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      entitlement: {
+        customerId: string;
+        maxConnectedAccounts: number;
+        activeConnectedAccounts: number;
+        packageStatus: string;
+        addOnStatus: Record<string, string>;
+        zernioProfileId: string;
+        zernioProfileIds: string[];
+      };
+    };
+
+    assert.equal(payload.entitlement.customerId, 'cust_entitled');
+    assert.equal(payload.entitlement.maxConnectedAccounts, 3);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 0);
+    assert.equal(payload.entitlement.packageStatus, 'active');
+    assert.equal(payload.entitlement.addOnStatus.zernio, 'active');
+    assert.equal(payload.entitlement.zernioProfileId, 'zernio_cust_entitled');
+    assert.deepEqual(payload.entitlement.zernioProfileIds, ['zernio_cust_entitled']);
+  });
+});
+
+test('connect endpoint enforces RAS quota before returning Zernio OAuth URL', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_quota',
+      name: 'Quota Shop',
+      email: 'owner@quota.test',
+      zernioProfileId: 'profile_quota_1',
+      zernioProfileIds: ['profile_quota_1'],
+      maxConnectedAccounts: 1,
+      packageStatus: 'active',
+      addOnStatus: { zernio: 'active' },
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.connectedAccounts = [
+    {
+      id: 'acct_existing',
+      customerId: 'cust_quota',
+      platform: 'facebook',
+      zernioProfileId: 'profile_quota_1',
+      zernioAccountId: 'social_existing',
+      status: 'connected',
+      connectedAtIso: now,
+      lastVerifiedAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/customers/cust_quota/connect/instagram`);
+    assert.equal(response.status, 409);
+    const payload = (await response.json()) as { error: string; entitlement: { maxConnectedAccounts: number; activeConnectedAccounts: number } };
+    assert.equal(payload.error, 'connection_quota_exceeded');
+    assert.equal(payload.entitlement.maxConnectedAccounts, 1);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 1);
+  });
+});
+
+test('connect endpoint creates another Zernio profile for a second account on the same platform', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_same_platform',
+      name: 'Same Platform Shop',
+      email: 'owner@same.test',
+      zernioProfileId: 'profile_same_1',
+      zernioProfileIds: ['profile_same_1'],
+      maxConnectedAccounts: 2,
+      packageStatus: 'active',
+      addOnStatus: { zernio: 'active' },
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.connectedAccounts = [
+    {
+      id: 'acct_fb_1',
+      customerId: 'cust_same_platform',
+      platform: 'facebook',
+      zernioProfileId: 'profile_same_1',
+      zernioAccountId: 'social_fb_1',
+      status: 'connected',
+      connectedAtIso: now,
+      lastVerifiedAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`);
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      authUrl: string;
+      profileId: string;
+      entitlement: { zernioProfileIds: string[]; maxConnectedAccounts: number; activeConnectedAccounts: number };
+    };
+
+    assert.equal(payload.profileId, 'zernio_cust_same_platform');
+    assert.match(payload.authUrl, /\/connect\/facebook\?/);
+    assert.match(payload.authUrl, /profileId=zernio_cust_same_platform/);
+    assert.deepEqual(payload.entitlement.zernioProfileIds, ['profile_same_1', 'zernio_cust_same_platform']);
+    assert.equal(payload.entitlement.maxConnectedAccounts, 2);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 1);
+  });
+});
+
 test('account mapping rejects unknown customer and mismatched zernio profile', async () => {
   const state = emptyState();
   state.customers = [

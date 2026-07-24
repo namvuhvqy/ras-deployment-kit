@@ -35,6 +35,11 @@ export interface RasCustomer {
   name: string;
   email?: string;
   zernioProfileId?: string;
+  zernioProfileIds?: string[];
+  maxConnectedAccounts?: number;
+  activeConnectedAccounts?: number;
+  packageStatus?: 'pending' | 'active' | 'past_due' | 'cancelled';
+  addOnStatus?: Record<string, 'pending' | 'active' | 'inactive' | 'cancelled'>;
   status?: 'pending' | 'active' | 'disabled' | 'error';
   sandboxId?: string;
   servicePackageId?: string;

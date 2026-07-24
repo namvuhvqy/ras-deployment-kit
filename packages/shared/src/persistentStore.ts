@@ -94,6 +94,11 @@ export interface CustomerMapping {
   tenantId?: string;
   customerId: string;
   zernioProfileId?: string;
+  zernioProfileIds: string[];
+  maxConnectedAccounts: number;
+  activeConnectedAccounts: number;
+  packageStatus: string;
+  addOnStatus: Record<string, string>;
   accounts: AccountMapping[];
 }
 
@@ -253,12 +258,70 @@ export class JsonRasStore {
     const state = await this.load();
     const customer = state.customers.find((row) => row.id === customerId);
     if (!customer) return undefined;
+    const accounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
     return {
       tenantId: customer.tenantId,
       customerId: customer.id,
       zernioProfileId: customer.zernioProfileId,
-      accounts: state.connectedAccounts.filter((row) => row.customerId === customer.id).map(toAccountMapping),
+      zernioProfileIds: customer.zernioProfileIds ?? (customer.zernioProfileId ? [customer.zernioProfileId] : []),
+      maxConnectedAccounts: customer.maxConnectedAccounts ?? 0,
+      activeConnectedAccounts: accounts.filter((row) => row.status === 'connected').length,
+      packageStatus: customer.packageStatus ?? customer.billingStatus ?? 'trial',
+      addOnStatus: customer.addOnStatus ?? {},
+      accounts: accounts.map(toAccountMapping),
     };
+  }
+
+  async upsertCustomerEntitlement(input: {
+    customerId: string;
+    maxConnectedAccounts: number;
+    packageStatus?: RasCustomer['packageStatus'];
+    addOnStatus?: RasCustomer['addOnStatus'];
+    zernioProfileId?: string;
+    zernioProfileIds?: string[];
+  }): Promise<CustomerMapping> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === input.customerId);
+    if (!customer) throw new Error(`Customer not found: ${input.customerId}`);
+    const profileIds = Array.from(
+      new Set([
+        ...(customer.zernioProfileIds ?? []),
+        ...(customer.zernioProfileId ? [customer.zernioProfileId] : []),
+        ...(input.zernioProfileIds ?? []),
+        ...(input.zernioProfileId ? [input.zernioProfileId] : []),
+      ]),
+    );
+    await this.upsertCustomer({
+      ...customer,
+      zernioProfileId: input.zernioProfileId ?? customer.zernioProfileId ?? profileIds[0],
+      zernioProfileIds: profileIds,
+      maxConnectedAccounts: input.maxConnectedAccounts,
+      activeConnectedAccounts: state.connectedAccounts.filter(
+        (row) => row.customerId === customer.id && row.status === 'connected',
+      ).length,
+      packageStatus: input.packageStatus ?? customer.packageStatus ?? 'active',
+      addOnStatus: input.addOnStatus ?? customer.addOnStatus,
+      updatedAtIso: new Date().toISOString(),
+    });
+    const mapping = await this.getCustomerMapping(input.customerId);
+    if (!mapping) throw new Error(`Customer not found: ${input.customerId}`);
+    return mapping;
+  }
+
+  async addCustomerZernioProfile(customerId: string, profileId: string): Promise<CustomerMapping> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) throw new Error(`Customer not found: ${customerId}`);
+    const profileIds = Array.from(new Set([...(customer.zernioProfileIds ?? []), customer.zernioProfileId, profileId].filter(Boolean) as string[]));
+    await this.upsertCustomer({
+      ...customer,
+      zernioProfileId: customer.zernioProfileId ?? profileId,
+      zernioProfileIds: profileIds,
+      updatedAtIso: new Date().toISOString(),
+    });
+    const mapping = await this.getCustomerMapping(customerId);
+    if (!mapping) throw new Error(`Customer not found: ${customerId}`);
+    return mapping;
   }
 
   async upsertSandbox(sandbox: RasSandboxEnvironment): Promise<RasSandboxEnvironment> {
@@ -303,7 +366,8 @@ export class JsonRasStore {
     const state = await this.load();
     const customer = state.customers.find((row) => row.id === account.customerId);
     if (!customer) throw new Error(`Customer not found: ${account.customerId}`);
-    if (customer.zernioProfileId && account.zernioProfileId && customer.zernioProfileId !== account.zernioProfileId) {
+    const allowedProfileIds = new Set([...(customer.zernioProfileIds ?? []), customer.zernioProfileId].filter(Boolean));
+    if (allowedProfileIds.size > 0 && account.zernioProfileId && !allowedProfileIds.has(account.zernioProfileId)) {
       throw new Error(`Zernio profile mismatch: ${account.zernioProfileId}`);
     }
     const saved = await this.upsertConnectedAccount(account);

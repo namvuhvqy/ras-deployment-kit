@@ -11,7 +11,7 @@ RunAgentSys
   ├─ Service A: Webapp / Zernio Integration
   │    ├─ Customer account on runagentsys.com
   │    ├─ Customer connects supported platforms from the dashboard
-  │    └─ Backend maps customer to prepared Zernio/API profile slots
+  │    └─ Backend enforces purchased connection entitlement (`N`) and maps customer to one or more Zernio/API profiles as needed
   │
   └─ Service B: Managed RAS VPS 2-Agent Setup
        ├─ Team prepares/assigns a VPS or sandbox
@@ -24,7 +24,7 @@ The two services are sold separately, but they share the same backend records:
 - `Customer`
 - `UserIdentity` / Google OAuth subject mapping
 - `Order` / `Package`
-- `ProfileSlot`
+- Zernio profile mapping + RAS-owned connection entitlement/quota
 - `Integration`
 - `VpsAssignment`
 - `AgentStatus`
@@ -42,11 +42,11 @@ Admin assigns package:
   - ras_vps_2_agent
   - hybrid
   ↓
-Admin assigns prepared Zernio/API profile slot and/or VPS
+RAS provisions entitlement and creates/assigns the first Zernio/API profile and/or VPS
   ↓
 Customer logs in to runagentsys.com with Google OAuth
   ↓
-Customer connects allowed platforms
+Customers connect allowed platforms until their RAS-owned purchased quota is reached
   ↓
 Backend/Zernio verifies real status
   ↓
@@ -59,7 +59,7 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 
 | Service | Customer promise | MVP delivery mode |
 |---|---|---|
-| **RunAgentSys Webapp / Zernio Integration** | Customer gets a web account and connects social/platform channels through `runagentsys.com` | Prepared profile/API slots assigned by admin |
+| **RunAgentSys Webapp / Zernio Integration** | Customer gets a web account and connects social/platform channels through `runagentsys.com` | RAS stores dynamic purchased connection quota, creates/assigns Zernio profiles, and enforces limits before OAuth connect |
 | **Managed RAS VPS 2-Agent Setup** | Customer gets a managed automation VPS/sandbox with RAS1 + RAS2 configured for their business | Manual/admin-assisted VPS assignment first |
 | **Hybrid** | Customer gets both the webapp integration layer and a dedicated RAS VPS setup | Shared customer/account/backend record |
 
@@ -82,7 +82,9 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 ## Current implementation guardrails
 
 - Keep modules small and business-flow-first.
-- Prepared profile/API slots are acceptable for MVP: create a few, sell/assign them, then create more when needed.
+- RAS is the source of truth for purchased connection quota. Do not try to set “5 slots” or any `N` on a Zernio profile; Zernio profiles are containers for connected accounts only.
+- Prepared profile/API slots are acceptable for MVP, but payment/webhook provisioning should create or assign profiles lazily when the customer actually has entitlement.
+- If a customer connects multiple accounts on the same platform, RAS creates/assigns another Zernio profile because Zernio supports one account per platform per profile.
 - Login is Google OAuth-only: `/login` has exactly one `Continue with Google` CTA. Do not build Email/Password, Forgot Password, password reset, or local-password fallback flows.
 - Do not fake `Connected` state in UI. Only show connected when backend has verified mapping/status.
 - Do not use undocumented Zernio fields.
@@ -120,7 +122,9 @@ Current MVP boundary:
 | `GET /api/integrations/summary` | `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` | Render verified social/platform connection state. |
 | customer dashboard | `GET /dashboard` or customer-scoped dashboard endpoint | Render package, assigned profile slot, VPS, agent, and onboarding state. |
 | account/profile mapping | `GET /mappings/customers/{customerId}` and `GET /customers/{customerId}/mapping` | Read RAS customer ↔ Zernio/profile/VPS mapping. |
-| connect action | backend/Zernio adapter through assigned profile slot | Open OAuth/connect only for the customer/profile slot that RAS assigned. |
+| `POST /billing/entitlements/provision` | RAS customer store + Zernio profile creation | Persist dynamic purchased quota `maxConnectedAccounts=N`, package/add-on status, and create the first profile lazily when needed. |
+| `GET /customers/{customerId}/connect/{platform}` | RAS quota enforcement + Zernio connect URL | Block if package/add-on inactive or active connections reached `N`; auto-create another profile for same-platform second account. |
+| connect action | backend/Zernio adapter through assigned profile slot | Open OAuth/connect only after RAS verifies entitlement and picks the correct customer-owned profile. |
 
 Frontend env expected by the current split-repo setup:
 
@@ -129,7 +133,7 @@ RAS_API_BASE=http://localhost:8080
 RAS_CUSTOMER_ID=demo
 ```
 
-Production status as of 2026-07-23: Vercel for `runagentsys.com` does **not** yet have `RAS_API_BASE` / `RAS_CUSTOMER_ID`, so `/api/integrations/summary` correctly returns `source: "safe-empty"` instead of pretending a connection exists. Do not set `RAS_API_BASE=localhost` on Vercel; only set it after the RAS backend has a reachable HTTPS URL.
+Production status as of 2026-07-23: the public RAS backend target is `https://ras-api.runagentsys.com`. Do not use `api.runagentsys.com` for this project. Do not set `RAS_API_BASE=localhost` on Vercel.
 
 `ZERNIO_API_KEY` remains a fallback/integration credential, not the primary frontend source of truth. If neither `RAS_API_BASE` nor `ZERNIO_API_KEY` is configured, frontend API routes must return safe empty state instead of fake `Connected`.
 

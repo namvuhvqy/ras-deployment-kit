@@ -52,6 +52,22 @@ function stringField(body: Record<string, unknown>, field: string): string | und
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function numberField(body: Record<string, unknown>, field: string): number | undefined {
+  const value = body[field];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function objectField(body: Record<string, unknown>, field: string): Record<string, string> | undefined {
+  const value = body[field];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, status]) => [key, String(status)]));
+}
+
 function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' {
   return (
     value === 'facebook' ||
@@ -207,6 +223,93 @@ const server = createServer(async (req, res) => {
       return;
     }
     res.end(JSON.stringify({ ok: true, dashboard }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
+    const body = await readJsonBody(req);
+    const customerId = stringField(body, 'customerId');
+    const maxConnectedAccounts = numberField(body, 'maxConnectedAccounts');
+    if (!customerId || maxConnectedAccounts === undefined || maxConnectedAccounts < 0) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'missing_entitlement_fields' }));
+      return;
+    }
+
+    const state = await store.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+
+    let zernioProfileId = customer.zernioProfileId;
+    if (!zernioProfileId && maxConnectedAccounts > 0) {
+      const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
+      zernioProfileId = profile.zernioProfileId;
+    }
+
+    const mapping = await store.upsertCustomerEntitlement({
+      customerId,
+      maxConnectedAccounts,
+      packageStatus: (stringField(body, 'packageStatus') as 'pending' | 'active' | 'past_due' | 'cancelled' | undefined) ?? 'active',
+      addOnStatus: objectField(body, 'addOnStatus') as Record<string, 'pending' | 'active' | 'inactive' | 'cancelled'> | undefined,
+      zernioProfileId,
+    });
+    res.statusCode = 200;
+    res.end(JSON.stringify({ ok: true, entitlement: mapping }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.includes('/connect/')) {
+    const url = new URL(req.url, 'http://localhost');
+    const parts = url.pathname.split('/');
+    const customerId = decodeURIComponent(parts[2] ?? '');
+    const platform = parts[4];
+    if (!customerId || !isSocialPlatform(platform)) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_connect_request' }));
+      return;
+    }
+
+    await refreshZernioAccountsForCustomer(customerId);
+    const mapping = await store.getCustomerMapping(customerId);
+    if (!mapping) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    if (mapping.packageStatus !== 'active' || (mapping.addOnStatus.zernio && mapping.addOnStatus.zernio !== 'active')) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ ok: false, error: 'zernio_addon_inactive', entitlement: mapping }));
+      return;
+    }
+    if (mapping.activeConnectedAccounts >= mapping.maxConnectedAccounts) {
+      res.statusCode = 409;
+      res.end(JSON.stringify({ ok: false, error: 'connection_quota_exceeded', entitlement: mapping }));
+      return;
+    }
+
+    let profileId = mapping.zernioProfileId ?? mapping.zernioProfileIds[0];
+    const samePlatformExists = mapping.accounts.some((account) => account.platform === platform && account.status === 'connected');
+    if (!profileId || samePlatformExists) {
+      const state = await store.load();
+      const customer = state.customers.find((row) => row.id === customerId);
+      if (!customer) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+        return;
+      }
+      const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
+      if (!profile.zernioProfileId) throw new Error('Zernio profile response missing profile id');
+      profileId = profile.zernioProfileId;
+      await store.addCustomerZernioProfile(customerId, profileId);
+    }
+
+    const redirectUrl = url.searchParams.get('redirectUrl') ?? `${firstHeader(req, 'origin') ?? 'https://runagentsys.com'}/dashboard`;
+    const authUrl = await adapter.getConnectUrl({ profileId, platform, redirectUrl });
+    res.end(JSON.stringify({ ok: true, authUrl, profileId, platform, entitlement: await store.getCustomerMapping(customerId) }));
     return;
   }
 

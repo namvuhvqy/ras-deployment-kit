@@ -56,12 +56,18 @@ export interface ZernioAdapter {
 }
 
 export class DryRunZernioAdapter implements ZernioAdapter {
+  private readonly accountsByProfile = new Map<string, ConnectedAccount[]>();
+  private profileSequenceByCustomer = new Map<string, number>();
+
   async createProfile(input: CreateProfileInput): Promise<RasCustomer> {
+    const nextSequence = (this.profileSequenceByCustomer.get(input.customerId) ?? 0) + 1;
+    this.profileSequenceByCustomer.set(input.customerId, nextSequence);
+    const suffix = nextSequence === 1 ? '' : `_${nextSequence}`;
     return {
       id: input.customerId,
       name: input.name,
       email: input.email,
-      zernioProfileId: `dry_profile_${input.customerId}`,
+      zernioProfileId: `zernio_${input.customerId}${suffix}`,
       status: 'active',
     };
   }
@@ -69,25 +75,14 @@ export class DryRunZernioAdapter implements ZernioAdapter {
   async getConnectUrl(input: ConnectUrlInput): Promise<string> {
     const params = new URLSearchParams({
       profileId: input.profileId,
-      redirect_url: input.redirectUrl,
+      redirectUrl: input.redirectUrl,
       dry_run: 'true',
     });
     return `https://zernio.local/connect/${input.platform}?${params.toString()}`;
   }
 
   async listAccounts(profileId: string): Promise<ConnectedAccount[]> {
-    return [
-      {
-        id: `dry_account_${profileId}_facebook`,
-        customerId: 'dry_customer',
-        zernioAccountId: `dry_zernio_account_${profileId}_facebook`,
-        profileId,
-        platform: 'facebook',
-        username: 'dry-run-page',
-        status: 'connected',
-        capabilities: ['publish', 'comments', 'inbox'],
-      },
-    ];
+    return this.accountsByProfile.get(profileId) ?? [];
   }
 
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
