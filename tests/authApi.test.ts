@@ -337,6 +337,21 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     const dashboardPayload = (await dashboard.json()) as { dashboard: { customer: { id: string; email: string } } };
     assert.equal(dashboardPayload.dashboard.customer.id, callbackPayload.customerId);
     assert.equal(dashboardPayload.dashboard.customer.email, 'owner@example.com');
+
+    const authStartForBrowser = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
+    const browserAuthPayload = (await authStartForBrowser.json()) as { authUrl: string };
+    const browserAuthUrl = new URL(browserAuthPayload.authUrl);
+    const browserCallback = await fetch(`http://127.0.0.1:${port}/auth/google/callback?code=google_code_test&state=${encodeURIComponent(browserAuthUrl.searchParams.get('state') ?? '')}`, {
+      redirect: 'manual',
+    });
+    assert.equal(browserCallback.status, 302);
+    const location = browserCallback.headers.get('location');
+    assert.ok(location);
+    const handoffUrl = new URL(location);
+    assert.equal(handoffUrl.origin, 'https://runagentsys.com');
+    assert.equal(handoffUrl.pathname, '/api/auth/google/callback');
+    assert.ok(handoffUrl.searchParams.get('token')?.startsWith('sess_'));
+    assert.equal(handoffUrl.searchParams.get('redirectTo'), '/dashboard');
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });

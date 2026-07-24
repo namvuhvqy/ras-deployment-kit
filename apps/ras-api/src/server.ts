@@ -75,6 +75,21 @@ function googleCallbackUrl(req: IncomingMessage): string {
   return process.env.GOOGLE_OAUTH_CALLBACK_URL ?? `${publicBaseUrl(req)}/auth/google/callback`;
 }
 
+function frontendBaseUrl(): string {
+  return process.env.FRONTEND_APP_URL ?? process.env.RAS_FRONTEND_URL ?? 'https://runagentsys.com';
+}
+
+function safeRedirectPath(value: string | undefined): string {
+  return value && value.startsWith('/') && !value.startsWith('//') ? value : '/dashboard';
+}
+
+function frontendOAuthCallbackUrl(token: string, redirectTo: string): string {
+  const callback = new URL('/api/auth/google/callback', frontendBaseUrl());
+  callback.searchParams.set('token', token);
+  callback.searchParams.set('redirectTo', safeRedirectPath(redirectTo));
+  return callback.toString();
+}
+
 function createOAuthState(redirectTo: string): string {
   const state = `oauth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
   googleOAuthStates.set(state, { redirectTo, createdAtMs: Date.now() });
@@ -276,6 +291,42 @@ const server = createServer(async (req, res) => {
   }
 
   // Keep Google OAuth routes above all customer/dashboard routes and the final 404 fallback.
+  if (req.method === 'GET' && req.url?.startsWith('/auth/google/callback')) {
+    const url = new URL(req.url, publicBaseUrl(req));
+    if (url.pathname !== '/auth/google/callback') {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+      return;
+    }
+    const code = url.searchParams.get('code') ?? undefined;
+    const state = consumeOAuthState(url.searchParams.get('state') ?? undefined);
+    if (!code || !state) {
+      const failed = new URL('/login', frontendBaseUrl());
+      failed.searchParams.set('error', 'invalid_google_oauth_callback');
+      res.statusCode = 302;
+      res.setHeader('location', failed.toString());
+      res.end();
+      return;
+    }
+    try {
+      const accessToken = await exchangeGoogleCode(req, code);
+      const profile = await fetchGoogleProfile(accessToken);
+      const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
+      const dashboard = await store.getDashboardForSession(session.token);
+      if (!dashboard) throw new Error('google_session_dashboard_missing');
+      res.statusCode = 302;
+      res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo));
+      res.end();
+    } catch (error) {
+      const failed = new URL('/login', frontendBaseUrl());
+      failed.searchParams.set('error', (error as Error).message);
+      res.statusCode = 302;
+      res.setHeader('location', failed.toString());
+      res.end();
+    }
+    return;
+  }
+
   if (req.method === 'GET' && req.url?.startsWith('/auth/google')) {
     const url = new URL(req.url, publicBaseUrl(req));
     if (url.pathname !== '/auth/google') {
@@ -289,7 +340,7 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'google_oauth_not_configured' }));
       return;
     }
-    const redirectTo = url.searchParams.get('redirectTo') || '/dashboard';
+    const redirectTo = safeRedirectPath(url.searchParams.get('redirectTo') ?? undefined);
     const state = createOAuthState(redirectTo);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', clientId);
