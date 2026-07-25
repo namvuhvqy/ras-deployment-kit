@@ -1,6 +1,6 @@
 # RAS Sandbox Task Board
 
-Updated: 2026-07-22
+Updated: 2026-07-25
 
 ## Locked MVP decision
 
@@ -44,6 +44,34 @@ web lead or sale lead
 - [x] Add Vercel/runagentsys.com project visibility check.
 - [x] Lock MVP decision: 2 service lines, 1 shared backend/control panel.
 - [x] Lock split-repo API boundary: frontend summary route must proxy RAS backend connection summary before any Zernio fallback.
+- [x] Note active 2026-07-24 slice: new Google OAuth users need dashboard `needs_plan` Empty State instead of `customer_portal_unavailable`.
+
+## Active slice — Dashboard `needs_plan` + Zernio webhook
+
+1. [x] Backend28/Frontend30: rà soát repo/backend/frontend and identify insertion points.
+   - Backend: `packages/shared/src/persistentStore.ts#getDashboardForSession()`.
+   - Frontend: `landingpage-ban-hang/app/customer-portal/page.tsx` and `app/api/customer-portal/summary/route.ts`.
+   - Webhook store primitives exist: `webhookEvents`, `webhookFailures`, `recordWebhookEvent`, `recordWebhookFailure`.
+2. [x] Backend28: dashboard state for new customers implemented.
+   - `state: 'ready' | 'needs_plan'`.
+   - Entitlement payload: plan, max connected accounts, active connected accounts, add-on status.
+   - CTA `/pricing` when user has no active plan/quota.
+3. [x] Zernio29: team-level webhook route/store/routing verified in backend slice.
+   - Store raw event metadata.
+   - Deduplicate by event id if available.
+   - Route internally by `profileId`, `accountId`, or nested `account.id`.
+   - Record failures through `recordWebhookFailure`.
+4. [x] Frontend30: render `needs_plan` Empty State.
+   - Welcome screen for new Google login users.
+   - CTA to `/pricing` / upgrade flow.
+   - Do not show `customer_portal_unavailable` when backend returns a valid `needs_plan` dashboard.
+5. [x] Ops33: verification gate passed locally on 2026-07-25.
+   - Backend: `npm run check`.
+   - Frontend: `npm run lint && npm run build`.
+   - Smoke remains a production follow-up after deploy.
+6. [>] PMO27: docs/roadmap updated; commit/push/report in progress.
+
+Decision: defer `loginCount` and heavy audit-log analytics for now. Keep minimal event/session/customer status needed for correctness; add full audit analytics after dashboard and entitlement flow are stable.
 
 ## MVP Sprint 1 — next execution order
 
@@ -55,7 +83,7 @@ web lead or sale lead
 6. [ ] Backend28: add `VpsAssignment` model for manual VPS handoff.
 7. [ ] Backend28: add `AgentStatus` model for RAS1/RAS2 heartbeat/log summary.
 8. [ ] Zernio29: connect/status API must resolve through assigned profile slot.
-9. [ ] Zernio29: webhook receiver: raw-body signature verify, event dedup, failure log surface.
+9. [>] Zernio29: webhook receiver: raw-body signature verify, event dedup, failure log surface.
 10. [>] Frontend30: remove/label static demo account management from production path.
 11. [>] Frontend30: customer dashboard shows package/profile/integration status from API; first boundary is `/api/integrations/summary` → RAS backend `/customers/{id}/connection-summary`.
 12. [ ] Frontend30: admin dashboard can create customer and assign profile/VPS.

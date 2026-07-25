@@ -76,6 +76,17 @@ export interface MigrationResult {
 export interface RasDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
+  state: 'ready' | 'needs_plan';
+  entitlement: {
+    plan: 'none' | string;
+    maxConnectedAccounts: number;
+    activeConnectedAccounts: number;
+    addOnStatus: Record<string, string>;
+  };
+  cta?: {
+    label: string;
+    href: string;
+  };
   sandboxes: RasSandboxEnvironment[];
   agents: RasAgentInstance[];
   servicePackages: RasServicePackage[];
@@ -286,13 +297,27 @@ export class JsonRasStore {
     const customer = state.customers.find((row) => row.id === user.customerId);
     if (!customer) return undefined;
     const { password: _password, ...safeUser } = user;
+    const connectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
+    const activeConnectedAccounts = connectedAccounts.filter((row) => row.status === 'connected').length;
+    const maxConnectedAccounts = customer.maxConnectedAccounts ?? 0;
+    const addOnStatus = customer.addOnStatus ?? {};
+    const hasActivePlan = customer.packageStatus === 'active' || customer.billingStatus === 'active' || maxConnectedAccounts > 0;
+    const dashboardState: RasDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
     return {
       user: safeUser,
       customer,
+      state: dashboardState,
+      entitlement: {
+        plan: hasActivePlan ? (customer.packageStatus ?? customer.billingStatus ?? 'active') : 'none',
+        maxConnectedAccounts,
+        activeConnectedAccounts,
+        addOnStatus,
+      },
+      cta: dashboardState === 'needs_plan' ? { label: 'Chọn gói để kích hoạt workspace', href: '/pricing' } : undefined,
       sandboxes: state.sandboxes.filter((row) => row.customerId === customer.id),
       agents: state.agents.filter((row) => row.customerId === customer.id),
       servicePackages: state.servicePackages.filter((row) => row.id === customer.servicePackageId),
-      connectedAccounts: state.connectedAccounts.filter((row) => row.customerId === customer.id),
+      connectedAccounts,
     };
   }
 

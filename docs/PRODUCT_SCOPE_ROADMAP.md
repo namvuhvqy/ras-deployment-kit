@@ -1,6 +1,6 @@
 # RunAgentSys / RAS — MVP Product Scope & Roadmap
 
-Updated: 2026-07-23
+Updated: 2026-07-25
 Owner: Nam Vũ / RunAgentSys
 Status: LOCKED FOR MVP EXECUTION
 
@@ -22,6 +22,25 @@ Status: LOCKED FOR MVP EXECUTION
 - [x] Step 2 scope update: Login is Google OAuth-only. `/login` must show exactly one `Continue with Google` CTA; no Email, Password, Forgot Password, password reset, or local-password fallback now or later.
 - [ ] Step 2 implementation: homepage Login link and `/login` UI connected to `/auth/google` + `/auth/google/callback`, then redirect to `/dashboard` after session creation.
 - [ ] Step 3: protected `/dashboard` UI rendering Base VPS → 2 Agent RAS → Add-ons widget/banner.
+
+## 0.2 Active execution checkpoint — 2026-07-24
+
+Current active slice: make the post-login customer dashboard safe for new Google OAuth users and prepare Zernio team-level webhook handling.
+
+- [x] Rà soát backend/frontend split-repo state and identify insertion points:
+  - Backend dashboard state belongs in `packages/shared/src/persistentStore.ts#getDashboardForSession()`.
+  - Frontend Empty State belongs in `landingpage-ban-hang/app/customer-portal/page.tsx` and the proxy route `app/api/customer-portal/summary/route.ts`.
+  - Zernio webhook persistence already has `webhookEvents`, `webhookFailures`, `recordWebhookEvent`, and `recordWebhookFailure`; the public team-level receiver still needs final route wiring in `apps/ras-api/src/server.ts`.
+- [x] Backend dashboard state for new users is implemented:
+  - `RasDashboard.state = 'ready' | 'needs_plan'`.
+  - `entitlement.plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus`.
+  - Optional CTA such as `/pricing` for users without an active plan/quota.
+- [x] Frontend Empty State: if dashboard/proxy returns `state === 'needs_plan'`, render welcome/upgrade screen instead of `customer_portal_unavailable` error.
+- [x] Zernio team-level webhook: receiver route, event persistence/dedupe, internal routing by profile/account identifiers, and failure status are covered in the active backend slice.
+- [x] Verification gate passed locally on 2026-07-25: backend `npm run check` and frontend `npm run lint && npm run build`.
+- [>] Git gate: docs updated; commit/push pending final diff review.
+
+Decision note: defer `loginCount` / heavy audit-log tracking for this slice. It is useful later for ops/security analytics, but it is not required to unblock new-user dashboard UX. Keep only minimal webhook/session/customer status facts needed for correctness.
 
 ## 1. MVP product scope
 
@@ -71,13 +90,13 @@ Dashboard shows real status and next action
 3. **RAS-owned entitlement API**: after payment, persist dynamic purchased quota `maxConnectedAccounts=N`, package/add-on status, and customer mapping. Quotas such as “5 connected accounts” are examples only and are enforced by RAS DB/API/UI, not by Zernio profile settings.
 4. **Create/assign Zernio profiles lazily**: provision the first profile through `POST /v1/profiles` when entitlement exists; allocate more profiles automatically when a customer connects multiple accounts on the same platform, because Zernio allows one account per platform per profile.
 5. **Login/session MVP**: Google OAuth-only customer login plus admin-assisted account activation; keep RBAC simple at first. Do not build Email/Password or password reset flows.
-6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status.
-7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources.
+6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status, plus explicit `state='needs_plan'` for newly logged-in users without entitlement.
+7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources. If `state='needs_plan'`, display welcome/upgrade Empty State instead of technical API error.
 8. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms. Before returning a Zernio OAuth URL, RAS must verify package/add-on active status and `activeConnectedAccounts < maxConnectedAccounts`.
 9. **VPS assignment model** for the 2-agent service: IP/host label/status/notes, no auto provisioning yet.
 10. **Agent status model**: RAS1/RAS2 heartbeat/log summary.
 11. **Frontend dashboard** calls real APIs; no static/demo customer data in production path. Current split-repo rule: frontend may return safe empty state when backend env is missing, but only backend-verified accounts can render as connected.
-12. **End-to-end smoke test**: sale creates account → assigns package/slot/VPS → customer logs in → sees dashboard → connect action returns verified status.
+12. **End-to-end smoke test**: sale creates account → assigns package/slot/VPS → customer logs in → sees dashboard or `needs_plan` Empty State → connect action returns verified status.
 13. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
 
 ## 4. Non-goals for MVP
