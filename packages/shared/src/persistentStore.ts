@@ -313,7 +313,7 @@ export class JsonRasStore {
         activeConnectedAccounts,
         addOnStatus,
       },
-      cta: dashboardState === 'needs_plan' ? { label: 'Chọn gói để kích hoạt workspace', href: '/pricing' } : undefined,
+      cta: dashboardState === 'needs_plan' ? { label: 'Chọn gói để kích hoạt workspace', href: '/pay' } : undefined,
       sandboxes: state.sandboxes.filter((row) => row.customerId === customer.id),
       agents: state.agents.filter((row) => row.customerId === customer.id),
       servicePackages: state.servicePackages.filter((row) => row.id === customer.servicePackageId),
