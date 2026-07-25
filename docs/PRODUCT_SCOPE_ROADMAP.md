@@ -42,6 +42,41 @@ Current active slice: make the post-login customer dashboard safe for new Google
 
 Decision note: defer `loginCount` / heavy audit-log tracking for this slice. It is useful later for ops/security analytics, but it is not required to unblock new-user dashboard UX. Keep only minimal webhook/session/customer status facts needed for correctness.
 
+## 0.3 Paywall/Base Entitlement gate — 2026-07-25
+
+Scope lock for the current slice: the 0 USD / Free Trial plan activates **Base Entitlement only** so the customer can enter the dashboard. Zernio Add-on remains inactive until its dedicated integration test/deploy gate.
+
+- [x] Backend trial activation route exists: `POST /billing/entitlements/activate-trial` requires a valid RAS session and persists `packageStatus='active'`, `maxConnectedAccounts=0`, `addOnStatus.zernio='inactive'`.
+- [x] Frontend proxy exists: `POST /api/billing/entitlements/activate-trial` forwards the `ras_session` cookie to the RAS API via bearer token.
+- [>] Frontend `/pay` UI: if `amount=0` or product name contains Free/Trial/Dùng thử, show `Kích hoạt dùng thử`; on success redirect to `/dashboard`; on missing session redirect to `/login?next=...`.
+- [ ] Verification gate for this slice: run frontend `npm run lint && npm run build` and backend `npm run check`. Do **not** commit, push, deploy, or production-smoke until Nam Vũ approves after clean build output.
+
+### Zernio integration test deadline
+
+Zernio integration is not an open-ended “later” item. Deadline: start the Zernio test slice **immediately after Base Entitlement production smoke passes**. The first Zernio slice must not begin before Base Entitlement smoke is green, and must not be deferred beyond the next planned implementation slice after that smoke.
+
+Required pre-production Zernio test order:
+
+1. Start RAS API locally with `ZERNIO_MODE=live` and production-like non-secret env loaded from the approved `.env` source.
+2. Test one complete local live-mode flow using the main Zernio API account:
+   - create or reuse one test profile through `POST /v1/profiles`;
+   - request one connect URL through `GET /v1/connect/{platform}?profileId=...`;
+   - verify RAS quota gate before returning the connect URL;
+   - run one safe post/status-capable API check if an already-connected test account exists; otherwise record the connect URL evidence only and do not force live publishing;
+   - verify webhook receiver persistence/routing with a test event and inspect Zernio dashboard logs at `https://zernio.com/dashboard/logs` or API logs if available.
+3. Only after local live-mode evidence is clean, request approval for production deploy/smoke of the Zernio Add-on slice.
+
+### Deploy rollback plan
+
+For any approved production deploy after this gate:
+
+1. Record current backend git SHA/service image tag and current frontend deployment ID before deploy.
+2. Deploy backend first, then frontend only after backend health passes.
+3. If production smoke fails, stop immediately; do not hot-fix directly on production.
+4. Roll backend back to the recorded previous SHA/image tag and restart the service.
+5. Roll frontend back using the previous Vercel production deployment / rollback action.
+6. Re-run minimal health checks (`GET /health`, dashboard route load) and report the failed step, rollback command/result, and current restored deployment IDs.
+
 ## 1. MVP product scope
 
 RunAgentSys MVP has **two service lines** managed by one backend/control panel:

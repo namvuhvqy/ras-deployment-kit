@@ -172,6 +172,69 @@ test('billing entitlement provisioning stores dynamic quota and creates the firs
   });
 });
 
+test('authenticated trial activation grants base entitlement without enabling Zernio slots', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_trial',
+      name: 'Trial Shop',
+      email: 'owner@trial.test',
+      status: 'pending',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.users = [
+    {
+      id: 'user_trial',
+      email: 'owner@trial.test',
+      displayName: 'Trial Owner',
+      role: 'owner',
+      customerId: 'cust_trial',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.sessions = [
+    {
+      id: 'sess_trial',
+      token: 'token_trial',
+      userId: 'user_trial',
+      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      createdAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const unauthorized = await fetch(`${baseUrl}/billing/entitlements/activate-trial`, { method: 'POST' });
+    assert.equal(unauthorized.status, 401);
+
+    const response = await fetch(`${baseUrl}/billing/entitlements/activate-trial`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer token_trial' },
+    });
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      entitlement: {
+        customerId: string;
+        maxConnectedAccounts: number;
+        activeConnectedAccounts: number;
+        packageStatus: string;
+        addOnStatus: Record<string, string>;
+        zernioProfileIds: string[];
+      };
+    };
+
+    assert.equal(payload.entitlement.customerId, 'cust_trial');
+    assert.equal(payload.entitlement.maxConnectedAccounts, 0);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 0);
+    assert.equal(payload.entitlement.packageStatus, 'active');
+    assert.equal(payload.entitlement.addOnStatus.zernio, 'inactive');
+    assert.deepEqual(payload.entitlement.zernioProfileIds, []);
+  });
+});
+
 test('connect endpoint enforces RAS quota before returning Zernio OAuth URL', async () => {
   const state = emptyState();
   state.customers = [

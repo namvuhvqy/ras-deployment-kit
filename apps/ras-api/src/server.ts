@@ -396,6 +396,24 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/billing/entitlements/activate-trial') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
+    const mapping = await store.upsertCustomerEntitlement({
+      customerId: dashboard.customer.id,
+      maxConnectedAccounts: 0,
+      packageStatus: 'active',
+      addOnStatus: { zernio: 'inactive' },
+    });
+    res.statusCode = 200;
+    res.end(JSON.stringify({ ok: true, entitlement: mapping }));
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
     const body = await readJsonBody(req);
     const customerId = stringField(body, 'customerId');
