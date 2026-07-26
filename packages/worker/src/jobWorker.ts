@@ -136,7 +136,6 @@ function assertPublishPostPayload(job: RasJob): CreatePostInput {
   const isDraft = optionalBoolean(payload.isDraft);
   const platformSpecificData = asOptionalRecord(payload.platformSpecificData);
   return {
-    profileId: job.profileId,
     accountId,
     platform,
     content,

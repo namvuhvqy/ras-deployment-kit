@@ -48,7 +48,6 @@ test('LiveZernioAdapter createPost sends Zernio payload and maps response', asyn
   try {
     const adapter = new LiveZernioAdapter({ apiKey: 'test-key', baseUrl: 'https://example.test/api/v1' });
     const result = await adapter.createPost({
-      profileId: 'profile_1',
       accountId: 'account_1',
       platform: 'facebook',
       content: 'Xin chào RAS',
@@ -74,7 +73,6 @@ test('LiveZernioAdapter createPost sends Zernio payload and maps response', asyn
 test('createPostPayload follows documented Zernio /posts shape', () => {
   assert.deepEqual(
     createPostPayload({
-      profileId: 'profile_1',
       accountId: 'account_1',
       platform: 'youtube',
       content: 'Video description here',
@@ -102,7 +100,6 @@ test('createPostPayload follows documented Zernio /posts shape', () => {
 test('createPostPayload supports safe draft smoke tests', () => {
   assert.deepEqual(
     createPostPayload({
-      profileId: 'profile_1',
       accountId: 'account_1',
       platform: 'facebook',
       content: 'Draft smoke',
@@ -115,6 +112,22 @@ test('createPostPayload supports safe draft smoke tests', () => {
       isDraft: true,
     },
   );
+});
+
+test('CreatePostInput intentionally rejects root profileId for Zernio /posts', () => {
+  const validInput = {
+    accountId: 'account_1',
+    platform: 'facebook',
+    content: 'Only account-scoped target',
+  } satisfies Parameters<typeof createPostPayload>[0];
+
+  assert.deepEqual(createPostPayload(validInput), {
+    content: 'Only account-scoped target',
+    platforms: [{ platform: 'facebook', accountId: 'account_1' }],
+    publishNow: true,
+  });
+
+  assert.equal('profileId' in validInput, false);
 });
 
 test('LiveZernioAdapter surfaces API errors', async () => {

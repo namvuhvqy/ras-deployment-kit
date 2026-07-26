@@ -1,93 +1,186 @@
-# RAS Sandbox — Product Scope & Roadmap
+# RunAgentSys / RAS — MVP Product Scope & Roadmap
 
-Updated: 2026-07-19
+Updated: 2026-07-26
 Owner: Nam Vũ / RunAgentSys
-Status: PRODUCT SCOPE LOCKED FOR NEXT BUILD
+Status: LOCKED FOR MVP EXECUTION
 
-## 1. Product scope
+## 0. Current integration checkpoint — 2026-07-23
 
-The primary product is **RAS Sandbox Agent Environment**: a SaaS web application and control panel for provisioning and operating isolated automation environments.
+- Public RAS API base URL is live at `https://ras-api.runagentsys.com`.
+- Smoke passed for public backend health and customer connection summary.
+- Vercel production env is set to `RAS_API_BASE=https://ras-api.runagentsys.com` and `RAS_CUSTOMER_ID=demo_khach_2`.
+- Production frontend `https://runagentsys.com/api/integrations/summary` now proxies the RAS backend and returns `source: "ras-backend"` with verified Facebook integration state for the demo customer.
+- Next MVP focus: customer portal/account-management screens backed by real RAS customer/session APIs.
 
-Each tenant/customer owns a separate VPS/cloud sandbox environment containing **2 RAS agents**:
+## 0.1 Protected dashboard rollout checkpoint — 2026-07-23
 
-1. **RAS1 — Hermes Main**: customer-care, routing, CRM/leads, operations brain.
-2. **RAS2 — OpenClaw/worker agent**: content, media, campaign assets, publishing drafts, workflow automation.
+- [x] Step 1 docs: RFC/API contract written in `docs/ARCH.md` for a protected `/dashboard` that derives `customerId` from session token.
+- [x] Step 1 docs: Base Plan schema documented as VPS/sandbox + exactly 2 default RAS agents (`ras1-hermes`, `ras2-openclaw`).
+- [x] Step 1 docs: Add-ons schema documented with inactive-safe `active: false` behavior for modules such as Zernio and Social Automation.
+- [x] Step 1 docs: Backward-compatibility rule locked — keep `/customer-portal` demo path for smoke testing until protected `/dashboard` passes end-to-end.
+- [ ] Step 1 implementation: add TypeScript schema/types, store defaults, and contract tests.
+- [x] Step 2 scope update: Login is Google OAuth-only. `/login` must show exactly one `Continue with Google` CTA; no Email, Password, Forgot Password, password reset, or local-password fallback now or later.
+- [ ] Step 2 implementation: homepage Login link and `/login` UI connected to `/auth/google` + `/auth/google/callback`, then redirect to `/dashboard` after session creation.
+- [ ] Step 3: protected `/dashboard` UI rendering Base VPS → 2 Agent RAS → Add-ons widget/banner.
 
-The web application is a **control panel/dashboard**, not a landing page. Its core job is to manage:
+## 0.2 Active execution checkpoint — 2026-07-24
 
-- Tenant/customer records.
-- Sandbox/env provisioning and lifecycle.
-- Agent status, health, and logs.
-- Service packages and billing state.
-- Integrations and connected add-ons.
-- Audit trail, smoke tests, and operational hardening.
+Current active slice: make the post-login customer dashboard safe for new Google OAuth users and prepare Zernio team-level webhook handling.
 
-## 2. Explicit non-goals
+- [x] Rà soát backend/frontend split-repo state and identify insertion points:
+  - Backend dashboard state belongs in `packages/shared/src/persistentStore.ts#getDashboardForSession()`.
+  - Frontend Empty State belongs in `landingpage-ban-hang/app/customer-portal/page.tsx` and the proxy route `app/api/customer-portal/summary/route.ts`.
+  - Zernio webhook persistence already has `webhookEvents`, `webhookFailures`, `recordWebhookEvent`, and `recordWebhookFailure`; the public team-level receiver still needs final route wiring in `apps/ras-api/src/server.ts`.
+- [x] Backend dashboard state for new users is implemented:
+  - `RasDashboard.state = 'ready' | 'needs_plan'`.
+  - `entitlement.plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus`.
+  - Optional CTA such as `/pricing` for users without an active plan/quota.
+- [x] Frontend Empty State: if dashboard/proxy returns `state === 'needs_plan'`, render welcome/upgrade screen instead of `customer_portal_unavailable` error.
+- [x] Zernio team-level webhook: receiver route, event persistence/dedupe, internal routing by profile/account identifiers, and failure status are covered in the active backend slice.
+- [x] Verification gate passed locally on 2026-07-25: backend `npm run check` and frontend `npm run lint && npm run build`.
+- [>] Git gate: docs updated; commit/push pending final diff review.
 
-RAS is **not**:
+Decision note: defer `loginCount` / heavy audit-log tracking for this slice. It is useful later for ops/security analytics, but it is not required to unblock new-user dashboard UX. Keep only minimal webhook/session/customer status facts needed for correctness.
 
-- A landing-page-only project.
-- A generic marketing website.
-- A Zernio clone.
-- A product where Zernio is the backend for the entire RAS system.
+## 0.3 Paywall/Base Entitlement gate — 2026-07-25
 
-## 3. Zernio role
+Scope lock for the current slice: the 0 USD / Free Trial plan activates **Base Entitlement only** so the customer can enter the dashboard. Zernio Add-on remains inactive until its dedicated integration test/deploy gate.
 
-**Zernio / runagentsys.com is a social operations add-on / white-label backend**, used for:
+- [x] Backend trial activation route exists: `POST /billing/entitlements/activate-trial` requires a valid RAS session and persists `packageStatus='active'`, `maxConnectedAccounts=0`, `addOnStatus.zernio='inactive'`.
+- [x] Frontend proxy exists: `POST /api/billing/entitlements/activate-trial` forwards the `ras_session` cookie to the RAS API via bearer token.
+- [x] Frontend `/pay` UI: if `amount=0` or product name contains Free/Trial/Dùng thử, show `Kích hoạt dùng thử`; on success redirect to `/dashboard`; on missing session redirect to `/login?next=...`.
+- [x] Verification gate for this slice passed on 2026-07-26: frontend `npm run lint && npm run build` passed cleanly and backend `npm run check` passed with 34/34 Node tests.
 
-- Connected social accounts.
-- Media handling.
-- Posts/drafts/scheduling.
-- Inbox/events where supported.
-- Social operations workflows.
+## 0.4 Entitlement contract split — 2026-07-26
 
-RAS must integrate Zernio through a tenant/profile/account mapping layer. RAS should not rebuild Zernio, and should not depend on undocumented Zernio fields.
+Current entitlement contract separates core infrastructure from social connection quota:
 
-Current confirmed OpenAPI constraints:
+- [x] Shared schema now exposes `RasEntitlement` with `basePlan`, `connectSlots`, and `addOns` sections.
+- [x] `basePlan` owns Core Plan state: plan id, billing cycle, VPS type/size, included RAS agents, AI token allowance, activation and expiry fields.
+- [x] `connectSlots` owns social/Zernio connection quota: included, purchased, trial, total, active connected accounts, trial expiry, and future Solo Connect API flag.
+- [x] `addOns` owns modular add-on rows such as `zernio-connect`; Zernio slot count remains RAS-owned entitlement logic, not a Zernio profile field.
+- [x] Dashboard response remains backward-compatible for old frontend consumers by still returning `plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus` beside the new structured entitlement.
+- [x] New Google OAuth customers receive normalized pending entitlement so `needs_plan` users render a safe dashboard/paywall state instead of crashing on missing fields.
 
-- `POST /v1/profiles` documents only `name`, `description`, `color`, `isDefault`.
-- Do not send undocumented profile fields such as `externalId`, `metadata`, or `email`.
-- Store RAS customer/tenant to Zernio `profile._id` mapping locally.
-- `POST /v1/posts` does not accept root `profileId`.
-- `platforms` must be an array of objects such as `{ platform, accountId }`, not strings.
-- Platform-specific settings belong in `platforms[].platformSpecificData`.
-- 429 handling: `Retry-After` is seconds; `X-RateLimit-Reset` is a Unix timestamp in seconds; limits are account-wide.
+### Zernio integration test deadline
 
-## 4. Priority roadmap
+Zernio integration is not an open-ended “later” item. Deadline: start the Zernio test slice **immediately after Base Entitlement production smoke passes**. The first Zernio slice must not begin before Base Entitlement smoke is green, and must not be deferred beyond the next planned implementation slice after that smoke.
 
-1. **Lock product scope**: RAS Sandbox Agent Environment.
-2. **Fix fake Connected bug**: UI/API must not show `Connected` unless a real account mapping exists and status is verified.
-3. **Build minimum login + dashboard/control panel**.
-4. **Manage sandbox/env + 2 agents + health/logs**.
-5. **Add service/package management**.
-6. **Integrate Zernio as tenant/profile/account add-on mapping**.
-7. **Hardening**: webhooks, persistent queue/worker, billing, audit logs, staging smoke tests.
+Required pre-production Zernio test order:
+
+1. Start RAS API locally with `ZERNIO_MODE=live` and production-like non-secret env loaded from the approved `.env` source.
+2. Test one complete local live-mode flow using the main Zernio API account:
+   - create or reuse one test profile through `POST /v1/profiles`;
+   - request one connect URL through `GET /v1/connect/{platform}?profileId=...`;
+   - verify RAS quota gate before returning the connect URL;
+   - run one safe post/status-capable API check if an already-connected test account exists; otherwise record the connect URL evidence only and do not force live publishing;
+   - verify webhook receiver persistence/routing with a test event and inspect Zernio dashboard logs at `https://zernio.com/dashboard/logs` or API logs if available.
+3. Only after local live-mode evidence is clean, request approval for production deploy/smoke of the Zernio Add-on slice.
+
+### Deploy rollback plan
+
+For any approved production deploy after this gate:
+
+1. Record current backend git SHA/service image tag and current frontend deployment ID before deploy.
+2. Deploy backend first, then frontend only after backend health passes.
+3. If production smoke fails, stop immediately; do not hot-fix directly on production.
+4. Roll backend back to the recorded previous SHA/image tag and restart the service.
+5. Roll frontend back using the previous Vercel production deployment / rollback action.
+6. Re-run minimal health checks (`GET /health`, dashboard route load) and report the failed step, rollback command/result, and current restored deployment IDs.
+
+## 1. MVP product scope
+
+RunAgentSys MVP has **two service lines** managed by one backend/control panel:
+
+1. **RunAgentSys Webapp / Zernio Integration**
+   - Customer has account on `runagentsys.com`.
+   - Customer connects Telegram/WhatsApp/Facebook/Zalo/other platforms through the dashboard.
+   - Backend uses prepared Zernio/API profile slots.
+
+2. **Managed RAS VPS 2-Agent Setup**
+   - Team builds or assigns a VPS with RAS1 + RAS2.
+   - Customer may receive SSH access, but normal operation/integration should be visible on `runagentsys.com`.
+
+Both service lines share:
+
+- Customer/account records.
+- Package/order/onboarding state.
+- Profile slot assignment.
+- Integration status.
+- VPS/agent status when included.
+
+## 2. MVP sales/onboarding flow
+
+```text
+Customer signs in with Google OR sale creates lead
+  ↓
+Sale/Admin creates customer account
+  ↓
+Admin assigns package
+  ↓
+Admin assigns prepared profile slot and/or VPS
+  ↓
+Customer logs in to runagentsys.com with Google OAuth
+  ↓
+Customer connects platforms allowed by package
+  ↓
+Backend calls Zernio/API behind the scenes
+  ↓
+Dashboard shows real status and next action
+```
+
+## 3. Priority roadmap
+
+1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state. ✅ Protected dashboard RFC/API contract added in `docs/ARCH.md` for Base VPS + 2 Agent RAS + Add-ons while preserving `/customer-portal` demo smoke path.
+2. **Customer/order/package minimal API**: create/list/update customer and package status, including service line (`zernio_webapp`, `ras_vps_2_agent`, `hybrid`).
+3. **RAS-owned entitlement API**: after payment, persist dynamic purchased quota `maxConnectedAccounts=N`, package/add-on status, and customer mapping. Quotas such as “5 connected accounts” are examples only and are enforced by RAS DB/API/UI, not by Zernio profile settings.
+4. **Create/assign Zernio profiles lazily**: provision the first profile through `POST /v1/profiles` when entitlement exists; allocate more profiles automatically when a customer connects multiple accounts on the same platform, because Zernio allows one account per platform per profile.
+5. **Login/session MVP**: Google OAuth-only customer login plus admin-assisted account activation; keep RBAC simple at first. Do not build Email/Password or password reset flows.
+6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status, plus explicit `state='needs_plan'` for newly logged-in users without entitlement.
+7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources. If `state='needs_plan'`, display welcome/upgrade Empty State instead of technical API error.
+8. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms. Before returning a Zernio OAuth URL, RAS must verify package/add-on active status and `activeConnectedAccounts < maxConnectedAccounts`.
+9. **VPS assignment model** for the 2-agent service: IP/host label/status/notes, no auto provisioning yet.
+10. **Agent status model**: RAS1/RAS2 heartbeat/log summary.
+11. **Frontend dashboard** calls real APIs; no static/demo customer data in production path. Current split-repo rule: frontend may return safe empty state when backend env is missing, but only backend-verified accounts can render as connected.
+12. **End-to-end smoke test**: sale creates account → assigns package/slot/VPS → customer logs in → sees dashboard or `needs_plan` Empty State → connect action returns verified status.
+13. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
+
+## 4. Non-goals for MVP
+
+- Auto-create all VPS resources after payment.
+- Full self-serve checkout-to-provision automation.
+- Complex billing/subscription logic.
+- Enterprise RBAC/multi-tenant admin complexity.
+- Rebuilding Zernio social backend.
+- Forcing business customers to use SSH as the main integration workflow.
 
 ## 5. Topic routing
 
-Use the existing Telegram topic IDs as execution lanes:
-
 | Topic | Purpose |
 |---|---|
-| **RAS PMO / Decisions** | Overall coordination, scope, roadmap, priorities, decisions |
-| **RAS Core / Backend** | API, DB, queue, persistent worker, core domain |
-| **RAS Zernio Integration** | Zernio profile/account/post/webhook, tenant/profile/account mapping |
-| **RAS Landing / Vercel / Frontend** | Vercel app, login, dashboard, control panel, connection state UI |
-| **RAS Marketing / Content** | Website copy, content, campaigns, positioning, social marketing ops |
-| **RAS Sales / Customer Onboarding** | Leads, packages, customer onboarding, CRM/CSKH handoff |
-| **RAS Ops / Logs / Support** | VPS, deploy, smoke tests, logs, support operations |
-
-Short topic labels can still be used in docs when helpful:
-
-- **RAS Sandbox — Product Scope & Roadmap** → PMO27
-- **RAS Sandbox — Agent Env & Control Panel** → Backend28 / Frontend30 / Ops33 depending on task
-- **RAS Sandbox — Zernio Add-on / White-label Social** → Zernio29
+| PMO27 | Scope, roadmap, decisions, human gates |
+| Backend28 | Customer/order/profile slot/VPS/agent APIs |
+| Zernio29 | Zernio profile/account/webhook/connect/status |
+| Frontend30 | Webapp, customer dashboard, admin screens, real status UI |
+| Marketing31 | Sales copy and packaging for 2 service lines |
+| Sales32 | Lead → account → onboarding workflow |
+| Ops33 | VPS setup, smoke tests, deploy checks, logs |
 
 ## 6. Implementation guardrails
 
-- Prefer clean, small modules over over-complex pipelines.
-- Keep RAS core domain types independent from Zernio transport details.
-- Treat Zernio IDs as external references, never as RAS primary identity.
-- Any missing or undocumented Zernio behavior must be confirmed from Zernio docs/admin before coding live assumptions.
-- Production/VPS mutations require explicit approval unless the action was already approved for the current task.
-- Every live integration change needs a staging smoke test and read-back verification.
+- Build only the few customer/profile APIs needed to sell and onboard first customers.
+- Prepared profile/API slots are acceptable: sell/assign them, then create more when inventory runs out.
+- Keep one shared backend for both service lines.
+- If separate repos slow down E2E tests, migrate toward one monorepo.
+- Production deploy, live credentials, live publishing, and VPS mutations require explicit approval.
+
+## 7. Split-repo sync rule
+
+Short term the landing page/webapp repo and RAS backend repo can remain separate. They are considered synced only when all are true:
+
+1. Backend `npm run check` passes.
+2. Frontend `npm run lint && npm run build` passes.
+3. Frontend integration routes call RAS backend contract first, not direct demo state.
+4. Public `runagentsys.com` smoke confirms the expected routes exist after deployment.
+
+If this boundary keeps breaking, move to a monorepo with `apps/web`, `apps/api`, `apps/worker`, and shared packages.

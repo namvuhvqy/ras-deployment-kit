@@ -1,0 +1,465 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const now = new Date().toISOString();
+
+async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-mapping-api-'));
+  const dbPath = join(dir, 'ras-store.json');
+  const port = 19_080 + Math.floor(Math.random() * 1000);
+  await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
+  const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('server did not start')), 5000);
+      child.stdout.on('data', (chunk) => {
+        if (String(chunk).includes('ras-api listening')) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on('error', reject);
+    });
+    return await run(`http://127.0.0.1:${port}`);
+  } finally {
+    child.kill();
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function emptyState(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    migratedAtIso: now,
+    users: [],
+    sessions: [],
+    customers: [],
+    sandboxes: [],
+    agents: [],
+    servicePackages: [],
+    connectedAccounts: [],
+    jobs: [],
+    webhookEvents: [],
+    auditLogs: [],
+  };
+}
+
+test('mapping endpoints create tenant/customer/profile/account links without root profileId account scope', async () => {
+  await withApi(emptyState(), async (baseUrl) => {
+    const customerResponse = await fetch(`${baseUrl}/mappings/customers`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        customerId: 'cust_1',
+        tenantId: 'tenant_acme',
+        name: 'Acme Shop',
+        email: 'owner@acme.test',
+        zernioProfileId: 'profile_zernio_1',
+      }),
+    });
+    assert.equal(customerResponse.status, 201);
+    const customerPayload = (await customerResponse.json()) as {
+      mapping: { customerId: string; tenantId: string; zernioProfileId: string };
+    };
+    assert.deepEqual(customerPayload.mapping, {
+      customerId: 'cust_1',
+      tenantId: 'tenant_acme',
+      zernioProfileId: 'profile_zernio_1',
+    });
+
+    const accountResponse = await fetch(`${baseUrl}/mappings/accounts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        accountId: 'acct_local_1',
+        customerId: 'cust_1',
+        platform: 'facebook',
+        zernioProfileId: 'profile_zernio_1',
+        zernioAccountId: 'social_account_1',
+        handle: '@acme',
+        username: 'acme',
+        status: 'connected',
+        connectedAtIso: now,
+        lastVerifiedAtIso: now,
+      }),
+    });
+    assert.equal(accountResponse.status, 201);
+    const accountPayload = (await accountResponse.json()) as {
+      mapping: { accountId: string; customerId: string; platform: string; zernioAccountId: string; createPostScope: unknown };
+    };
+    assert.deepEqual(accountPayload.mapping.createPostScope, {
+      platforms: [{ platform: 'facebook', accountId: 'social_account_1' }],
+    });
+
+    const summaryResponse = await fetch(`${baseUrl}/mappings/customers/cust_1`);
+    assert.equal(summaryResponse.status, 200);
+    const summary = (await summaryResponse.json()) as {
+      mapping: {
+        tenantId: string;
+        customerId: string;
+        zernioProfileId: string;
+        accounts: Array<{ accountId: string; zernioAccountId: string; createPostScope: unknown; profileId?: string }>;
+      };
+    };
+    assert.equal(summary.mapping.tenantId, 'tenant_acme');
+    assert.equal(summary.mapping.customerId, 'cust_1');
+    assert.equal(summary.mapping.zernioProfileId, 'profile_zernio_1');
+    assert.equal(summary.mapping.accounts.length, 1);
+    assert.equal(summary.mapping.accounts[0].accountId, 'acct_local_1');
+    assert.equal(summary.mapping.accounts[0].zernioAccountId, 'social_account_1');
+    assert.equal(summary.mapping.accounts[0].profileId, undefined);
+    assert.deepEqual(summary.mapping.accounts[0].createPostScope, {
+      platforms: [{ platform: 'facebook', accountId: 'social_account_1' }],
+    });
+  });
+});
+
+test('billing entitlement provisioning accepts canonical payload fields and creates the first profile lazily', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_entitled',
+      name: 'Entitled Shop',
+      email: 'owner@entitled.test',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.users = [
+    {
+      id: 'user_entitled',
+      email: 'owner@entitled.test',
+      displayName: 'Entitled Owner',
+      role: 'owner',
+      customerId: 'cust_entitled',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.sessions = [
+    {
+      id: 'sess_entitled',
+      token: 'token_entitled',
+      userId: 'user_entitled',
+      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      createdAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/billing/entitlements/provision`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer token_entitled', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        plan: 'pro',
+        billing_cycle: 'monthly',
+        extra_connect_slots: 2,
+        total_amount: 51,
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      entitlement: {
+        customerId: string;
+        maxConnectedAccounts: number;
+        activeConnectedAccounts: number;
+        packageStatus: string;
+        addOnStatus: Record<string, string>;
+        zernioProfileId: string;
+        zernioProfileIds: string[];
+        entitlement?: {
+          basePlan?: { planId?: string; billingCycle?: string; totalAmountUsd?: number };
+          connectSlots?: { includedSlots?: number; purchasedSlots?: number; totalSlots?: number };
+        };
+      };
+    };
+
+    assert.equal(payload.entitlement.customerId, 'cust_entitled');
+    assert.equal(payload.entitlement.maxConnectedAccounts, 3);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 0);
+    assert.equal(payload.entitlement.packageStatus, 'active');
+    assert.equal(payload.entitlement.addOnStatus.zernio, 'active');
+    assert.equal(payload.entitlement.zernioProfileId, 'zernio_cust_entitled');
+    assert.deepEqual(payload.entitlement.zernioProfileIds, ['zernio_cust_entitled']);
+    assert.equal(payload.entitlement.entitlement?.basePlan?.planId, 'pro');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.billingCycle, 'monthly');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.totalAmountUsd, 51);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.includedSlots, 1);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 2);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 3);
+  });
+});
+
+test('billing entitlement provisioning accepts backward-compatible payload aliases', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_alias',
+      name: 'Alias Shop',
+      email: 'alias@example.test',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.users = [
+    {
+      id: 'user_alias',
+      email: 'alias@example.test',
+      displayName: 'Alias Owner',
+      role: 'owner',
+      customerId: 'cust_alias',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.sessions = [
+    {
+      id: 'sess_alias',
+      token: 'token_alias',
+      userId: 'user_alias',
+      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      createdAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/billing/entitlements/provision`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer token_alias', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        plan_id: 'lite',
+        billing_cycle: 'yearly',
+        connect_slots: 4,
+        amount: 480,
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      entitlement: {
+        maxConnectedAccounts: number;
+        entitlement?: {
+          basePlan?: { planId?: string; billingCycle?: string; totalAmountUsd?: number };
+          connectSlots?: { purchasedSlots?: number; totalSlots?: number };
+        };
+      };
+    };
+
+    assert.equal(payload.entitlement.maxConnectedAccounts, 5);
+    assert.equal(payload.entitlement.entitlement?.basePlan?.planId, 'lite');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.billingCycle, 'yearly');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.totalAmountUsd, 480);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 4);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 5);
+  });
+});
+
+test('authenticated trial activation grants base entitlement without enabling Zernio slots', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_trial',
+      name: 'Trial Shop',
+      email: 'owner@trial.test',
+      status: 'pending',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.users = [
+    {
+      id: 'user_trial',
+      email: 'owner@trial.test',
+      displayName: 'Trial Owner',
+      role: 'owner',
+      customerId: 'cust_trial',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.sessions = [
+    {
+      id: 'sess_trial',
+      token: 'token_trial',
+      userId: 'user_trial',
+      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      createdAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const unauthorized = await fetch(`${baseUrl}/billing/entitlements/activate-trial`, { method: 'POST' });
+    assert.equal(unauthorized.status, 401);
+
+    const response = await fetch(`${baseUrl}/billing/entitlements/activate-trial`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer token_trial' },
+    });
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      entitlement: {
+        customerId: string;
+        maxConnectedAccounts: number;
+        activeConnectedAccounts: number;
+        packageStatus: string;
+        addOnStatus: Record<string, string>;
+        zernioProfileIds: string[];
+      };
+    };
+
+    assert.equal(payload.entitlement.customerId, 'cust_trial');
+    assert.equal(payload.entitlement.maxConnectedAccounts, 0);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 0);
+    assert.equal(payload.entitlement.packageStatus, 'active');
+    assert.equal(payload.entitlement.addOnStatus.zernio, 'inactive');
+    assert.deepEqual(payload.entitlement.zernioProfileIds, []);
+  });
+});
+
+test('connect endpoint enforces RAS quota before returning Zernio OAuth URL', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_quota',
+      name: 'Quota Shop',
+      email: 'owner@quota.test',
+      zernioProfileId: 'profile_quota_1',
+      zernioProfileIds: ['profile_quota_1'],
+      maxConnectedAccounts: 1,
+      packageStatus: 'active',
+      addOnStatus: { zernio: 'active' },
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.connectedAccounts = [
+    {
+      id: 'acct_existing',
+      customerId: 'cust_quota',
+      platform: 'facebook',
+      zernioProfileId: 'profile_quota_1',
+      zernioAccountId: 'social_existing',
+      status: 'connected',
+      connectedAtIso: now,
+      lastVerifiedAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/customers/cust_quota/connect/instagram`);
+    assert.equal(response.status, 409);
+    const payload = (await response.json()) as { error: string; entitlement: { maxConnectedAccounts: number; activeConnectedAccounts: number } };
+    assert.equal(payload.error, 'connection_quota_exceeded');
+    assert.equal(payload.entitlement.maxConnectedAccounts, 1);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 1);
+  });
+});
+
+test('connect endpoint creates another Zernio profile for a second account on the same platform', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_same_platform',
+      name: 'Same Platform Shop',
+      email: 'owner@same.test',
+      zernioProfileId: 'profile_same_1',
+      zernioProfileIds: ['profile_same_1'],
+      maxConnectedAccounts: 2,
+      packageStatus: 'active',
+      addOnStatus: { zernio: 'active' },
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.connectedAccounts = [
+    {
+      id: 'acct_fb_1',
+      customerId: 'cust_same_platform',
+      platform: 'facebook',
+      zernioProfileId: 'profile_same_1',
+      zernioAccountId: 'social_fb_1',
+      status: 'connected',
+      connectedAtIso: now,
+      lastVerifiedAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`);
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      authUrl: string;
+      profileId: string;
+      entitlement: { zernioProfileIds: string[]; maxConnectedAccounts: number; activeConnectedAccounts: number };
+    };
+
+    assert.equal(payload.profileId, 'zernio_cust_same_platform');
+    assert.match(payload.authUrl, /\/connect\/facebook\?/);
+    assert.match(payload.authUrl, /profileId=zernio_cust_same_platform/);
+    assert.deepEqual(payload.entitlement.zernioProfileIds, ['profile_same_1', 'zernio_cust_same_platform']);
+    assert.equal(payload.entitlement.maxConnectedAccounts, 2);
+    assert.equal(payload.entitlement.activeConnectedAccounts, 1);
+  });
+});
+
+test('account mapping rejects unknown customer and mismatched zernio profile', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_1',
+      name: 'Acme Shop',
+      zernioProfileId: 'profile_zernio_1',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const missingCustomer = await fetch(`${baseUrl}/mappings/accounts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        accountId: 'acct_missing',
+        customerId: 'missing',
+        platform: 'facebook',
+        zernioProfileId: 'profile_zernio_1',
+        zernioAccountId: 'social_account_1',
+      }),
+    });
+    assert.equal(missingCustomer.status, 404);
+
+    const mismatchedProfile = await fetch(`${baseUrl}/mappings/accounts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        accountId: 'acct_bad_profile',
+        customerId: 'cust_1',
+        platform: 'facebook',
+        zernioProfileId: 'other_profile',
+        zernioAccountId: 'social_account_1',
+      }),
+    });
+    assert.equal(mismatchedProfile.status, 409);
+    const payload = (await mismatchedProfile.json()) as { error: string };
+    assert.equal(payload.error, 'zernio_profile_mismatch');
+  });
+});

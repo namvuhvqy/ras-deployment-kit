@@ -100,3 +100,54 @@ test('JsonRasStore persists customer, account, queue, webhook idempotency, and a
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('JsonRasStore summarizes sandbox and required RAS agent lifecycle blockers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({
+      id: 'cust_1',
+      name: 'Shop Demo',
+      status: 'active',
+      sandboxId: 'sandbox_1',
+      createdAtIso: new Date().toISOString(),
+    });
+    await store.upsertSandbox({
+      id: 'sandbox_1',
+      customerId: 'cust_1',
+      provider: 'vps',
+      status: 'running',
+      createdAtIso: new Date().toISOString(),
+      updatedAtIso: new Date().toISOString(),
+    });
+    await store.upsertAgent({
+      id: 'agent_1',
+      customerId: 'cust_1',
+      sandboxId: 'sandbox_1',
+      kind: 'ras1-hermes',
+      status: 'running',
+      updatedAtIso: new Date().toISOString(),
+    });
+
+    const lifecycle = await store.getCustomerLifecycleStatus('cust_1');
+    assert.equal(lifecycle?.healthy, false);
+    assert.deepEqual(lifecycle?.blockers, ['missing_ras2-openclaw']);
+
+    await store.upsertAgent({
+      id: 'agent_2',
+      customerId: 'cust_1',
+      sandboxId: 'sandbox_1',
+      kind: 'ras2-openclaw',
+      status: 'running',
+      updatedAtIso: new Date().toISOString(),
+    });
+
+    const healthyLifecycle = await store.getCustomerLifecycleStatus('cust_1');
+    assert.equal(healthyLifecycle?.healthy, true);
+    assert.deepEqual(healthyLifecycle?.blockers, []);
+    assert.equal(await store.getCustomerLifecycleStatus('missing'), undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

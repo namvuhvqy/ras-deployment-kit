@@ -2,9 +2,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
 import type {
+  AddOnEntitlement,
   ConnectedAccount,
   RasAgentInstance,
   RasCustomer,
+  RasEntitlement,
   RasJob,
   RasSandboxEnvironment,
   RasServicePackage,
@@ -24,6 +26,8 @@ export interface RasPersistentState {
   connectedAccounts: ConnectedAccount[];
   jobs: RasJob[];
   webhookEvents: StoredWebhookEvent[];
+  webhookFailures: StoredWebhookFailure[];
+  webhookStatus: StoredWebhookStatus;
   auditLogs: StoredAuditLog[];
 }
 
@@ -36,6 +40,22 @@ export interface StoredWebhookEvent {
   payload: Record<string, unknown>;
   processedAtIso?: string;
   createdAtIso: string;
+  signatureStatus?: 'verified' | 'skipped';
+}
+
+export interface StoredWebhookFailure {
+  id: string;
+  source: string;
+  eventId?: string;
+  reason: string;
+  statusCode: number;
+  createdAtIso: string;
+}
+
+export interface StoredWebhookStatus {
+  enabled: boolean;
+  consecutiveFailures: number;
+  disabledAtIso?: string;
 }
 
 export interface StoredAuditLog {
@@ -58,10 +78,129 @@ export interface MigrationResult {
 export interface RasDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
+  state: 'ready' | 'needs_plan';
+  entitlement: RasEntitlement & {
+    /** Backward-compatible plan label for older frontend consumers. */
+    plan: 'none' | string;
+    /** Backward-compatible connect slot quota. Prefer entitlement.connectSlots.totalSlots. */
+    maxConnectedAccounts: number;
+    /** Backward-compatible connected account count. Prefer entitlement.connectSlots.activeConnectedAccounts. */
+    activeConnectedAccounts: number;
+    /** Backward-compatible add-on status map. Prefer entitlement.addOns. */
+    addOnStatus: Record<string, string>;
+  };
+  cta?: {
+    label: string;
+    href: string;
+  };
   sandboxes: RasSandboxEnvironment[];
   agents: RasAgentInstance[];
   servicePackages: RasServicePackage[];
   connectedAccounts: ConnectedAccount[];
+}
+
+export interface CustomerLifecycleStatus {
+  customer: RasCustomer;
+  sandbox?: RasSandboxEnvironment;
+  agents: RasAgentInstance[];
+  healthy: boolean;
+  blockers: string[];
+}
+
+export interface CustomerMapping {
+  tenantId?: string;
+  customerId: string;
+  zernioProfileId?: string;
+  zernioProfileIds: string[];
+  maxConnectedAccounts: number;
+  activeConnectedAccounts: number;
+  packageStatus: string;
+  addOnStatus: Record<string, string>;
+  accounts: AccountMapping[];
+}
+
+export interface AccountMapping {
+  accountId: string;
+  customerId: string;
+  platform: ConnectedAccount['platform'];
+  zernioProfileId?: string;
+  zernioAccountId: string;
+  handle?: string;
+  username?: string;
+  status: ConnectedAccount['status'];
+  connectedAtIso?: string;
+  lastVerifiedAtIso?: string;
+  createPostScope: {
+    platforms: Array<{ platform: ConnectedAccount['platform']; accountId: string }>;
+  };
+}
+
+function toAccountMapping(account: ConnectedAccount): AccountMapping {
+  return {
+    accountId: account.id,
+    customerId: account.customerId,
+    platform: account.platform,
+    zernioProfileId: account.zernioProfileId,
+    zernioAccountId: account.zernioAccountId,
+    handle: account.handle,
+    username: account.username,
+    status: account.status,
+    connectedAtIso: account.connectedAtIso,
+    lastVerifiedAtIso: account.lastVerifiedAtIso,
+    createPostScope: {
+      platforms: [{ platform: account.platform, accountId: account.zernioAccountId }],
+    },
+  };
+}
+
+function normalizeEntitlement(customer: RasCustomer, activeConnectedAccounts: number): RasEntitlement {
+  const packageStatus = customer.packageStatus ?? (customer.billingStatus === 'active' ? 'active' : 'pending');
+  const addOnStatus = customer.addOnStatus ?? {};
+  const maxConnectedAccounts = customer.maxConnectedAccounts ?? 0;
+  const baseStatus = customer.entitlement?.basePlan.status ?? (packageStatus === 'active' ? 'active' : 'pending');
+  const zernioStatus = addOnStatus.zernio ?? customer.entitlement?.connectSlots.status ?? 'inactive';
+  const includedSlots = customer.entitlement?.connectSlots.includedSlots ?? 0;
+  const purchasedSlots = customer.entitlement?.connectSlots.purchasedSlots ?? maxConnectedAccounts;
+  const trialSlots = customer.entitlement?.connectSlots.trialSlots ?? 0;
+  const totalSlots = customer.entitlement?.connectSlots.totalSlots ?? includedSlots + purchasedSlots + trialSlots;
+  const existingAddOns = customer.entitlement?.addOns ?? [];
+  const zernioAddon: AddOnEntitlement = existingAddOns.find((row) => row.id === 'zernio-connect') ?? {
+    id: 'zernio-connect',
+    name: 'Zernio Connect Slots',
+    status: zernioStatus,
+    slots: totalSlots,
+  };
+
+  return {
+    basePlan: {
+      planId: customer.entitlement?.basePlan.planId ?? (packageStatus === 'active' ? 'lite' : 'none'),
+      status: baseStatus,
+      billingCycle: customer.entitlement?.basePlan.billingCycle,
+      monthlyPriceUsd: customer.entitlement?.basePlan.monthlyPriceUsd ?? (packageStatus === 'active' ? 19 : undefined),
+      vps: customer.entitlement?.basePlan.vps ?? {
+        type: packageStatus === 'active' ? 'dedicated' : 'none',
+        size: packageStatus === 'active' ? 'small' : undefined,
+      },
+      agents: customer.entitlement?.basePlan.agents ?? {
+        included: packageStatus === 'active' ? 1 : 0,
+        kinds: packageStatus === 'active' ? ['ras1-hermes'] : [],
+      },
+      aiTokens: customer.entitlement?.basePlan.aiTokens,
+      activatedAtIso: customer.entitlement?.basePlan.activatedAtIso,
+      expiresAtIso: customer.entitlement?.basePlan.expiresAtIso,
+    },
+    connectSlots: {
+      status: zernioStatus,
+      includedSlots,
+      purchasedSlots,
+      trialSlots,
+      totalSlots,
+      activeConnectedAccounts,
+      trialExpiresAtIso: customer.entitlement?.connectSlots.trialExpiresAtIso,
+      soloApiEnabled: customer.entitlement?.connectSlots.soloApiEnabled,
+    },
+    addOns: [zernioAddon, ...existingAddOns.filter((row) => row.id !== 'zernio-connect')],
+  };
 }
 
 export class JsonRasStore {
@@ -82,6 +221,8 @@ export class JsonRasStore {
       connectedAccounts: [],
       jobs: [],
       webhookEvents: [],
+      webhookFailures: [],
+      webhookStatus: { enabled: true, consecutiveFailures: 0 },
       auditLogs: [],
     };
 
@@ -97,7 +238,10 @@ export class JsonRasStore {
     state.connectedAccounts ??= [];
     state.jobs ??= [];
     state.webhookEvents ??= [];
+    state.webhookFailures ??= [];
+    state.webhookStatus ??= { enabled: true, consecutiveFailures: 0 };
     state.auditLogs ??= [];
+    this.pruneWebhookLogs(state, now);
     await this.write(state);
 
     return {
@@ -139,6 +283,61 @@ export class JsonRasStore {
     return session;
   }
 
+
+  async upsertGoogleUser(input: { email: string; displayName?: string; nowIso?: string }): Promise<RasUser> {
+    const state = await this.load();
+    const now = input.nowIso ?? new Date().toISOString();
+    const email = input.email.toLowerCase();
+    const existing = state.users.find((row) => row.email.toLowerCase() === email);
+    if (existing) {
+      const updated: RasUser = {
+        ...existing,
+        displayName: input.displayName ?? existing.displayName,
+        status: 'active',
+        updatedAtIso: now,
+      };
+      await this.upsertUser(updated);
+      return updated;
+    }
+
+    const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
+    const entropy = Math.random().toString(36).slice(2, 8);
+    const customerId = `cust_${slug}_${entropy}`;
+    const user: RasUser = {
+      id: `user_${slug}_${entropy}`,
+      email,
+      displayName: input.displayName,
+      role: 'owner',
+      customerId,
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    };
+    const customer: RasCustomer = {
+      id: customerId,
+      name: input.displayName ?? email,
+      email,
+      status: 'pending',
+      billingStatus: 'trial',
+      packageStatus: 'pending',
+      maxConnectedAccounts: 0,
+      activeConnectedAccounts: 0,
+      addOnStatus: {},
+      createdAtIso: now,
+      updatedAtIso: now,
+    };
+    await this.upsertCustomer({
+      ...customer,
+      entitlement: normalizeEntitlement(customer, 0),
+    });
+    return this.upsertUser(user);
+  }
+
+  async createSessionForGoogleUser(input: { email: string; displayName?: string; nowIso?: string; ttlMs?: number }): Promise<RasSession> {
+    const user = await this.upsertGoogleUser(input);
+    return this.createSession({ userId: user.id, nowIso: input.nowIso, ttlMs: input.ttlMs });
+  }
+
   async login(input: { email: string; password: string; nowIso?: string }): Promise<RasSession | undefined> {
     const state = await this.load();
     const email = input.email.toLowerCase();
@@ -158,13 +357,29 @@ export class JsonRasStore {
     const customer = state.customers.find((row) => row.id === user.customerId);
     if (!customer) return undefined;
     const { password: _password, ...safeUser } = user;
+    const connectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
+    const activeConnectedAccounts = connectedAccounts.filter((row) => row.status === 'connected').length;
+    const maxConnectedAccounts = customer.maxConnectedAccounts ?? 0;
+    const addOnStatus = customer.addOnStatus ?? {};
+    const hasActivePlan = customer.packageStatus === 'active' || customer.billingStatus === 'active' || maxConnectedAccounts > 0;
+    const dashboardState: RasDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
+    const entitlement = normalizeEntitlement(customer, activeConnectedAccounts);
     return {
       user: safeUser,
-      customer,
+      customer: { ...customer, entitlement },
+      state: dashboardState,
+      entitlement: {
+        ...entitlement,
+        plan: entitlement.basePlan.planId,
+        maxConnectedAccounts: entitlement.connectSlots.totalSlots,
+        activeConnectedAccounts,
+        addOnStatus,
+      },
+      cta: dashboardState === 'needs_plan' ? { label: 'Chọn gói để kích hoạt workspace', href: '/pay' } : undefined,
       sandboxes: state.sandboxes.filter((row) => row.customerId === customer.id),
       agents: state.agents.filter((row) => row.customerId === customer.id),
       servicePackages: state.servicePackages.filter((row) => row.id === customer.servicePackageId),
-      connectedAccounts: state.connectedAccounts.filter((row) => row.customerId === customer.id),
+      connectedAccounts,
     };
   }
 
@@ -175,6 +390,78 @@ export class JsonRasStore {
     else state.customers.push(customer);
     await this.write(state);
     return customer;
+  }
+
+  async getCustomerMapping(customerId: string): Promise<CustomerMapping | undefined> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) return undefined;
+    const accounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
+    return {
+      tenantId: customer.tenantId,
+      customerId: customer.id,
+      zernioProfileId: customer.zernioProfileId,
+      zernioProfileIds: customer.zernioProfileIds ?? (customer.zernioProfileId ? [customer.zernioProfileId] : []),
+      maxConnectedAccounts: customer.maxConnectedAccounts ?? 0,
+      activeConnectedAccounts: accounts.filter((row) => row.status === 'connected').length,
+      packageStatus: customer.packageStatus ?? customer.billingStatus ?? 'trial',
+      addOnStatus: customer.addOnStatus ?? {},
+      accounts: accounts.map(toAccountMapping),
+    };
+  }
+
+  async upsertCustomerEntitlement(input: {
+    customerId: string;
+    maxConnectedAccounts: number;
+    packageStatus?: RasCustomer['packageStatus'];
+    addOnStatus?: RasCustomer['addOnStatus'];
+    zernioProfileId?: string;
+    zernioProfileIds?: string[];
+    entitlement?: RasCustomer['entitlement'];
+  }): Promise<CustomerMapping> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === input.customerId);
+    if (!customer) throw new Error(`Customer not found: ${input.customerId}`);
+    const profileIds = Array.from(
+      new Set([
+        ...(customer.zernioProfileIds ?? []),
+        ...(customer.zernioProfileId ? [customer.zernioProfileId] : []),
+        ...(input.zernioProfileIds ?? []),
+        ...(input.zernioProfileId ? [input.zernioProfileId] : []),
+      ]),
+    );
+    await this.upsertCustomer({
+      ...customer,
+      zernioProfileId: input.zernioProfileId ?? customer.zernioProfileId ?? profileIds[0],
+      zernioProfileIds: profileIds,
+      maxConnectedAccounts: input.maxConnectedAccounts,
+      activeConnectedAccounts: state.connectedAccounts.filter(
+        (row) => row.customerId === customer.id && row.status === 'connected',
+      ).length,
+      entitlement: input.entitlement ?? customer.entitlement,
+      packageStatus: input.packageStatus ?? customer.packageStatus ?? 'active',
+      addOnStatus: input.addOnStatus ?? customer.addOnStatus,
+      updatedAtIso: new Date().toISOString(),
+    });
+    const mapping = await this.getCustomerMapping(input.customerId);
+    if (!mapping) throw new Error(`Customer not found: ${input.customerId}`);
+    return mapping;
+  }
+
+  async addCustomerZernioProfile(customerId: string, profileId: string): Promise<CustomerMapping> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) throw new Error(`Customer not found: ${customerId}`);
+    const profileIds = Array.from(new Set([...(customer.zernioProfileIds ?? []), customer.zernioProfileId, profileId].filter(Boolean) as string[]));
+    await this.upsertCustomer({
+      ...customer,
+      zernioProfileId: customer.zernioProfileId ?? profileId,
+      zernioProfileIds: profileIds,
+      updatedAtIso: new Date().toISOString(),
+    });
+    const mapping = await this.getCustomerMapping(customerId);
+    if (!mapping) throw new Error(`Customer not found: ${customerId}`);
+    return mapping;
   }
 
   async upsertSandbox(sandbox: RasSandboxEnvironment): Promise<RasSandboxEnvironment> {
@@ -215,6 +502,18 @@ export class JsonRasStore {
     return account;
   }
 
+  async upsertAccountMapping(account: ConnectedAccount): Promise<AccountMapping> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === account.customerId);
+    if (!customer) throw new Error(`Customer not found: ${account.customerId}`);
+    const allowedProfileIds = new Set([...(customer.zernioProfileIds ?? []), customer.zernioProfileId].filter(Boolean));
+    if (allowedProfileIds.size > 0 && account.zernioProfileId && !allowedProfileIds.has(account.zernioProfileId)) {
+      throw new Error(`Zernio profile mismatch: ${account.zernioProfileId}`);
+    }
+    const saved = await this.upsertConnectedAccount(account);
+    return toAccountMapping(saved);
+  }
+
   async getConnectedAccount(accountId: string): Promise<ConnectedAccount | undefined> {
     const state = await this.load();
     return state.connectedAccounts.find((account) => account.id === accountId);
@@ -233,6 +532,37 @@ export class JsonRasStore {
           account.status === 'connected' && Boolean(account.connectedAtIso) && Boolean(account.lastVerifiedAtIso),
       ),
       accounts,
+    };
+  }
+
+  async getCustomerLifecycleStatus(customerId: string): Promise<CustomerLifecycleStatus | undefined> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) return undefined;
+
+    const sandbox = customer.sandboxId ? state.sandboxes.find((row) => row.id === customer.sandboxId) : undefined;
+    const agents = state.agents.filter((row) => row.customerId === customer.id);
+    const blockers: string[] = [];
+
+    if (!sandbox) blockers.push('missing_sandbox');
+    else if (sandbox.status !== 'running') blockers.push(`sandbox_${sandbox.status}`);
+
+    const requiredAgentKinds: RasAgentInstance['kind'][] = ['ras1-hermes', 'ras2-openclaw'];
+    for (const kind of requiredAgentKinds) {
+      const agent = agents.find((row) => row.kind === kind);
+      if (!agent) blockers.push(`missing_${kind}`);
+      else {
+        if (sandbox && agent.sandboxId !== sandbox.id) blockers.push(`${kind}_wrong_sandbox`);
+        if (agent.status !== 'running') blockers.push(`${kind}_${agent.status}`);
+      }
+    }
+
+    return {
+      customer,
+      sandbox,
+      agents,
+      healthy: blockers.length === 0,
+      blockers,
     };
   }
 
@@ -308,8 +638,46 @@ export class JsonRasStore {
     const duplicate = state.webhookEvents.find((row) => row.source === event.source && row.id === event.id);
     if (duplicate) return { inserted: false, event: duplicate };
     state.webhookEvents.push(event);
+    state.webhookStatus = { enabled: true, consecutiveFailures: 0 };
+    this.pruneWebhookLogs(state);
     await this.write(state);
     return { inserted: true, event };
+  }
+
+  async recordWebhookFailure(
+    failure: Omit<StoredWebhookFailure, 'id' | 'createdAtIso'> & { createdAtIso?: string },
+  ): Promise<StoredWebhookStatus> {
+    const state = await this.load();
+    const createdAtIso = failure.createdAtIso ?? new Date().toISOString();
+    const current = state.webhookStatus ?? { enabled: true, consecutiveFailures: 0 };
+    const consecutiveFailures = failure.reason === 'webhook_disabled' ? current.consecutiveFailures : current.consecutiveFailures + 1;
+    state.webhookFailures.push({
+      id: `webhook_failure_${Date.now()}_${state.webhookFailures.length}`,
+      source: failure.source,
+      eventId: failure.eventId,
+      reason: failure.reason,
+      statusCode: failure.statusCode,
+      createdAtIso,
+    });
+    state.webhookStatus = {
+      enabled: current.enabled && consecutiveFailures < 10,
+      consecutiveFailures,
+      disabledAtIso: current.disabledAtIso ?? (consecutiveFailures >= 10 ? createdAtIso : undefined),
+    };
+    this.pruneWebhookLogs(state, createdAtIso);
+    await this.write(state);
+    return state.webhookStatus;
+  }
+
+  async getWebhookStatus(): Promise<StoredWebhookStatus & { recentEvents: StoredWebhookEvent[]; recentFailures: StoredWebhookFailure[] }> {
+    const state = await this.load();
+    this.pruneWebhookLogs(state);
+    await this.write(state);
+    return {
+      ...(state.webhookStatus ?? { enabled: true, consecutiveFailures: 0 }),
+      recentEvents: [...state.webhookEvents].sort((left, right) => Date.parse(right.createdAtIso) - Date.parse(left.createdAtIso)),
+      recentFailures: [...state.webhookFailures].sort((left, right) => Date.parse(right.createdAtIso) - Date.parse(left.createdAtIso)),
+    };
   }
 
   async appendAuditLog(log: StoredAuditLog): Promise<StoredAuditLog> {
@@ -332,6 +700,12 @@ export class JsonRasStore {
     state.jobs[index] = updated;
     await this.write(state);
     return updated;
+  }
+
+  private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {
+    const cutoff = Date.parse(nowIso) - 30 * 24 * 60 * 60 * 1000;
+    state.webhookEvents = (state.webhookEvents ?? []).filter((row) => Date.parse(row.createdAtIso) >= cutoff);
+    state.webhookFailures = (state.webhookFailures ?? []).filter((row) => Date.parse(row.createdAtIso) >= cutoff);
   }
 
   private async readIfExists(): Promise<RasPersistentState | undefined> {
