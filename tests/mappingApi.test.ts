@@ -124,7 +124,7 @@ test('mapping endpoints create tenant/customer/profile/account links without roo
   });
 });
 
-test('billing entitlement provisioning stores dynamic quota and creates the first Zernio profile lazily', async () => {
+test('billing entitlement provisioning accepts canonical payload fields and creates the first profile lazily', async () => {
   const state = emptyState();
   state.customers = [
     {
@@ -200,6 +200,72 @@ test('billing entitlement provisioning stores dynamic quota and creates the firs
     assert.equal(payload.entitlement.entitlement?.connectSlots?.includedSlots, 1);
     assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 2);
     assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 3);
+  });
+});
+
+test('billing entitlement provisioning accepts backward-compatible payload aliases', async () => {
+  const state = emptyState();
+  state.customers = [
+    {
+      id: 'cust_alias',
+      name: 'Alias Shop',
+      email: 'alias@example.test',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.users = [
+    {
+      id: 'user_alias',
+      email: 'alias@example.test',
+      displayName: 'Alias Owner',
+      role: 'owner',
+      customerId: 'cust_alias',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.sessions = [
+    {
+      id: 'sess_alias',
+      token: 'token_alias',
+      userId: 'user_alias',
+      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      createdAtIso: now,
+    },
+  ];
+
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/billing/entitlements/provision`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer token_alias', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        plan_id: 'lite',
+        billing_cycle: 'yearly',
+        connect_slots: 4,
+        amount: 480,
+      }),
+    });
+
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      entitlement: {
+        maxConnectedAccounts: number;
+        entitlement?: {
+          basePlan?: { planId?: string; billingCycle?: string; totalAmountUsd?: number };
+          connectSlots?: { purchasedSlots?: number; totalSlots?: number };
+        };
+      };
+    };
+
+    assert.equal(payload.entitlement.maxConnectedAccounts, 5);
+    assert.equal(payload.entitlement.entitlement?.basePlan?.planId, 'lite');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.billingCycle, 'yearly');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.totalAmountUsd, 480);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 4);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 5);
   });
 });
 

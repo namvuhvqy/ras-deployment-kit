@@ -63,6 +63,14 @@ function numberField(body: Record<string, unknown>, field: string): number | und
   return undefined;
 }
 
+function firstNumberField(body: Record<string, unknown>, fields: string[]): number | undefined {
+  for (const field of fields) {
+    const value = numberField(body, field);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
 const GOOGLE_OAUTH_SCOPE = 'openid email profile';
 const googleOAuthStates = new Map<string, { redirectTo: string; createdAtMs: number }>();
 
@@ -154,7 +162,7 @@ const RAS_PLAN_PRICES: Record<RasBasePlanId, { monthly: number; yearlyMonthly: n
 };
 
 function basePlanField(body: Record<string, unknown>): RasBasePlanId | undefined {
-  const value = stringField(body, 'plan');
+  const value = stringField(body, 'plan') ?? stringField(body, 'plan_id') ?? stringField(body, 'base_plan');
   return value === 'lite' || value === 'pro' || value === 'max' ? value : undefined;
 }
 
@@ -443,8 +451,8 @@ const server = createServer(async (req, res) => {
     const body = await readJsonBody(req);
     const plan = basePlanField(body);
     const billingCycle = billingCycleField(body);
-    const extraConnectSlots = numberField(body, 'extra_connect_slots');
-    const totalAmount = numberField(body, 'total_amount');
+    const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
+    const totalAmount = firstNumberField(body, ['total_amount', 'amount', 'totalAmount']);
     if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots) || totalAmount === undefined || totalAmount < 0) {
       res.statusCode = 400;
       res.end(JSON.stringify({ ok: false, error: 'missing_entitlement_fields' }));
