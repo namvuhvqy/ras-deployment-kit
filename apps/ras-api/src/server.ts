@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
+import type { RasEntitlement } from '../../../packages/shared/src/types.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -141,6 +142,24 @@ function objectField(body: Record<string, unknown>, field: string): Record<strin
   const value = body[field];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, status]) => [key, String(status)]));
+}
+
+type RasBasePlanId = 'lite' | 'pro' | 'max';
+type RasBillingCycle = 'monthly' | 'yearly';
+
+const RAS_PLAN_PRICES: Record<RasBasePlanId, { monthly: number; yearlyMonthly: number; vpsSize: 'small' | 'standard' | 'large'; aiTokenLimit: number }> = {
+  lite: { monthly: 19, yearlyMonthly: 16, vpsSize: 'small', aiTokenLimit: 100000 },
+  pro: { monthly: 39, yearlyMonthly: 33, vpsSize: 'standard', aiTokenLimit: 250000 },
+  max: { monthly: 59, yearlyMonthly: 49, vpsSize: 'large', aiTokenLimit: 500000 },
+};
+
+function basePlanField(body: Record<string, unknown>): RasBasePlanId | undefined {
+  const value = stringField(body, 'plan');
+  return value === 'lite' || value === 'pro' || value === 'max' ? value : undefined;
+}
+
+function billingCycleField(body: Record<string, unknown>): RasBillingCycle {
+  return stringField(body, 'billing_cycle') === 'yearly' ? 'yearly' : 'monthly';
 }
 
 function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' {
@@ -415,38 +434,76 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
     const body = await readJsonBody(req);
-    const customerId = stringField(body, 'customerId');
-    const maxConnectedAccounts = numberField(body, 'maxConnectedAccounts');
-    if (!customerId || maxConnectedAccounts === undefined || maxConnectedAccounts < 0) {
+    const plan = basePlanField(body);
+    const billingCycle = billingCycleField(body);
+    const extraConnectSlots = numberField(body, 'extra_connect_slots');
+    const totalAmount = numberField(body, 'total_amount');
+    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots) || totalAmount === undefined || totalAmount < 0) {
       res.statusCode = 400;
       res.end(JSON.stringify({ ok: false, error: 'missing_entitlement_fields' }));
       return;
     }
 
-    const state = await store.load();
-    const customer = state.customers.find((row) => row.id === customerId);
-    if (!customer) {
-      res.statusCode = 404;
-      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+    const planPrice = RAS_PLAN_PRICES[plan];
+    const expectedBase = billingCycle === 'yearly' ? planPrice.yearlyMonthly * 12 : planPrice.monthly;
+    const expectedConnect = billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6;
+    const expectedTotal = expectedBase + expectedConnect;
+    if (totalAmount !== expectedTotal) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_total_amount', expectedTotal }));
       return;
     }
 
+    const customerId = dashboard.customer.id;
+    const customer = dashboard.customer;
+    const maxConnectedAccounts = 1 + extraConnectSlots;
     let zernioProfileId = customer.zernioProfileId;
     if (!zernioProfileId && maxConnectedAccounts > 0) {
       const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
       zernioProfileId = profile.zernioProfileId;
     }
 
+    const entitlement: RasEntitlement = {
+      basePlan: {
+        planId: plan,
+        status: 'active' as const,
+        billingCycle,
+        monthlyPriceUsd: billingCycle === 'yearly' ? planPrice.yearlyMonthly : planPrice.monthly,
+        totalAmountUsd: expectedTotal,
+        vps: { type: 'dedicated' as const, size: planPrice.vpsSize },
+        agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] },
+        aiTokens: { monthlyLimit: planPrice.aiTokenLimit },
+        activatedAtIso: new Date().toISOString(),
+      },
+      connectSlots: {
+        status: 'active' as const,
+        includedSlots: 1,
+        purchasedSlots: extraConnectSlots,
+        trialSlots: 0,
+        totalSlots: maxConnectedAccounts,
+        activeConnectedAccounts: dashboard.customer.activeConnectedAccounts ?? 0,
+      },
+      addOns: [
+        { id: 'zernio-connect', name: 'Zernio Connect', status: 'active' as const, slots: maxConnectedAccounts, priceUsd: expectedConnect },
+      ],
+    };
     const mapping = await store.upsertCustomerEntitlement({
       customerId,
       maxConnectedAccounts,
-      packageStatus: (stringField(body, 'packageStatus') as 'pending' | 'active' | 'past_due' | 'cancelled' | undefined) ?? 'active',
-      addOnStatus: objectField(body, 'addOnStatus') as Record<string, 'pending' | 'active' | 'inactive' | 'cancelled'> | undefined,
+      packageStatus: 'active',
+      addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: maxConnectedAccounts > 0 ? 'active' : 'inactive' },
       zernioProfileId,
+      entitlement,
     });
     res.statusCode = 200;
-    res.end(JSON.stringify({ ok: true, entitlement: mapping }));
+    res.end(JSON.stringify({ ok: true, entitlement: { ...mapping, entitlement } }));
     return;
   }
 

@@ -136,16 +136,37 @@ test('billing entitlement provisioning stores dynamic quota and creates the firs
       updatedAtIso: now,
     },
   ];
+  state.users = [
+    {
+      id: 'user_entitled',
+      email: 'owner@entitled.test',
+      displayName: 'Entitled Owner',
+      role: 'owner',
+      customerId: 'cust_entitled',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    },
+  ];
+  state.sessions = [
+    {
+      id: 'sess_entitled',
+      token: 'token_entitled',
+      userId: 'user_entitled',
+      expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      createdAtIso: now,
+    },
+  ];
 
   await withApi(state, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/billing/entitlements/provision`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { authorization: 'Bearer token_entitled', 'content-type': 'application/json' },
       body: JSON.stringify({
-        customerId: 'cust_entitled',
-        maxConnectedAccounts: 3,
-        packageStatus: 'active',
-        addOnStatus: { zernio: 'active' },
+        plan: 'pro',
+        billing_cycle: 'monthly',
+        extra_connect_slots: 2,
+        total_amount: 51,
       }),
     });
 
@@ -159,6 +180,10 @@ test('billing entitlement provisioning stores dynamic quota and creates the firs
         addOnStatus: Record<string, string>;
         zernioProfileId: string;
         zernioProfileIds: string[];
+        entitlement?: {
+          basePlan?: { planId?: string; billingCycle?: string; totalAmountUsd?: number };
+          connectSlots?: { includedSlots?: number; purchasedSlots?: number; totalSlots?: number };
+        };
       };
     };
 
@@ -169,6 +194,12 @@ test('billing entitlement provisioning stores dynamic quota and creates the firs
     assert.equal(payload.entitlement.addOnStatus.zernio, 'active');
     assert.equal(payload.entitlement.zernioProfileId, 'zernio_cust_entitled');
     assert.deepEqual(payload.entitlement.zernioProfileIds, ['zernio_cust_entitled']);
+    assert.equal(payload.entitlement.entitlement?.basePlan?.planId, 'pro');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.billingCycle, 'monthly');
+    assert.equal(payload.entitlement.entitlement?.basePlan?.totalAmountUsd, 51);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.includedSlots, 1);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 2);
+    assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 3);
   });
 });
 

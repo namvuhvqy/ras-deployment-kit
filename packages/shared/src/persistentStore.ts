@@ -173,7 +173,7 @@ function normalizeEntitlement(customer: RasCustomer, activeConnectedAccounts: nu
 
   return {
     basePlan: {
-      planId: customer.entitlement?.basePlan.planId ?? (packageStatus === 'active' ? 'base-19' : 'none'),
+      planId: customer.entitlement?.basePlan.planId ?? (packageStatus === 'active' ? 'lite' : 'none'),
       status: baseStatus,
       billingCycle: customer.entitlement?.basePlan.billingCycle,
       monthlyPriceUsd: customer.entitlement?.basePlan.monthlyPriceUsd ?? (packageStatus === 'active' ? 19 : undefined),
@@ -417,6 +417,7 @@ export class JsonRasStore {
     addOnStatus?: RasCustomer['addOnStatus'];
     zernioProfileId?: string;
     zernioProfileIds?: string[];
+    entitlement?: RasCustomer['entitlement'];
   }): Promise<CustomerMapping> {
     const state = await this.load();
     const customer = state.customers.find((row) => row.id === input.customerId);
@@ -437,6 +438,7 @@ export class JsonRasStore {
       activeConnectedAccounts: state.connectedAccounts.filter(
         (row) => row.customerId === customer.id && row.status === 'connected',
       ).length,
+      entitlement: input.entitlement ?? customer.entitlement,
       packageStatus: input.packageStatus ?? customer.packageStatus ?? 'active',
       addOnStatus: input.addOnStatus ?? customer.addOnStatus,
       updatedAtIso: new Date().toISOString(),

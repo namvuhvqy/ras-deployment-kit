@@ -9,11 +9,15 @@ export type BillingStatus = 'trial' | 'active' | 'past_due' | 'cancelled';
 export type EntitlementStatus = 'pending' | 'active' | 'inactive' | 'past_due' | 'cancelled';
 export type RasUserRole = 'owner' | 'admin' | 'operator' | 'viewer';
 
+export type RasBasePlanId = 'none' | 'lite' | 'pro' | 'max';
+export type RasBillingCycle = 'monthly' | 'yearly';
+
 export interface BasePlanEntitlement {
-  planId: 'none' | string;
+  planId: RasBasePlanId;
   status: EntitlementStatus;
-  billingCycle?: 'monthly' | 'yearly';
+  billingCycle?: RasBillingCycle;
   monthlyPriceUsd?: number;
+  totalAmountUsd?: number;
   vps: {
     type: 'none' | 'dedicated' | 'shared';
     size?: 'small' | 'standard' | 'large' | string;
