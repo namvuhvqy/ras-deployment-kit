@@ -2,9 +2,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
 import type {
+  AddOnEntitlement,
   ConnectedAccount,
   RasAgentInstance,
   RasCustomer,
+  RasEntitlement,
   RasJob,
   RasSandboxEnvironment,
   RasServicePackage,
@@ -77,10 +79,14 @@ export interface RasDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
   state: 'ready' | 'needs_plan';
-  entitlement: {
+  entitlement: RasEntitlement & {
+    /** Backward-compatible plan label for older frontend consumers. */
     plan: 'none' | string;
+    /** Backward-compatible connect slot quota. Prefer entitlement.connectSlots.totalSlots. */
     maxConnectedAccounts: number;
+    /** Backward-compatible connected account count. Prefer entitlement.connectSlots.activeConnectedAccounts. */
     activeConnectedAccounts: number;
+    /** Backward-compatible add-on status map. Prefer entitlement.addOns. */
     addOnStatus: Record<string, string>;
   };
   cta?: {
@@ -144,6 +150,56 @@ function toAccountMapping(account: ConnectedAccount): AccountMapping {
     createPostScope: {
       platforms: [{ platform: account.platform, accountId: account.zernioAccountId }],
     },
+  };
+}
+
+function normalizeEntitlement(customer: RasCustomer, activeConnectedAccounts: number): RasEntitlement {
+  const packageStatus = customer.packageStatus ?? (customer.billingStatus === 'active' ? 'active' : 'pending');
+  const addOnStatus = customer.addOnStatus ?? {};
+  const maxConnectedAccounts = customer.maxConnectedAccounts ?? 0;
+  const baseStatus = customer.entitlement?.basePlan.status ?? (packageStatus === 'active' ? 'active' : 'pending');
+  const zernioStatus = addOnStatus.zernio ?? customer.entitlement?.connectSlots.status ?? 'inactive';
+  const includedSlots = customer.entitlement?.connectSlots.includedSlots ?? 0;
+  const purchasedSlots = customer.entitlement?.connectSlots.purchasedSlots ?? maxConnectedAccounts;
+  const trialSlots = customer.entitlement?.connectSlots.trialSlots ?? 0;
+  const totalSlots = customer.entitlement?.connectSlots.totalSlots ?? includedSlots + purchasedSlots + trialSlots;
+  const existingAddOns = customer.entitlement?.addOns ?? [];
+  const zernioAddon: AddOnEntitlement = existingAddOns.find((row) => row.id === 'zernio-connect') ?? {
+    id: 'zernio-connect',
+    name: 'Zernio Connect Slots',
+    status: zernioStatus,
+    slots: totalSlots,
+  };
+
+  return {
+    basePlan: {
+      planId: customer.entitlement?.basePlan.planId ?? (packageStatus === 'active' ? 'base-19' : 'none'),
+      status: baseStatus,
+      billingCycle: customer.entitlement?.basePlan.billingCycle,
+      monthlyPriceUsd: customer.entitlement?.basePlan.monthlyPriceUsd ?? (packageStatus === 'active' ? 19 : undefined),
+      vps: customer.entitlement?.basePlan.vps ?? {
+        type: packageStatus === 'active' ? 'dedicated' : 'none',
+        size: packageStatus === 'active' ? 'small' : undefined,
+      },
+      agents: customer.entitlement?.basePlan.agents ?? {
+        included: packageStatus === 'active' ? 1 : 0,
+        kinds: packageStatus === 'active' ? ['ras1-hermes'] : [],
+      },
+      aiTokens: customer.entitlement?.basePlan.aiTokens,
+      activatedAtIso: customer.entitlement?.basePlan.activatedAtIso,
+      expiresAtIso: customer.entitlement?.basePlan.expiresAtIso,
+    },
+    connectSlots: {
+      status: zernioStatus,
+      includedSlots,
+      purchasedSlots,
+      trialSlots,
+      totalSlots,
+      activeConnectedAccounts,
+      trialExpiresAtIso: customer.entitlement?.connectSlots.trialExpiresAtIso,
+      soloApiEnabled: customer.entitlement?.connectSlots.soloApiEnabled,
+    },
+    addOns: [zernioAddon, ...existingAddOns.filter((row) => row.id !== 'zernio-connect')],
   };
 }
 
@@ -257,7 +313,7 @@ export class JsonRasStore {
       createdAtIso: now,
       updatedAtIso: now,
     };
-    await this.upsertCustomer({
+    const customer: RasCustomer = {
       id: customerId,
       name: input.displayName ?? email,
       email,
@@ -269,6 +325,10 @@ export class JsonRasStore {
       addOnStatus: {},
       createdAtIso: now,
       updatedAtIso: now,
+    };
+    await this.upsertCustomer({
+      ...customer,
+      entitlement: normalizeEntitlement(customer, 0),
     });
     return this.upsertUser(user);
   }
@@ -303,13 +363,15 @@ export class JsonRasStore {
     const addOnStatus = customer.addOnStatus ?? {};
     const hasActivePlan = customer.packageStatus === 'active' || customer.billingStatus === 'active' || maxConnectedAccounts > 0;
     const dashboardState: RasDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
+    const entitlement = normalizeEntitlement(customer, activeConnectedAccounts);
     return {
       user: safeUser,
-      customer,
+      customer: { ...customer, entitlement },
       state: dashboardState,
       entitlement: {
-        plan: hasActivePlan ? (customer.packageStatus ?? customer.billingStatus ?? 'active') : 'none',
-        maxConnectedAccounts,
+        ...entitlement,
+        plan: entitlement.basePlan.planId,
+        maxConnectedAccounts: entitlement.connectSlots.totalSlots,
         activeConnectedAccounts,
         addOnStatus,
       },

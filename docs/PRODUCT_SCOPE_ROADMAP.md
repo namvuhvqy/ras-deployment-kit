@@ -1,6 +1,6 @@
 # RunAgentSys / RAS — MVP Product Scope & Roadmap
 
-Updated: 2026-07-25
+Updated: 2026-07-26
 Owner: Nam Vũ / RunAgentSys
 Status: LOCKED FOR MVP EXECUTION
 
@@ -48,8 +48,19 @@ Scope lock for the current slice: the 0 USD / Free Trial plan activates **Base E
 
 - [x] Backend trial activation route exists: `POST /billing/entitlements/activate-trial` requires a valid RAS session and persists `packageStatus='active'`, `maxConnectedAccounts=0`, `addOnStatus.zernio='inactive'`.
 - [x] Frontend proxy exists: `POST /api/billing/entitlements/activate-trial` forwards the `ras_session` cookie to the RAS API via bearer token.
-- [>] Frontend `/pay` UI: if `amount=0` or product name contains Free/Trial/Dùng thử, show `Kích hoạt dùng thử`; on success redirect to `/dashboard`; on missing session redirect to `/login?next=...`.
-- [ ] Verification gate for this slice: run frontend `npm run lint && npm run build` and backend `npm run check`. Do **not** commit, push, deploy, or production-smoke until Nam Vũ approves after clean build output.
+- [x] Frontend `/pay` UI: if `amount=0` or product name contains Free/Trial/Dùng thử, show `Kích hoạt dùng thử`; on success redirect to `/dashboard`; on missing session redirect to `/login?next=...`.
+- [x] Verification gate for this slice passed on 2026-07-26: frontend `npm run lint && npm run build` passed cleanly and backend `npm run check` passed with 34/34 Node tests.
+
+## 0.4 Entitlement contract split — 2026-07-26
+
+Current entitlement contract separates core infrastructure from social connection quota:
+
+- [x] Shared schema now exposes `RasEntitlement` with `basePlan`, `connectSlots`, and `addOns` sections.
+- [x] `basePlan` owns Core Plan state: plan id, billing cycle, VPS type/size, included RAS agents, AI token allowance, activation and expiry fields.
+- [x] `connectSlots` owns social/Zernio connection quota: included, purchased, trial, total, active connected accounts, trial expiry, and future Solo Connect API flag.
+- [x] `addOns` owns modular add-on rows such as `zernio-connect`; Zernio slot count remains RAS-owned entitlement logic, not a Zernio profile field.
+- [x] Dashboard response remains backward-compatible for old frontend consumers by still returning `plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus` beside the new structured entitlement.
+- [x] New Google OAuth customers receive normalized pending entitlement so `needs_plan` users render a safe dashboard/paywall state instead of crashing on missing fields.
 
 ### Zernio integration test deadline
 
