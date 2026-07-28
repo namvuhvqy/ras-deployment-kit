@@ -1,11 +1,13 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
+import { createZernioWebhookRouter } from './webhookRouter.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
-import type { RasEntitlement } from '../../../packages/shared/src/types.js';
+import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
+const zernioWebhookRouter = createZernioWebhookRouter({ store, secret: process.env.ZERNIO_WEBHOOK_SECRET });
 const port = Number(process.env.PORT ?? 8080);
 
 const ready = store.migrate();
@@ -40,6 +42,56 @@ function verifySignature(rawBody: Buffer, signature: string | undefined, secret:
 function firstHeader(req: IncomingMessage, name: string): string | undefined {
   const value = req.headers[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
+}
+
+const PAYPAL_SANDBOX_API = 'https://api-m.sandbox.paypal.com';
+
+async function paypalSandboxAccessToken(): Promise<string | undefined> {
+  const clientId = process.env.PAYPAL_CLIENT_ID;
+  const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return undefined;
+  const authorization = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const response = await fetch(`${PAYPAL_SANDBOX_API}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: { authorization: `Basic ${authorization}`, 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=client_credentials',
+  });
+  if (!response.ok) return undefined;
+  const payload = (await response.json()) as { access_token?: string };
+  return payload.access_token;
+}
+
+async function verifyPaypalSandboxWebhook(rawBody: Buffer, req: IncomingMessage, webhookId: string): Promise<boolean> {
+  const transmissionId = firstHeader(req, 'paypal-transmission-id');
+  const transmissionTime = firstHeader(req, 'paypal-transmission-time');
+  const transmissionSig = firstHeader(req, 'paypal-transmission-sig');
+  const certUrl = firstHeader(req, 'paypal-cert-url');
+  const authAlgo = firstHeader(req, 'paypal-auth-algo');
+  if (!transmissionId || !transmissionTime || !transmissionSig || !certUrl || !authAlgo) return false;
+  const accessToken = await paypalSandboxAccessToken();
+  if (!accessToken) return false;
+  let webhookEvent: Record<string, unknown>;
+  try {
+    webhookEvent = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  const response = await fetch(`${PAYPAL_SANDBOX_API}/v1/notifications/verify-webhook-signature`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      auth_algo: authAlgo,
+      cert_url: certUrl,
+      transmission_id: transmissionId,
+      transmission_sig: transmissionSig,
+      transmission_time: transmissionTime,
+      webhook_id: webhookId,
+      webhook_event: webhookEvent,
+    }),
+  });
+  if (!response.ok) return false;
+  const payload = (await response.json()) as { verification_status?: string };
+  return payload.verification_status === 'SUCCESS';
 }
 
 function bearerToken(req: IncomingMessage): string | undefined {
@@ -114,6 +166,29 @@ function consumeOAuthState(state: string | undefined): { redirectTo: string } | 
   return { redirectTo: stored.redirectTo };
 }
 
+async function requireCustomerAccess(req: IncomingMessage, customerId: string): Promise<'ok' | 'unauthorized' | 'forbidden'> {
+  const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+  if (!dashboard) return 'unauthorized';
+  if (dashboard.customer.id !== customerId) return 'forbidden';
+  return 'ok';
+}
+
+function endCustomerAccessError(res: { statusCode: number; end: (chunk: string) => void }, access: 'unauthorized' | 'forbidden') {
+  res.statusCode = access === 'unauthorized' ? 401 : 403;
+  res.end(JSON.stringify({ ok: false, error: access }));
+}
+
+function requireInternalAccess(req: IncomingMessage): boolean {
+  const token = process.env.RAS_INTERNAL_API_TOKEN;
+  if (!token) return false;
+  return firstHeader(req, 'x-ras-internal-token') === token;
+}
+
+function endInternalAccessError(res: { statusCode: number; end: (chunk: string) => void }) {
+  res.statusCode = 401;
+  res.end(JSON.stringify({ ok: false, error: 'missing_internal_token' }));
+}
+
 async function exchangeGoogleCode(req: IncomingMessage, code: string): Promise<string> {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -152,16 +227,15 @@ function objectField(body: Record<string, unknown>, field: string): Record<strin
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, status]) => [key, String(status)]));
 }
 
-type RasBasePlanId = 'lite' | 'pro' | 'max';
-type RasBillingCycle = 'monthly' | 'yearly';
+type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
 
-const RAS_PLAN_PRICES: Record<RasBasePlanId, { monthly: number; yearlyMonthly: number; vpsSize: 'small' | 'standard' | 'large'; aiTokenLimit: number }> = {
+const RAS_PLAN_PRICES: Record<PaidRasBasePlanId, { monthly: number; yearlyMonthly: number; vpsSize: 'small' | 'standard' | 'large'; aiTokenLimit: number }> = {
   lite: { monthly: 19, yearlyMonthly: 16, vpsSize: 'small', aiTokenLimit: 100000 },
   pro: { monthly: 39, yearlyMonthly: 33, vpsSize: 'standard', aiTokenLimit: 250000 },
   max: { monthly: 59, yearlyMonthly: 49, vpsSize: 'large', aiTokenLimit: 500000 },
 };
 
-function basePlanField(body: Record<string, unknown>): RasBasePlanId | undefined {
+function basePlanField(body: Record<string, unknown>): PaidRasBasePlanId | undefined {
   const value = stringField(body, 'plan') ?? stringField(body, 'plan_id') ?? stringField(body, 'base_plan');
   return value === 'lite' || value === 'pro' || value === 'max' ? value : undefined;
 }
@@ -218,6 +292,8 @@ const server = createServer(async (req, res) => {
   await ready;
   res.setHeader('content-type', 'application/json; charset=utf-8');
 
+  if (await zernioWebhookRouter(req, res)) return;
+
   if (req.url === '/health') {
     const state = await store.load();
     res.end(
@@ -245,63 +321,54 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/webhooks/zernio') {
-    const status = await store.getWebhookStatus();
-    const headerEventId = firstHeader(req, 'x-zernio-event-id');
-    if (!status.enabled) {
-      await store.recordWebhookFailure({ source: 'zernio', eventId: headerEventId, reason: 'webhook_disabled', statusCode: 503 });
+
+  if (req.method === 'POST' && req.url === '/webhooks/paypal/sandbox') {
+    // Intentionally Sandbox-only: this process has no PayPal Live webhook route.
+    const webhookId = process.env.PAYPAL_WEBHOOK_ID_SANDBOX;
+    if (process.env.PAYPAL_MODE !== 'sandbox' || !webhookId || !process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
       res.statusCode = 503;
-      res.end(JSON.stringify({ ok: false, error: 'webhook_disabled' }));
+      res.end(JSON.stringify({ ok: false, error: 'paypal_sandbox_webhook_not_configured' }));
       return;
     }
-
+    const requiredHeaders = ['paypal-transmission-id', 'paypal-transmission-time', 'paypal-transmission-sig', 'paypal-cert-url', 'paypal-auth-algo'];
+    if (requiredHeaders.some((header) => !firstHeader(req, header))) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'missing_paypal_transmission_headers' }));
+      return;
+    }
     const rawBody = await readRawBody(req);
-    const signatureStatus = verifySignature(rawBody, firstHeader(req, 'x-zernio-signature'), process.env.ZERNIO_WEBHOOK_SECRET);
-    if (signatureStatus === 'invalid' || signatureStatus === 'missing') {
-      const failureStatus = await store.recordWebhookFailure({
-        source: 'zernio',
-        eventId: headerEventId,
-        reason: `${signatureStatus}_signature`,
-        statusCode: signatureStatus === 'missing' ? 400 : 401,
-      });
-      res.statusCode = failureStatus.enabled ? (signatureStatus === 'missing' ? 400 : 401) : 503;
-      res.end(JSON.stringify({ ok: false, error: `${signatureStatus}_signature`, disabled: !failureStatus.enabled }));
-      return;
-    }
-
     let payload: Record<string, unknown>;
     try {
       payload = rawBody.length ? (JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>) : {};
     } catch {
-      const failureStatus = await store.recordWebhookFailure({ source: 'zernio', eventId: headerEventId, reason: 'invalid_json', statusCode: 400 });
-      res.statusCode = failureStatus.enabled ? 400 : 503;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_json', disabled: !failureStatus.enabled }));
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
       return;
     }
-
-    const payloadEventId = typeof payload.id === 'string' && payload.id.length > 0 ? payload.id : undefined;
-    const eventId = headerEventId ?? payloadEventId;
+    const eventId = stringField(payload, 'id');
     if (!eventId) {
-      const failureStatus = await store.recordWebhookFailure({ source: 'zernio', reason: 'missing_event_id', statusCode: 400 });
-      res.statusCode = failureStatus.enabled ? 400 : 503;
-      res.end(JSON.stringify({ ok: false, error: 'missing_event_id', disabled: !failureStatus.enabled }));
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'missing_paypal_event_id' }));
       return;
     }
-
-    const eventType = typeof payload.type === 'string' ? payload.type : 'unknown';
+    const verified = await verifyPaypalSandboxWebhook(rawBody, req, webhookId);
+    if (!verified) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_paypal_webhook_signature' }));
+      return;
+    }
+    const eventType = stringField(payload, 'event_type') ?? 'unknown';
     const result = await store.recordWebhookEvent({
       id: eventId,
-      source: 'zernio',
-      profileId: typeof payload.profileId === 'string' ? payload.profileId : undefined,
-      accountId: typeof payload.accountId === 'string' ? payload.accountId : undefined,
+      source: 'paypal_sandbox',
       eventType,
       payload,
       processedAtIso: new Date().toISOString(),
       createdAtIso: new Date().toISOString(),
-      signatureStatus,
+      signatureStatus: 'verified',
     });
     res.statusCode = result.inserted ? 202 : 200;
-    res.end(JSON.stringify({ ok: true, deduped: !result.inserted, eventId, signature: signatureStatus }));
+    res.end(JSON.stringify({ ok: true, deduped: !result.inserted, eventId, signature: 'verified' }));
     return;
   }
 
@@ -441,6 +508,110 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/billing/payments/captured') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      return;
+    }
+    const body = await readJsonBody(req);
+    const plan = basePlanField(body);
+    const billingCycle = billingCycleField(body);
+    const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
+    const totalAmount = firstNumberField(body, ['total_amount', 'amount', 'totalAmount']);
+    const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
+    const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');
+    const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'status');
+    const currency = (stringField(body, 'currency') ?? 'USD').toUpperCase();
+
+    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots) || totalAmount === undefined || totalAmount < 0 || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' }));
+      return;
+    }
+
+    const planPrice = RAS_PLAN_PRICES[plan];
+    const expectedBase = billingCycle === 'yearly' ? planPrice.yearlyMonthly * 12 : planPrice.monthly;
+    const expectedConnect = billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6;
+    const expectedTotal = expectedBase + expectedConnect;
+    if (totalAmount !== expectedTotal || currency !== 'USD') {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_payment_amount', expectedTotal }));
+      return;
+    }
+
+    const customerId = dashboard.customer.id;
+    const payment = await store.recordBillingPaymentCapture({
+      provider: 'paypal',
+      customerId,
+      paypalOrderId,
+      transactionId,
+      status: 'captured',
+      amount: String(totalAmount),
+      currency,
+      plan,
+      billingCycle,
+      extraConnectSlots,
+      rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body,
+      createdAtIso: new Date().toISOString(),
+      updatedAtIso: new Date().toISOString(),
+    });
+
+    try {
+      const customer = dashboard.customer;
+      const maxConnectedAccounts = 1 + extraConnectSlots;
+      let zernioProfileId = customer.zernioProfileId;
+      if (!zernioProfileId && maxConnectedAccounts > 0) {
+        const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
+        zernioProfileId = profile.zernioProfileId;
+      }
+
+      const entitlement: RasEntitlement = {
+        basePlan: {
+          planId: plan,
+          status: 'active' as const,
+          billingCycle,
+          monthlyPriceUsd: billingCycle === 'yearly' ? planPrice.yearlyMonthly : planPrice.monthly,
+          totalAmountUsd: expectedTotal,
+          vps: { type: 'dedicated' as const, size: planPrice.vpsSize },
+          agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] },
+          aiTokens: { monthlyLimit: planPrice.aiTokenLimit },
+          activatedAtIso: new Date().toISOString(),
+        },
+        connectSlots: {
+          status: 'active' as const,
+          includedSlots: 1,
+          purchasedSlots: extraConnectSlots,
+          trialSlots: 0,
+          totalSlots: maxConnectedAccounts,
+          activeConnectedAccounts: dashboard.customer.activeConnectedAccounts ?? 0,
+        },
+        addOns: [
+          { id: 'zernio-connect', name: 'Zernio Connect', status: 'active' as const, slots: maxConnectedAccounts, priceUsd: expectedConnect },
+        ],
+      };
+      const mapping = await store.upsertCustomerEntitlement({
+        customerId,
+        maxConnectedAccounts,
+        packageStatus: 'active',
+        addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: maxConnectedAccounts > 0 ? 'active' : 'inactive' },
+        zernioProfileId,
+        entitlement,
+      });
+      await store.markBillingPaymentProvisioned(payment.id);
+      res.statusCode = 200;
+      res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: 'provisioned', transactionId }, entitlement: { ...mapping, entitlement } }));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'provision_failed';
+      const pendingPayment = await store.markBillingPaymentProvisionFailed(payment.id, message);
+      res.statusCode = 202;
+      res.end(JSON.stringify({ ok: false, error: 'provision_pending_retry', payment: pendingPayment }));
+      return;
+    }
+  }
+
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) {
@@ -526,6 +697,12 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    const access = await requireCustomerAccess(req, customerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
+
     await refreshZernioAccountsForCustomer(customerId);
     const mapping = await store.getCustomerMapping(customerId);
     if (!mapping) {
@@ -567,6 +744,10 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/mappings/customers') {
+    if (!requireInternalAccess(req)) {
+      endInternalAccessError(res);
+      return;
+    }
     const body = await readJsonBody(req);
     const customerId = stringField(body, 'customerId');
     const name = stringField(body, 'name');
@@ -599,6 +780,10 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/mappings/accounts') {
+    if (!requireInternalAccess(req)) {
+      endInternalAccessError(res);
+      return;
+    }
     const body = await readJsonBody(req);
     const accountId = stringField(body, 'accountId');
     const customerId = stringField(body, 'customerId');
@@ -643,7 +828,13 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url?.startsWith('/mappings/customers/')) {
     const [, , , customerId] = req.url.split('/');
-    const mapping = await store.getCustomerMapping(decodeURIComponent(customerId));
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
+    const mapping = await store.getCustomerMapping(decodedCustomerId);
     if (!mapping) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
@@ -655,8 +846,14 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/mapping')) {
     const [, , customerId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
     const state = await store.load();
-    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    const customer = state.customers.find((row) => row.id === decodedCustomerId);
     if (!customer) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
@@ -678,7 +875,13 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/lifecycle-status')) {
     const [, , customerId] = req.url.split('/');
-    const lifecycle = await store.getCustomerLifecycleStatus(decodeURIComponent(customerId));
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
+    const lifecycle = await store.getCustomerLifecycleStatus(decodedCustomerId);
     if (!lifecycle) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
@@ -690,8 +893,14 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/audit-logs')) {
     const [, , customerId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
     const state = await store.load();
-    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    const customer = state.customers.find((row) => row.id === decodedCustomerId);
     if (!customer) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
@@ -706,8 +915,14 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/service-package')) {
     const [, , customerId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
     const state = await store.load();
-    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    const customer = state.customers.find((row) => row.id === decodedCustomerId);
     if (!customer) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
@@ -727,8 +942,14 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/billing-state')) {
     const [, , customerId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
     const state = await store.load();
-    const customer = state.customers.find((row) => row.id === decodeURIComponent(customerId));
+    const customer = state.customers.find((row) => row.id === decodedCustomerId);
     if (!customer) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
@@ -750,6 +971,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
     const sync = await refreshZernioAccountsForCustomer(decodedCustomerId);
     const summary = await store.getConnectionSummary(decodedCustomerId);
     const integrations = summary.accounts.map((account) => ({

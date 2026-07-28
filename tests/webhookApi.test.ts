@@ -59,83 +59,87 @@ function signature(secret: string, rawBody: string): string {
   return createHmac('sha256', secret).update(rawBody).digest('hex');
 }
 
-test('zernio webhook verifies raw body signature and deduplicates by header event id', async () => {
-  const rawBody = '{"id":"payload_1","type":"post.published","profileId":"profile_1","accountId":"acct_1","nested":{"spacing":"kept"}}';
-  await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
-    const first = await fetch(`${baseUrl}/webhooks/zernio`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-zernio-event-id': 'evt_header_1',
-        'x-zernio-signature': signature('topsecret', rawBody),
-      },
-      body: rawBody,
-    });
+test('zernio master webhook verifies payload.id/event, schema, HMAC, audit and dedupe', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+  const rawBody = JSON.stringify({ id: 'evt_1', event: 'account.connected', account: { accountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'ag' }, timestamp: now });
+  await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
+    const headers = { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) };
+    const first = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
     assert.equal(first.status, 202);
-    assert.deepEqual(await first.json(), { ok: true, deduped: false, eventId: 'evt_header_1', signature: 'verified' });
-
-    const duplicate = await fetch(`${baseUrl}/webhooks/zernio`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-zernio-event-id': 'evt_header_1',
-        'x-zernio-signature': signature('topsecret', rawBody),
-      },
-      body: rawBody,
-    });
+    assert.deepEqual(await first.json(), { ok: true, deduped: false, eventId: 'evt_1', signature: 'verified' });
+    const duplicate = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
     assert.equal(duplicate.status, 200);
-    assert.deepEqual(await duplicate.json(), { ok: true, deduped: true, eventId: 'evt_header_1', signature: 'verified' });
-
     const logs = await fetch(`${baseUrl}/webhooks/zernio/status`);
-    assert.equal(logs.status, 200);
-    const payload = (await logs.json()) as { status: { enabled: boolean; consecutiveFailures: number; recentEvents: Array<{ id: string }> } };
-    assert.equal(payload.status.enabled, true);
-    assert.equal(payload.status.consecutiveFailures, 0);
-    assert.deepEqual(payload.status.recentEvents.map((event) => event.id), ['evt_header_1']);
+    const payload = (await logs.json()) as { status: { recentEvents: Array<{ id: string; eventType: string }>; } };
+    assert.deepEqual(payload.status.recentEvents.map((event) => [event.id, event.eventType]), [['evt_1', 'account.connected']]);
   });
 });
 
-test('zernio webhook rejects bad signatures, records failure log, and auto-disables after ten failures', async () => {
-  const rawBody = JSON.stringify({ id: 'payload_bad', type: 'post.failed' });
+test('zernio master webhook is fail-closed for bad signature and invalid schema', async () => {
+  const rawBody = JSON.stringify({ id: 'evt_bad', event: 'account.connected', timestamp: now });
   await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
-    for (let i = 1; i <= 10; i += 1) {
-      const response = await fetch(`${baseUrl}/webhooks/zernio`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-zernio-event-id': `evt_bad_${i}`, 'x-zernio-signature': 'bad' },
-        body: rawBody,
-      });
-      assert.equal(response.status, i === 10 ? 503 : 401);
-    }
+    const badSignature = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-zernio-signature': 'bad' }, body: rawBody });
+    assert.equal(badSignature.status, 401);
+    const schemaInvalid = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) }, body: rawBody });
+    assert.equal(schemaInvalid.status, 422);
+  });
+});
 
-    const disabled = await fetch(`${baseUrl}/webhooks/zernio`, {
+test('zernio master webhook refuses delivery when the server secret is absent', async () => {
+  const rawBody = JSON.stringify({ id: 'evt_secret', event: 'webhook.test', message: 'test', timestamp: now });
+  await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: '' }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: rawBody });
+    assert.equal(response.status, 400);
+  });
+});
+
+test('PayPal Sandbox webhook is fail-closed without explicitly enabled Sandbox verification config', async () => {
+  await withApi(emptyState(), { PAYPAL_MODE: 'sandbox', PAYPAL_WEBHOOK_ID_SANDBOX: '' }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/webhooks/paypal/sandbox`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-zernio-event-id': 'evt_after_disable',
-        'x-zernio-signature': signature('topsecret', rawBody),
+        'paypal-transmission-id': 'sandbox-event-1',
+        'paypal-transmission-time': now,
+        'paypal-transmission-sig': 'not-a-valid-signature',
+        'paypal-cert-url': 'https://api-m.sandbox.paypal.com/certs/CERT-1',
+        'paypal-auth-algo': 'SHA256withRSA',
       },
-      body: rawBody,
+      body: JSON.stringify({ id: 'WH-EVENT-1', event_type: 'PAYMENT.CAPTURE.COMPLETED' }),
     });
-    assert.equal(disabled.status, 503);
-
-    const logs = await fetch(`${baseUrl}/webhooks/zernio/status`);
-    assert.equal(logs.status, 200);
-    const payload = (await logs.json()) as { status: { enabled: boolean; consecutiveFailures: number; recentFailures: Array<{ reason: string; eventId: string }> } };
-    assert.equal(payload.status.enabled, false);
-    assert.equal(payload.status.consecutiveFailures, 10);
-    assert.equal(payload.status.recentFailures[0].reason, 'webhook_disabled');
-    assert.equal(payload.status.recentFailures.some((failure) => failure.reason === 'invalid_signature'), true);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { ok: false, error: 'paypal_sandbox_webhook_not_configured' });
   });
 });
 
-test('zernio webhook accepts unsigned events when no secret is configured and deduplicates by payload id', async () => {
-  await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: '' }, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/webhooks/zernio`, {
+test('PayPal Sandbox webhook rejects missing PayPal transmission headers before processing', async () => {
+  await withApi(emptyState(), { PAYPAL_MODE: 'sandbox', PAYPAL_WEBHOOK_ID_SANDBOX: 'sandbox-webhook-id', PAYPAL_CLIENT_ID: 'sandbox-client', PAYPAL_CLIENT_SECRET: 'sandbox-secret' }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/webhooks/paypal/sandbox`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 'payload_only_id', type: 'profile.connected' }),
+      body: JSON.stringify({ id: 'WH-EVENT-2', event_type: 'PAYMENT.CAPTURE.COMPLETED' }),
     });
-    assert.equal(response.status, 202);
-    assert.deepEqual(await response.json(), { ok: true, deduped: false, eventId: 'payload_only_id', signature: 'skipped' });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { ok: false, error: 'missing_paypal_transmission_headers' });
+  });
+});
+
+test('PayPal Sandbox webhook never records an event when PayPal signature verification fails', async () => {
+  await withApi(emptyState(), { PAYPAL_MODE: 'sandbox', PAYPAL_WEBHOOK_ID_SANDBOX: 'sandbox-webhook-id', PAYPAL_CLIENT_ID: 'invalid-client', PAYPAL_CLIENT_SECRET: 'invalid-secret' }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/webhooks/paypal/sandbox`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'paypal-transmission-id': 'sandbox-event-invalid',
+        'paypal-transmission-time': now,
+        'paypal-transmission-sig': 'invalid',
+        'paypal-cert-url': 'https://api-m.sandbox.paypal.com/certs/CERT-1',
+        'paypal-auth-algo': 'SHA256withRSA',
+      },
+      body: JSON.stringify({ id: 'WH-EVENT-3', event_type: 'PAYMENT.CAPTURE.COMPLETED' }),
+    });
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), { ok: false, error: 'invalid_paypal_webhook_signature' });
   });
 });

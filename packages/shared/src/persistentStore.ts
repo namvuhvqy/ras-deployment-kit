@@ -5,6 +5,7 @@ import type {
   AddOnEntitlement,
   ConnectedAccount,
   RasAgentInstance,
+  RasBillingPayment,
   RasCustomer,
   RasEntitlement,
   RasJob,
@@ -29,6 +30,7 @@ export interface RasPersistentState {
   webhookFailures: StoredWebhookFailure[];
   webhookStatus: StoredWebhookStatus;
   auditLogs: StoredAuditLog[];
+  billingPayments: RasBillingPayment[];
 }
 
 export interface StoredWebhookEvent {
@@ -224,6 +226,7 @@ export class JsonRasStore {
       webhookFailures: [],
       webhookStatus: { enabled: true, consecutiveFailures: 0 },
       auditLogs: [],
+      billingPayments: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -241,6 +244,7 @@ export class JsonRasStore {
     state.webhookFailures ??= [];
     state.webhookStatus ??= { enabled: true, consecutiveFailures: 0 };
     state.auditLogs ??= [];
+    state.billingPayments ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -390,6 +394,57 @@ export class JsonRasStore {
     else state.customers.push(customer);
     await this.write(state);
     return customer;
+  }
+
+  async recordBillingPaymentCapture(input: Omit<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'> & Partial<Pick<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'>>): Promise<RasBillingPayment> {
+    const state = await this.load();
+    const id = input.id ?? `${input.provider}:${input.paypalOrderId}`;
+    const existing = state.billingPayments.find((row) => row.id === id || row.paypalOrderId === input.paypalOrderId);
+    const payment: RasBillingPayment = {
+      ...existing,
+      ...input,
+      id,
+      provisionStatus: existing?.provisionStatus ?? input.provisionStatus ?? 'pending',
+      retryCount: existing?.retryCount ?? input.retryCount ?? 0,
+      updatedAtIso: input.updatedAtIso,
+    };
+    const index = state.billingPayments.findIndex((row) => row.id === id || row.paypalOrderId === input.paypalOrderId);
+    if (index >= 0) state.billingPayments[index] = payment;
+    else state.billingPayments.push(payment);
+    await this.write(state);
+    return payment;
+  }
+
+  async markBillingPaymentProvisionFailed(id: string, error: string, nowIso: string = new Date().toISOString()): Promise<RasBillingPayment | undefined> {
+    const state = await this.load();
+    const payment = state.billingPayments.find((row) => row.id === id || row.paypalOrderId === id || row.transactionId === id);
+    if (!payment) return undefined;
+    const updated: RasBillingPayment = {
+      ...payment,
+      provisionStatus: 'pending_retry',
+      retryCount: payment.retryCount + 1,
+      lastError: error,
+      updatedAtIso: nowIso,
+    };
+    state.billingPayments[state.billingPayments.indexOf(payment)] = updated;
+    await this.write(state);
+    return updated;
+  }
+
+  async markBillingPaymentProvisioned(id: string, nowIso: string = new Date().toISOString()): Promise<RasBillingPayment | undefined> {
+    const state = await this.load();
+    const payment = state.billingPayments.find((row) => row.id === id || row.paypalOrderId === id || row.transactionId === id);
+    if (!payment) return undefined;
+    const updated: RasBillingPayment = {
+      ...payment,
+      provisionStatus: 'provisioned',
+      lastError: undefined,
+      provisionedAtIso: nowIso,
+      updatedAtIso: nowIso,
+    };
+    state.billingPayments[state.billingPayments.indexOf(payment)] = updated;
+    await this.write(state);
+    return updated;
   }
 
   async getCustomerMapping(customerId: string): Promise<CustomerMapping | undefined> {

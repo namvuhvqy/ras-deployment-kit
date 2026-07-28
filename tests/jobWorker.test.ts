@@ -18,6 +18,9 @@ const noopAdapter: ZernioAdapter = {
   async listAccounts() {
     throw new Error('not used');
   },
+  async getAccount() {
+    throw new Error('not used');
+  },
   async createPost(input) {
     return { zernioPostId: `live_${input.accountId}`, status: input.scheduleAtIso ? 'scheduled' : 'queued' };
   },

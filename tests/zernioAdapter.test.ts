@@ -33,6 +33,19 @@ test('LiveZernioAdapter createProfile sends only documented Zernio fields', asyn
   }
 });
 
+test('LiveZernioAdapter unwraps Zernio profile envelope', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ profile: { _id: 'profile_wrapped_123', name: 'Shop A' } }), { status: 200 });
+
+  try {
+    const adapter = new LiveZernioAdapter({ apiKey: 'test-key', baseUrl: 'https://example.test/api/v1' });
+    const result = await adapter.createProfile({ customerId: 'cust_1', name: 'Shop A' });
+    assert.equal(result.zernioProfileId, 'profile_wrapped_123');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('createProfilePayload does not include undocumented mapping fields', () => {
   assert.deepEqual(Object.keys(createProfilePayload({ customerId: 'cust_1', name: 'Shop A', email: 'owner@example.test' })).sort(), ['description', 'name']);
 });

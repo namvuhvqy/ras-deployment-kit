@@ -14,7 +14,7 @@ async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string)
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -54,11 +54,52 @@ function emptyState(): Record<string, unknown> {
   };
 }
 
+test('customer-scoped read endpoints require a matching session bearer token', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [
+      { id: 'user_a', email: 'a@example.test', role: 'owner', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'user_b', email: 'b@example.test', role: 'owner', customerId: 'cust_b', status: 'active', createdAtIso: now, updatedAtIso: now },
+    ],
+    sessions: [
+      { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+      { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+    ],
+    customers: [
+      { id: 'cust_a', name: 'A Shop', email: 'a@example.test', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 1, activeConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } },
+      { id: 'cust_b', name: 'B Shop', email: 'b@example.test', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 1, activeConnectedAccounts: 0, packageStatus: 'active', addOnStatus: { zernio: 'active' } },
+    ],
+    connectedAccounts: [
+      { id: 'acct_a_fb', customerId: 'cust_a', platform: 'facebook', zernioAccountId: 'z_fb_a', status: 'connected', connectedAtIso: now, lastVerifiedAtIso: now },
+    ],
+  });
+
+  await withApi(state, async (baseUrl) => {
+    const noBearer = await fetch(`${baseUrl}/customers/cust_a/connection-summary`);
+    assert.equal(noBearer.status, 401);
+
+    const crossCustomer = await fetch(`${baseUrl}/customers/cust_a/connection-summary`, { headers: { authorization: 'Bearer token_b' } });
+    assert.equal(crossCustomer.status, 403);
+
+    const ownCustomer = await fetch(`${baseUrl}/customers/cust_a/connection-summary`, { headers: { authorization: 'Bearer token_a' } });
+    assert.equal(ownCustomer.status, 200);
+    const payload = (await ownCustomer.json()) as { integrations: Array<{ platform: string; connected: boolean }> };
+    assert.deepEqual(payload.integrations, [{ id: 'acct_a_fb', platform: 'facebook', connected: true, needsReconnection: false, lastVerifiedAt: now, accountId: 'z_fb_a', username: null, capabilities: [] }]);
+  });
+});
+
 test('mapping endpoints create tenant/customer/profile/account links without root profileId account scope', async () => {
-  await withApi(emptyState(), async (baseUrl) => {
+  const state = emptyState();
+  state.users = [
+    { id: 'user_acme', email: 'owner@acme.test', displayName: 'Acme Owner', role: 'owner', customerId: 'cust_1', status: 'active', createdAtIso: now, updatedAtIso: now },
+  ];
+  state.sessions = [
+    { id: 'sess_acme', token: 'token_acme', userId: 'user_acme', createdAtIso: now, expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
+  ];
+  await withApi(state, async (baseUrl) => {
     const customerResponse = await fetch(`${baseUrl}/mappings/customers`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' },
       body: JSON.stringify({
         customerId: 'cust_1',
         tenantId: 'tenant_acme',
@@ -79,7 +120,7 @@ test('mapping endpoints create tenant/customer/profile/account links without roo
 
     const accountResponse = await fetch(`${baseUrl}/mappings/accounts`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' },
       body: JSON.stringify({
         accountId: 'acct_local_1',
         customerId: 'cust_1',
@@ -101,7 +142,7 @@ test('mapping endpoints create tenant/customer/profile/account links without roo
       platforms: [{ platform: 'facebook', accountId: 'social_account_1' }],
     });
 
-    const summaryResponse = await fetch(`${baseUrl}/mappings/customers/cust_1`);
+    const summaryResponse = await fetch(`${baseUrl}/mappings/customers/cust_1`, { headers: { authorization: 'Bearer token_acme' } });
     assert.equal(summaryResponse.status, 200);
     const summary = (await summaryResponse.json()) as {
       mapping: {
@@ -361,9 +402,15 @@ test('connect endpoint enforces RAS quota before returning Zernio OAuth URL', as
       lastVerifiedAtIso: now,
     },
   ];
+  state.users = [
+    { id: 'user_quota', email: 'owner@quota.test', displayName: 'Quota Owner', role: 'owner', customerId: 'cust_quota', status: 'active', createdAtIso: now, updatedAtIso: now },
+  ];
+  state.sessions = [
+    { id: 'sess_quota', token: 'token_quota', userId: 'user_quota', createdAtIso: now, expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
+  ];
 
   await withApi(state, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/customers/cust_quota/connect/instagram`);
+    const response = await fetch(`${baseUrl}/customers/cust_quota/connect/instagram`, { headers: { authorization: 'Bearer token_quota' } });
     assert.equal(response.status, 409);
     const payload = (await response.json()) as { error: string; entitlement: { maxConnectedAccounts: number; activeConnectedAccounts: number } };
     assert.equal(payload.error, 'connection_quota_exceeded');
@@ -401,9 +448,15 @@ test('connect endpoint creates another Zernio profile for a second account on th
       lastVerifiedAtIso: now,
     },
   ];
+  state.users = [
+    { id: 'user_same', email: 'owner@same.test', displayName: 'Same Owner', role: 'owner', customerId: 'cust_same_platform', status: 'active', createdAtIso: now, updatedAtIso: now },
+  ];
+  state.sessions = [
+    { id: 'sess_same', token: 'token_same', userId: 'user_same', createdAtIso: now, expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
+  ];
 
   await withApi(state, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`);
+    const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`, { headers: { authorization: 'Bearer token_same' } });
     assert.equal(response.status, 200);
     const payload = (await response.json()) as {
       authUrl: string;
@@ -436,7 +489,7 @@ test('account mapping rejects unknown customer and mismatched zernio profile', a
   await withApi(state, async (baseUrl) => {
     const missingCustomer = await fetch(`${baseUrl}/mappings/accounts`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' },
       body: JSON.stringify({
         accountId: 'acct_missing',
         customerId: 'missing',
@@ -449,7 +502,7 @@ test('account mapping rejects unknown customer and mismatched zernio profile', a
 
     const mismatchedProfile = await fetch(`${baseUrl}/mappings/accounts`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' },
       body: JSON.stringify({
         accountId: 'acct_bad_profile',
         customerId: 'cust_1',

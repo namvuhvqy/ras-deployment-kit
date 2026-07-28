@@ -106,11 +106,47 @@ export class RasJobWorker {
       return { dryRun: false, ...result };
     }
 
-    if (job.type === 'inbox_reply' || job.type === 'analytics_sync' || job.type === 'webhook_process') {
+    if (job.type === 'webhook_process') return this.processZernioWebhook(job);
+
+    if (job.type === 'inbox_reply' || job.type === 'analytics_sync') {
       if (this.options.dryRun) return { dryRun: true, skippedLiveSideEffect: job.type };
     }
 
     throw new Error(`Unsupported live job type: ${job.type}`);
+  }
+
+  private async processZernioWebhook(job: RasJob): Promise<Record<string, unknown>> {
+    const payload = asRecord(job.payload);
+    const eventType = requiredString(payload, 'eventType');
+    if (eventType !== 'account.connected' && eventType !== 'account.disconnected') {
+      return { ignored: true, eventType };
+    }
+    const account = asRecord(payload.account);
+    const accountId = job.accountId ?? requiredString(account, 'accountId');
+    if (this.options.dryRun) return { dryRun: true, eventType, accountId, skippedLiveSideEffect: 'account_refresh' };
+
+    const detail = await this.adapter.getAccount(accountId);
+    const nowIso = new Date().toISOString();
+    const status = eventType === 'account.disconnected' ? 'disconnected' : detail.status;
+    const saved = await this.store.upsertAccountMapping({
+      ...detail,
+      id: detail.id || `${job.customerId}_${detail.platform}_${detail.zernioAccountId}`,
+      customerId: job.customerId,
+      zernioAccountId: detail.zernioAccountId || accountId,
+      zernioProfileId: job.profileId,
+      profileId: job.profileId,
+      status,
+      connectedAtIso: status === 'connected' ? (detail.connectedAtIso ?? nowIso) : detail.connectedAtIso,
+      lastVerifiedAtIso: nowIso,
+    });
+    return {
+      eventType,
+      synced: true,
+      accountId: saved.zernioAccountId,
+      status: saved.status,
+      capabilities: detail.capabilities ?? [],
+      lastVerifiedAtIso: saved.lastVerifiedAtIso,
+    };
   }
 }
 

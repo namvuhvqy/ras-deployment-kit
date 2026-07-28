@@ -12,6 +12,30 @@ export type RasUserRole = 'owner' | 'admin' | 'operator' | 'viewer';
 export type RasBasePlanId = 'none' | 'lite' | 'pro' | 'max';
 export type RasBillingCycle = 'monthly' | 'yearly';
 
+export type RasBillingPaymentStatus = 'captured' | 'refunded' | 'failed';
+export type RasProvisionStatus = 'pending' | 'pending_retry' | 'provisioned' | 'failed';
+
+export interface RasBillingPayment {
+  id: string;
+  provider: 'paypal';
+  customerId: string;
+  paypalOrderId: string;
+  transactionId: string;
+  status: RasBillingPaymentStatus;
+  provisionStatus: RasProvisionStatus;
+  amount: string;
+  currency: string;
+  plan: RasBasePlanId;
+  billingCycle: RasBillingCycle;
+  extraConnectSlots: number;
+  rawCapture?: Record<string, unknown>;
+  retryCount: number;
+  lastError?: string;
+  provisionedAtIso?: string;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
 export interface BasePlanEntitlement {
   planId: RasBasePlanId;
   status: EntitlementStatus;

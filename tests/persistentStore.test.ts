@@ -101,6 +101,46 @@ test('JsonRasStore persists customer, account, queue, webhook idempotency, and a
   }
 });
 
+test('JsonRasStore persists PayPal capture before provisioning and keeps pending retry state on provision failure', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+
+    const captured = await store.recordBillingPaymentCapture({
+      provider: 'paypal',
+      customerId: 'cust_paid',
+      paypalOrderId: 'ORDER-123',
+      transactionId: 'CAPTURE-123',
+      status: 'captured',
+      amount: '39',
+      currency: 'USD',
+      plan: 'pro',
+      billingCycle: 'monthly',
+      extraConnectSlots: 0,
+      rawCapture: { status: 'COMPLETED' },
+      createdAtIso: '2026-07-26T00:00:00.000Z',
+      updatedAtIso: '2026-07-26T00:00:00.000Z',
+    });
+
+    assert.equal(captured.status, 'captured');
+    assert.equal(captured.provisionStatus, 'pending');
+
+    const failed = await store.markBillingPaymentProvisionFailed('paypal:ORDER-123', 'Customer not found', '2026-07-26T00:01:00.000Z');
+
+    assert.equal(failed?.status, 'captured');
+    assert.equal(failed?.provisionStatus, 'pending_retry');
+    assert.equal(failed?.retryCount, 1);
+    assert.equal(failed?.lastError, 'Customer not found');
+
+    const state = await store.load();
+    assert.equal(state.billingPayments.length, 1);
+    assert.equal(state.billingPayments[0].transactionId, 'CAPTURE-123');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('JsonRasStore summarizes sandbox and required RAS agent lifecycle blockers', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {

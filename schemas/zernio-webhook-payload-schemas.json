@@ -1,0 +1,827 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Zernio Webhook Payload Schemas for RunAgentSys",
+  "description": "JSON Schemas and mock payloads for training and validating AI Agent integrations.",
+  "version": "1.0.4",
+  "definitions": {
+    "InboxWebhookAccount": {
+      "type": "object",
+      "required": [
+        "id",
+        "accountId",
+        "platform",
+        "username"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Social account ID (legacy)"
+        },
+        "accountId": {
+          "type": "string",
+          "description": "Canonical SocialAccount ID for filtering"
+        },
+        "profileId": {
+          "type": "string",
+          "description": "Zernio profile (workspace) ID this account belongs to"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        }
+      }
+    },
+    "InboxWebhookConversation": {
+      "type": "object",
+      "required": [
+        "id",
+        "platformConversationId",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Internal Zernio conversation ID"
+        },
+        "platformConversationId": {
+          "type": "string",
+          "description": "Platform-native conversation ID"
+        },
+        "participantId": {
+          "type": "string",
+          "description": "Contact's platform identifier"
+        },
+        "participantName": {
+          "type": "string"
+        },
+        "participantUsername": {
+          "type": "string"
+        },
+        "participantPicture": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "archived"
+          ]
+        },
+        "contactId": {
+          "type": "string",
+          "description": "Zernio CRM Contact ID if resolved"
+        }
+      }
+    },
+    "Attachment": {
+      "type": "object",
+      "required": [
+        "type",
+        "url"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "image",
+            "video",
+            "audio",
+            "file",
+            "sticker",
+            "share"
+          ]
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "payload": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "events": {
+    "webhook_test": {
+      "description": "Fired when validating a webhook endpoint.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "message",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable webhook event ID"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "webhook.test"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_test_1234567890",
+        "event": "webhook.test",
+        "message": "Test webhook sent successfully",
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "account_connected": {
+      "description": "Fired when a social account is successfully connected via OAuth.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable webhook event ID"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "account.connected"
+            ]
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "profileId",
+              "platform",
+              "username"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string"
+              },
+              "profileId": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_01J7K3P4N5Q6R7S8T9V0W1X2Y3",
+        "event": "account.connected",
+        "account": {
+          "accountId": "665f1c2e8b3a4d0012345678",
+          "profileId": "664a0b1c2d3e4f0011223344",
+          "platform": "instagram",
+          "username": "acmecorp",
+          "displayName": "Acme Corp"
+        },
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "account_disconnected": {
+      "description": "Fired when an account is disconnected intentionally or due to token expiration.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "account.disconnected"
+            ]
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "profileId",
+              "platform",
+              "username"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string"
+              },
+              "profileId": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              },
+              "disconnectionType": {
+                "type": "string",
+                "enum": [
+                  "intentional",
+                  "unintentional"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_01J7K3P4N5Q6R7S8T9V0W1X2Y4",
+        "event": "account.disconnected",
+        "account": {
+          "accountId": "665f1c2e8b3a4d0012345678",
+          "profileId": "664a0b1c2d3e4f0011223344",
+          "platform": "instagram",
+          "username": "acmecorp",
+          "displayName": "Acme Corp",
+          "disconnectionType": "unintentional",
+          "reason": "OAuth token has expired or was revoked by the user."
+        },
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "message_received": {
+      "description": "Fired when a new direct message is received.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "message",
+          "conversation",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "message.received"
+            ]
+          },
+          "message": {
+            "type": "object",
+            "required": [
+              "id",
+              "conversationId",
+              "platform",
+              "platformMessageId",
+              "direction",
+              "text",
+              "attachments",
+              "sender",
+              "sentAt",
+              "isRead"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "conversationId": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "platformMessageId": {
+                "type": "string"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "incoming",
+                  "outgoing"
+                ]
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/Attachment"
+                }
+              },
+              "sender": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "contactId": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  },
+                  "picture": {
+                    "type": "string"
+                  },
+                  "phoneNumber": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "businessScopedUserId": {
+                    "type": "string"
+                  }
+                }
+              },
+              "sentAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "isRead": {
+                "type": "boolean"
+              }
+            }
+          },
+          "conversation": {
+            "$ref": "#/definitions/InboxWebhookConversation"
+          },
+          "account": {
+            "$ref": "#/definitions/InboxWebhookAccount"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_msg_received_8829103",
+        "event": "message.received",
+        "message": {
+          "id": "msg_01J7K3P4N5Q6R7S8T9V0",
+          "conversationId": "conv_01J7K3P4N5Q6R7",
+          "platform": "whatsapp",
+          "platformMessageId": "wamid.HBgLMTQxNTU1NTEyMzQVAgARGBI1RTY3ODlB",
+          "direction": "incoming",
+          "text": "Tôi muốn tư vấn về giải pháp RAS AI",
+          "attachments": [],
+          "sender": {
+            "id": "14155551234",
+            "contactId": "con_8f3a2c1109aef",
+            "name": "Jane Doe",
+            "username": "janedoe",
+            "phoneNumber": "+14155551234",
+            "businessScopedUserId": "bsuid_whatsapp_991823"
+          },
+          "sentAt": "2026-07-28T01:31:07Z",
+          "isRead": false
+        },
+        "conversation": {
+          "id": "conv_01J7K3P4N5Q6R7",
+          "platformConversationId": "14155551234",
+          "status": "active",
+          "contactId": "con_8f3a2c1109aef"
+        },
+        "account": {
+          "id": "64e1f0a9e2b5af0012ab34cd",
+          "accountId": "64e1f0a9e2b5af0012ab34cd",
+          "profileId": "664a0b1c2d3e4f0011223344",
+          "platform": "whatsapp",
+          "username": "+15551234567",
+          "displayName": "RunAgentSys Business"
+        },
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "comment_received": {
+      "description": "Fired when a new comment is posted on a monitored post.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "comment",
+          "post",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "comment.received"
+            ]
+          },
+          "comment": {
+            "type": "object",
+            "required": [
+              "id",
+              "postId",
+              "platformPostId",
+              "platform",
+              "text",
+              "author",
+              "createdAt",
+              "isReply",
+              "parentCommentId"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "postId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "platformPostId": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "author": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "isReply": {
+                "type": "boolean"
+              },
+              "parentCommentId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "id",
+              "platformPostId"
+            ]
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "id",
+              "platform",
+              "username"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_cmt_received_4891280",
+        "event": "comment.received",
+        "comment": {
+          "id": "17912345678901234",
+          "postId": "65f1c0a9e2b5af0012ab34cd",
+          "platformPostId": "1234567890_9876543210",
+          "platform": "facebook",
+          "text": "Giá gói Growth bao nhiêu vậy shop?",
+          "author": {
+            "id": "pfid_fb_110293",
+            "username": "nguyenvana",
+            "name": "Nguyen Van A"
+          },
+          "createdAt": "2026-07-28T01:31:07Z",
+          "isReply": false,
+          "parentCommentId": null
+        },
+        "post": {
+          "id": "65f1c0a9e2b5af0012ab34cd",
+          "platformPostId": "1234567890_9876543210"
+        },
+        "account": {
+          "id": "64e1f0a9e2b5af0012ab34cd",
+          "accountId": "64e1f0a9e2b5af0012ab34cd",
+          "platform": "facebook",
+          "username": "runagentsys_official"
+        },
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "lead_received": {
+      "description": "Fired when a lead submits information on a Meta Lead Gen / Instant Form.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "lead",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "lead.received"
+            ]
+          },
+          "lead": {
+            "type": "object",
+            "required": [
+              "id",
+              "leadgenId",
+              "formId",
+              "fields",
+              "isOrganic",
+              "createdAt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "leadgenId": {
+                "type": "string"
+              },
+              "formId": {
+                "type": "string"
+              },
+              "formName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "adId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "adsetId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "campaignId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "fields": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "isOrganic": {
+                "type": "boolean"
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "id",
+              "platform"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_lead_992109823",
+        "event": "lead.received",
+        "lead": {
+          "id": "lead_01J7K3P4N5Q6R7S8",
+          "leadgenId": "120244894077860123",
+          "formId": "317766992490123",
+          "formName": "RAS Contact Lead Form",
+          "adId": "120244894077860689",
+          "adsetId": "120244894077860555",
+          "campaignId": "120244894077860111",
+          "fields": {
+            "full_name": "Nguyen Van B",
+            "phone_number": "+84909123456",
+            "email": "vanb@example.com",
+            "business_size": "10-50_employees"
+          },
+          "isOrganic": false,
+          "createdAt": "2026-07-28T01:31:07Z"
+        },
+        "account": {
+          "id": "64e1f0a9e2b5af0012ab34cd",
+          "accountId": "64e1f0a9e2b5af0012ab34cd",
+          "platform": "facebook"
+        },
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "ad_status_changed": {
+      "description": "Fired when Meta ads, campaigns, or ad sets change status or report policy issues.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "account",
+          "adObject",
+          "status",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "ad.status_changed"
+            ]
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "profileId",
+              "platform",
+              "username"
+            ]
+          },
+          "adObject": {
+            "type": "object",
+            "required": [
+              "level",
+              "platformId",
+              "platformAdAccountId"
+            ],
+            "properties": {
+              "level": {
+                "type": "string",
+                "enum": [
+                  "CAMPAIGN",
+                  "AD_SET",
+                  "AD"
+                ]
+              },
+              "platformId": {
+                "type": "string"
+              },
+              "platformAdAccountId": {
+                "type": "string"
+              }
+            }
+          },
+          "status": {
+            "type": "object",
+            "required": [
+              "raw"
+            ],
+            "properties": {
+              "raw": {
+                "type": "string"
+              },
+              "error": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "required": [
+                  "code"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "mock": {
+        "id": "evt_ad_status_01J7K3P4",
+        "event": "ad.status_changed",
+        "account": {
+          "accountId": "65c8f7e2a1b3c4d5e6f7a8b9",
+          "profileId": "65c8f7e2a1b3c4d5e6f7a800",
+          "platform": "metaads",
+          "username": "acme-ads"
+        },
+        "adObject": {
+          "level": "AD",
+          "platformId": "120244894077860689",
+          "platformAdAccountId": "act_2129800524463520"
+        },
+        "status": {
+          "raw": "WITH_ISSUES",
+          "error": {
+            "code": "2643001",
+            "summary": "Ad Violates Policy",
+            "message": "This ad was disapproved because it contains terms violating personal health policies."
+          }
+        },
+        "timestamp": "2026-07-28T01:31:07Z"
+      }
+    }
+  }
+}

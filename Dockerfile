@@ -8,6 +8,7 @@ COPY tsconfig.json ./
 COPY apps ./apps
 COPY packages ./packages
 COPY tests ./tests
+COPY schemas ./schemas
 RUN npm run build
 
 FROM node:20-alpine AS runtime
@@ -16,5 +17,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/schemas ./schemas
 EXPOSE 8080
 CMD ["node", "dist/apps/ras-api/src/server.js"]

@@ -52,6 +52,7 @@ export interface ZernioAdapter {
   createProfile(input: CreateProfileInput): Promise<RasCustomer>;
   getConnectUrl(input: ConnectUrlInput): Promise<string>;
   listAccounts(profileId: string): Promise<ConnectedAccount[]>;
+  getAccount(accountId: string): Promise<ConnectedAccount>;
   createPost(input: CreatePostInput): Promise<CreatePostResult>;
 }
 
@@ -83,6 +84,14 @@ export class DryRunZernioAdapter implements ZernioAdapter {
 
   async listAccounts(profileId: string): Promise<ConnectedAccount[]> {
     return this.accountsByProfile.get(profileId) ?? [];
+  }
+
+  async getAccount(accountId: string): Promise<ConnectedAccount> {
+    for (const accounts of this.accountsByProfile.values()) {
+      const account = accounts.find((row) => row.zernioAccountId === accountId);
+      if (account) return account;
+    }
+    throw new Error(`Dry-run Zernio account not found: ${accountId}`);
   }
 
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
@@ -122,10 +131,12 @@ export class LiveZernioAdapter implements ZernioAdapter {
   }
 
   async createProfile(input: CreateProfileInput): Promise<RasCustomer> {
-    const profile = await this.request<Record<string, unknown>>('/profiles', {
+    const response = await this.request<Record<string, unknown>>('/profiles', {
       method: 'POST',
       body: createProfilePayload(input),
     });
+    // Zernio returns either the profile directly or wraps it as { profile: {...} }.
+    const profile = unwrapRecord(response, ['profile', 'data']);
 
     return {
       id: input.customerId,
@@ -165,6 +176,11 @@ export class LiveZernioAdapter implements ZernioAdapter {
         capabilities: arrayFrom(account, ['capabilities']).map(String),
       };
     });
+  }
+
+  async getAccount(accountId: string): Promise<ConnectedAccount> {
+    const response = await this.request<Record<string, unknown>>(`/accounts/${encodeURIComponent(accountId)}`);
+    return connectedAccountFromRecord(unwrapRecord(response, ['account', 'data']), accountId);
   }
 
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
@@ -267,6 +283,21 @@ function unwrapRecord(value: Record<string, unknown>, keys: string[]): Record<st
     if (Object.keys(nested).length > 0) return nested;
   }
   return value;
+}
+
+function connectedAccountFromRecord(account: Record<string, unknown>, fallbackAccountId: string): ConnectedAccount {
+  const platform = stringFrom(account, ['platform']) as Platform;
+  return {
+    id: stringFrom(account, ['externalId', '_id', 'id'], fallbackAccountId),
+    customerId: stringFrom(account, ['customerId', 'externalCustomerId'], ''),
+    zernioAccountId: stringFrom(account, ['_id', 'id', 'accountId'], fallbackAccountId),
+    zernioProfileId: optionalStringFrom(account, ['profileId']),
+    profileId: optionalStringFrom(account, ['profileId']),
+    platform,
+    username: optionalStringFrom(account, ['username', 'handle', 'name']),
+    status: normalizeAccountStatus(optionalStringFrom(account, ['status', 'connectionStatus'])),
+    capabilities: arrayFrom(account, ['capabilities']).map(String),
+  };
 }
 
 function normalizeAccountStatus(status?: string): ConnectedAccount['status'] {

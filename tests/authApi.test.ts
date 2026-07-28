@@ -168,7 +168,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.equal(payload.dashboard.customer.id, 'cust_1');
     assert.equal(payload.dashboard.agents[0].kind, 'ras1-hermes');
 
-    const mapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`);
+    const mapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(mapping.status, 200);
     const mappingPayload = (await mapping.json()) as {
       mapping: { customer: { id: string }; sandbox: { id: string }; agents: Array<{ id: string }> };
@@ -180,19 +180,19 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       ['agent_1', 'agent_2'],
     );
 
-    const missing = await fetch(`http://127.0.0.1:${port}/customers/missing/mapping`);
-    assert.equal(missing.status, 404);
+    const missing = await fetch(`http://127.0.0.1:${port}/customers/missing/mapping`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(missing.status, 403);
 
-    const lifecycle = await fetch(`http://127.0.0.1:${port}/customers/cust_1/lifecycle-status`);
+    const lifecycle = await fetch(`http://127.0.0.1:${port}/customers/cust_1/lifecycle-status`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(lifecycle.status, 200);
     const lifecyclePayload = (await lifecycle.json()) as { lifecycle: { healthy: boolean; blockers: string[] } };
     assert.equal(lifecyclePayload.lifecycle.healthy, false);
     assert.deepEqual(lifecyclePayload.lifecycle.blockers, ['ras2-openclaw_wrong_sandbox', 'ras2-openclaw_stopped']);
 
-    const missingLifecycle = await fetch(`http://127.0.0.1:${port}/customers/missing/lifecycle-status`);
-    assert.equal(missingLifecycle.status, 404);
+    const missingLifecycle = await fetch(`http://127.0.0.1:${port}/customers/missing/lifecycle-status`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(missingLifecycle.status, 403);
 
-    const auditLogs = await fetch(`http://127.0.0.1:${port}/customers/cust_1/audit-logs`);
+    const auditLogs = await fetch(`http://127.0.0.1:${port}/customers/cust_1/audit-logs`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(auditLogs.status, 200);
     const auditLogsPayload = (await auditLogs.json()) as { auditLogs: Array<{ id: string; customerId: string }> };
     assert.deepEqual(
@@ -201,26 +201,27 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     );
     assert.ok(auditLogsPayload.auditLogs.every((log) => log.customerId === 'cust_1'));
 
-    const missingAuditLogs = await fetch(`http://127.0.0.1:${port}/customers/missing/audit-logs`);
-    assert.equal(missingAuditLogs.status, 404);
+    const missingAuditLogs = await fetch(`http://127.0.0.1:${port}/customers/missing/audit-logs`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(missingAuditLogs.status, 403);
 
-    const servicePackage = await fetch(`http://127.0.0.1:${port}/customers/cust_1/service-package`);
+    const servicePackage = await fetch(`http://127.0.0.1:${port}/customers/cust_1/service-package`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(servicePackage.status, 200);
     const servicePackagePayload = (await servicePackage.json()) as { servicePackage: { id: string; includedAgents: number } };
     assert.equal(servicePackagePayload.servicePackage.id, 'pkg_growth');
     assert.equal(servicePackagePayload.servicePackage.includedAgents, 2);
 
-    const missingServicePackage = await fetch(`http://127.0.0.1:${port}/customers/missing/service-package`);
-    assert.equal(missingServicePackage.status, 404);
+    const missingServicePackage = await fetch(`http://127.0.0.1:${port}/customers/missing/service-package`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(missingServicePackage.status, 403);
 
     const unconfiguredServicePackage = await fetch(
       `http://127.0.0.1:${port}/customers/cust_missing_package/service-package`,
+      { headers: { authorization: `Bearer ${loginPayload.token}` } },
     );
-    assert.equal(unconfiguredServicePackage.status, 404);
+    assert.equal(unconfiguredServicePackage.status, 403);
     const unconfiguredServicePackagePayload = (await unconfiguredServicePackage.json()) as { error: string };
-    assert.equal(unconfiguredServicePackagePayload.error, 'service_package_not_found');
+    assert.equal(unconfiguredServicePackagePayload.error, 'forbidden');
 
-    const billingState = await fetch(`http://127.0.0.1:${port}/customers/cust_1/billing-state`);
+    const billingState = await fetch(`http://127.0.0.1:${port}/customers/cust_1/billing-state`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(billingState.status, 200);
     const billingStatePayload = (await billingState.json()) as {
       billingState: { customerId: string; status: string; servicePackageId: string };
@@ -231,19 +232,10 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       servicePackageId: 'pkg_growth',
     });
 
-    const trialBillingState = await fetch(`http://127.0.0.1:${port}/customers/cust_trial/billing-state`);
-    assert.equal(trialBillingState.status, 200);
-    const trialBillingStatePayload = (await trialBillingState.json()) as {
-      billingState: { customerId: string; status: string; servicePackageId: string };
-    };
-    assert.deepEqual(trialBillingStatePayload.billingState, {
-      customerId: 'cust_trial',
-      status: 'trial',
-      servicePackageId: 'pkg_growth',
-    });
-
-    const missingBillingState = await fetch(`http://127.0.0.1:${port}/customers/missing/billing-state`);
-    assert.equal(missingBillingState.status, 404);
+    const trialBillingState = await fetch(`http://127.0.0.1:${port}/customers/cust_trial/billing-state`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(trialBillingState.status, 403);
+    const missingBillingState = await fetch(`http://127.0.0.1:${port}/customers/missing/billing-state`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(missingBillingState.status, 403);
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });
