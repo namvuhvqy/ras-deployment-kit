@@ -968,6 +968,39 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url?.startsWith('/customers/') && /\/inbox\/drafts\/[^/]+\/approve$/.test(req.url)) {
+    const [, , customerId, , , draftId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const decodedDraftId = decodeURIComponent(draftId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { endCustomerAccessError(res, 'unauthorized'); return; }
+    try {
+      const { draft, job } = await store.approveInboxDraftReply({
+        customerId: decodedCustomerId,
+        draftId: decodedDraftId,
+        approvedByUserId: dashboard.user.id,
+      });
+      await store.appendAuditLog({
+        id: `audit_${Date.now()}_${draft.id}`,
+        customerId: decodedCustomerId,
+        action: 'inbox.draft.approved',
+        targetType: 'inbox_draft_reply',
+        targetId: draft.id,
+        metadata: { jobId: job.id, conversationId: draft.conversationId, approvedByUserId: dashboard.user.id },
+        createdAtIso: new Date().toISOString(),
+      });
+      res.statusCode = 202;
+      res.end(JSON.stringify({ ok: true, mode: 'approved_for_delivery', draft, job: { type: job.type, status: job.status } }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'inbox_draft_approval_failed';
+      res.statusCode = message === 'inbox_draft_not_found' ? 404 : message === 'inbox_draft_not_pending_review' || message === 'inbox_reply_job_exists' ? 409 : 400;
+      res.end(JSON.stringify({ ok: false, error: message }));
+    }
+    return;
+  }
+
   if (req.method === 'POST' && req.url?.startsWith('/customers/') && /\/inbox\/conversations\/[^/]+\/drafts$/.test(req.url)) {
     const [, , customerId, , , conversationId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);

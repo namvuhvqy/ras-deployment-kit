@@ -216,9 +216,14 @@ export interface InboxDraftReply {
   customerId: string;
   conversationId: string;
   text: string;
-  status: 'pending_review';
-  sendAttempted: false;
+  status: 'pending_review' | 'queued' | 'sent' | 'failed';
+  sendAttempted: boolean;
   createdByUserId: string;
+  approvedByUserId?: string;
+  approvedAtIso?: string;
+  sentAtIso?: string;
+  providerMessageId?: string;
+  errorMessage?: string;
   createdAtIso: string;
 }
 

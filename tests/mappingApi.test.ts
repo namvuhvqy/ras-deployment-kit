@@ -148,6 +148,35 @@ test('inbox draft endpoint creates a tenant-scoped pending-review reply and reje
   });
 });
 
+test('inbox approval queues exactly one reply job and preserves cross-tenant denial', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [
+      { id: 'user_a', email: 'a@example.test', role: 'owner', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'user_b', email: 'b@example.test', role: 'owner', customerId: 'cust_b', status: 'active', createdAtIso: now, updatedAtIso: now },
+    ],
+    sessions: [
+      { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+      { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+    ],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active' }, { id: 'cust_b', name: 'B', status: 'active' }],
+    inboxConversations: [{ id: 'conv_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', providerConversationId: 'conv_a', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now }],
+    inboxDraftReplies: [{ id: 'draft_a', customerId: 'cust_a', conversationId: 'conv_a', text: 'Đã duyệt', status: 'pending_review', sendAttempted: false, createdByUserId: 'user_a', createdAtIso: now }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const approved = await fetch(`${baseUrl}/customers/cust_a/inbox/drafts/draft_a/approve`, { method: 'POST', headers: { authorization: 'Bearer token_a' } });
+    assert.equal(approved.status, 202);
+    const result = (await approved.json()) as { draft: { status: string; approvedByUserId: string }; job: { type: string; status: string } };
+    assert.equal(result.draft.status, 'queued');
+    assert.equal(result.draft.approvedByUserId, 'user_a');
+    assert.deepEqual(result.job, { type: 'inbox_reply', status: 'queued' });
+    const second = await fetch(`${baseUrl}/customers/cust_a/inbox/drafts/draft_a/approve`, { method: 'POST', headers: { authorization: 'Bearer token_a' } });
+    assert.equal(second.status, 409);
+    const cross = await fetch(`${baseUrl}/customers/cust_a/inbox/drafts/draft_a/approve`, { method: 'POST', headers: { authorization: 'Bearer token_b' } });
+    assert.equal(cross.status, 403);
+  });
+});
+
 test('mapping endpoints create tenant/customer/profile/account links without root profileId account scope', async () => {
   const state = emptyState();
   state.users = [

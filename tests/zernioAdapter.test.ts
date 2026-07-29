@@ -145,6 +145,22 @@ test('CreatePostInput intentionally rejects root profileId for Zernio /posts', (
   assert.equal('profileId' in validInput, false);
 });
 
+test('LiveZernioAdapter sends a conversation message using documented inbox path and idempotency header', async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify({ message: { platformMessageId: 'outbound_1' } }), { status: 200 });
+  };
+  try {
+    const adapter = new LiveZernioAdapter({ apiKey: 'test_key', baseUrl: 'https://zernio.example/api/v1' });
+    assert.deepEqual(await adapter.sendInboxMessage({ conversationId: 'conversation/1', text: 'Đã nhận ạ', requestId: 'reply_job_1' }), { providerMessageId: 'outbound_1' });
+    assert.equal(calls[0].url, 'https://zernio.example/api/v1/inbox/conversations/conversation%2F1/messages');
+    assert.equal((calls[0].init.headers as Record<string, string>)['x-request-id'], 'reply_job_1');
+    assert.equal(calls[0].init.body, JSON.stringify({ text: 'Đã nhận ạ' }));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('LiveZernioAdapter surfaces API errors', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: 'bad' }), {

@@ -702,6 +702,54 @@ export class JsonRasStore {
     return draft;
   }
 
+  async approveInboxDraftReply(input: { customerId: string; draftId: string; approvedByUserId: string }): Promise<{ draft: InboxDraftReply; job: RasJob }> {
+    const state = await this.load();
+    const index = state.inboxDraftReplies.findIndex((row) => row.customerId === input.customerId && row.id === input.draftId);
+    if (index < 0) throw new Error('inbox_draft_not_found');
+    const existing = state.inboxDraftReplies[index];
+    if (existing.status !== 'pending_review') throw new Error('inbox_draft_not_pending_review');
+    const conversation = state.inboxConversations.find((row) => row.customerId === input.customerId && row.id === existing.conversationId);
+    if (!conversation) throw new Error('inbox_conversation_not_found');
+    const nowIso = new Date().toISOString();
+    const job: RasJob = {
+      id: `inbox_reply_${existing.id}`,
+      customerId: input.customerId,
+      profileId: '',
+      accountId: conversation.accountId,
+      platform: conversation.platform,
+      type: 'inbox_reply',
+      priority: 'P1',
+      status: 'queued',
+      retryCount: 0,
+      payload: { draftId: existing.id, conversationId: conversation.id, accountId: conversation.accountId, text: existing.text },
+      createdAtIso: nowIso,
+    };
+    if (state.jobs.some((row) => row.id === job.id)) throw new Error('inbox_reply_job_exists');
+    const draft: InboxDraftReply = { ...existing, status: 'queued', approvedByUserId: input.approvedByUserId, approvedAtIso: nowIso };
+    state.inboxDraftReplies[index] = draft;
+    state.jobs.push(job);
+    await this.write(state);
+    return { draft, job };
+  }
+
+  async markInboxDraftReplySent(input: { customerId: string; draftId: string; providerMessageId: string }): Promise<InboxDraftReply> {
+    const state = await this.load();
+    const index = state.inboxDraftReplies.findIndex((row) => row.customerId === input.customerId && row.id === input.draftId);
+    if (index < 0) throw new Error('inbox_draft_not_found');
+    const existing = state.inboxDraftReplies[index];
+    const saved: InboxDraftReply = {
+      ...existing,
+      status: 'sent',
+      sendAttempted: true,
+      providerMessageId: input.providerMessageId,
+      sentAtIso: new Date().toISOString(),
+      errorMessage: undefined,
+    };
+    state.inboxDraftReplies[index] = saved;
+    await this.write(state);
+    return saved;
+  }
+
   async getConnectedAccountsForCustomer(customerId: string): Promise<ConnectedAccount[]> {
     const state = await this.load();
     return state.connectedAccounts.filter((account) => account.customerId === customerId);

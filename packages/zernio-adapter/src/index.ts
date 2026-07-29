@@ -50,12 +50,23 @@ export interface CreatePostResult {
   status: 'draft' | 'scheduled' | 'published' | 'queued';
 }
 
+export interface SendInboxMessageInput {
+  conversationId: string;
+  text: string;
+  requestId?: string;
+}
+
+export interface SendInboxMessageResult {
+  providerMessageId: string;
+}
+
 export interface ZernioAdapter {
   createProfile(input: CreateProfileInput): Promise<RasCustomer>;
   getConnectUrl(input: ConnectUrlInput): Promise<string>;
   listAccounts(profileId: string): Promise<ConnectedAccount[]>;
   getAccount(accountId: string): Promise<ConnectedAccount>;
   createPost(input: CreatePostInput): Promise<CreatePostResult>;
+  sendInboxMessage(input: SendInboxMessageInput): Promise<SendInboxMessageResult>;
 }
 
 export class DryRunZernioAdapter implements ZernioAdapter {
@@ -101,6 +112,10 @@ export class DryRunZernioAdapter implements ZernioAdapter {
       zernioPostId: `dry_post_${input.accountId}_${input.platform}_${Date.now()}`,
       status: input.isDraft ? 'draft' : input.scheduleAtIso ? 'scheduled' : 'queued',
     };
+  }
+
+  async sendInboxMessage(input: SendInboxMessageInput): Promise<SendInboxMessageResult> {
+    return { providerMessageId: `dry_inbox_${input.conversationId}_${input.requestId ?? Date.now()}` };
   }
 }
 
@@ -198,6 +213,16 @@ export class LiveZernioAdapter implements ZernioAdapter {
       zernioPostId: stringFrom(post, ['_id', 'id', 'postId']),
       status: normalizePostStatus(optionalStringFrom(post, ['status']), Boolean(input.scheduleAtIso)),
     };
+  }
+
+  async sendInboxMessage(input: SendInboxMessageInput): Promise<SendInboxMessageResult> {
+    const response = await this.request<Record<string, unknown>>(`/inbox/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
+      method: 'POST',
+      body: { text: input.text },
+      requestId: input.requestId,
+    });
+    const message = unwrapRecord(response, ['message', 'data']);
+    return { providerMessageId: stringFrom(message, ['platformMessageId', '_id', 'id', 'messageId']) };
   }
 
   private async request<T>(path: string, init: { method?: string; body?: unknown; requestId?: string } = {}): Promise<T> {

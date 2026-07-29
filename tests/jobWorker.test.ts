@@ -24,6 +24,9 @@ const noopAdapter: ZernioAdapter = {
   async createPost(input) {
     return { zernioPostId: `live_${input.accountId}`, status: input.scheduleAtIso ? 'scheduled' : 'queued' };
   },
+  async sendInboxMessage() {
+    return { providerMessageId: 'message_live_test' };
+  },
 };
 
 test('RasJobWorker drains due queued jobs fairly and persists completion metadata', async () => {
@@ -196,6 +199,25 @@ test('RasJobWorker persists an inbound message in draft-only mode without sendin
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('RasJobWorker sends an approved inbox reply once and persists provider delivery evidence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const now = new Date().toISOString();
+    await store.recordInboxMessage({ id: 'in_1', customerId: 'cust_1', accountId: 'acct_1', platform: 'facebook', conversationId: 'conv_1', providerMessageId: 'provider_in_1', direction: 'inbound', text: 'Xin chào', receivedAtIso: now });
+    const draft = await store.createInboxDraftReply({ customerId: 'cust_1', conversationId: 'conv_1', text: 'Đã nhận ạ', createdByUserId: 'user_1' });
+    const approval = await store.approveInboxDraftReply({ customerId: 'cust_1', draftId: draft.id, approvedByUserId: 'user_1' });
+    let calls = 0;
+    const adapter = { ...noopAdapter, async sendInboxMessage(input) { calls += 1; assert.deepEqual(input, { conversationId: 'conv_1', text: 'Đã nhận ạ', requestId: approval.job.id }); return { providerMessageId: 'provider_out_1' }; } } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const saved = await store.load();
+    assert.equal(calls, 1);
+    assert.deepEqual(saved.inboxDraftReplies[0] && { status: saved.inboxDraftReplies[0].status, sendAttempted: saved.inboxDraftReplies[0].sendAttempted, providerMessageId: saved.inboxDraftReplies[0].providerMessageId }, { status: 'sent', sendAttempted: true, providerMessageId: 'provider_out_1' });
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('RasJobWorker maps a published webhook by platformPostId when Zernio post id is absent', async () => {

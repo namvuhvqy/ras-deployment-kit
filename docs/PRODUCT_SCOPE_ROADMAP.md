@@ -88,14 +88,15 @@ For any approved production deploy after this gate:
 5. Roll frontend back using the previous Vercel production deployment / rollback action.
 6. Re-run minimal health checks (`GET /health`, dashboard route load) and report the failed step, rollback command/result, and current restored deployment IDs.
 
-## 0.5 v1.1.0 Social Inbox — Chặng A (draft-only)
+## 0.5 v1.1.0 Social Inbox — Chặng A/B (human-gated delivery)
 
 - [x] Inbox domain contract: tenant-scoped `InboxConversation` / `InboxMessage`, provider-message idempotency, unread state, and SQL migration statements.
 - [x] Inbound router: signed Zernio `message.received` is schema-validated, event-deduped, and tenant-resolved **only** through the persisted connected-account mapping.
 - [x] Worker: `webhook_process` persists inbound/outbound mirror messages with `mode: draft_only`; it never calls an inbox send endpoint.
 - [x] Read APIs: authenticated customer-scoped conversation and message endpoints; cross-tenant requests return `403`.
 - [x] Human-gated draft creation: authenticated tenant owner can create a persisted `pending_review` draft; `sendAttempted=false` and no outbound provider call exists in this stage.
-- [ ] Send approval/execution, live Zernio inbox webhook registration, and real DM E2E are explicitly deferred to Chặng B.
+- [x] Approval/execution contract: an authenticated tenant owner explicitly approves a pending draft; exactly one idempotent `inbox_reply` job is queued with approver audit data. The worker sends only queued approved drafts, uses the job ID as the provider idempotency key, then persists provider message evidence.
+- [ ] Staging live Zernio inbox webhook registration and real account-test DM E2E remain gated by a preflight check of the staging live credentials, mapped account capability, and webhook configuration.
 
 ## 1. MVP product scope
 

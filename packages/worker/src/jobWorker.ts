@@ -114,8 +114,10 @@ export class RasJobWorker {
 
     if (job.type === 'webhook_process' || job.type === 'inbox_process') return this.processZernioWebhook(job);
 
-    if (job.type === 'inbox_reply' || job.type === 'analytics_sync') {
-      if (this.options.dryRun) return { dryRun: true, skippedLiveSideEffect: job.type };
+    if (job.type === 'inbox_reply') return this.processInboxReply(job);
+
+    if (job.type === 'analytics_sync' && this.options.dryRun) {
+      return { dryRun: true, skippedLiveSideEffect: job.type };
     }
 
     throw new Error(`Unsupported live job type: ${job.type}`);
@@ -172,6 +174,17 @@ export class RasJobWorker {
       capabilities: detail.capabilities ?? [],
       lastVerifiedAtIso: saved.lastVerifiedAtIso,
     };
+  }
+
+  private async processInboxReply(job: RasJob): Promise<Record<string, unknown>> {
+    const payload = asRecord(job.payload);
+    const draftId = requiredString(payload, 'draftId');
+    const conversationId = requiredString(payload, 'conversationId');
+    const text = requiredString(payload, 'text');
+    if (this.options.dryRun) return { dryRun: true, draftId, conversationId, outboundSendAttempted: false };
+    const result = await this.adapter.sendInboxMessage({ conversationId, text, requestId: job.id });
+    const draft = await this.store.markInboxDraftReplySent({ customerId: job.customerId, draftId, providerMessageId: result.providerMessageId });
+    return { draftId: draft.id, conversationId, providerMessageId: result.providerMessageId, outboundSendAttempted: true };
   }
 
   private async processInboundMessage(job: RasJob, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
