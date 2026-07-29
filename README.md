@@ -170,6 +170,20 @@ After the integration-summary path is deployed behind a real backend URL, the ne
 
 Current frontend `/account-management` is a useful visual baseline only; it is not yet a real authenticated customer/admin management screen.
 
+## Release verification — v1.0.0 MVP Core
+
+The following live, controlled E2E evidence is intentionally redacted. It contains no credentials, account identifiers, webhook secrets, or full external content URLs.
+
+| Phase | Verified path | Result |
+|---|---|---|
+| Phase 3 — publish | RAS `publish_post` (`dryRun:false`) → Zernio → Facebook → signed `post.platform.published` → RAS lifecycle sync | `queued → published`; HMAC signature verified; replay was deduplicated. |
+| Phase 4 — permanent rejection | Controlled policy-rejection post → Facebook permanent Community Standards rejection → signed `post.platform.failed` → RAS `webhook_process` | `queued → failed`; error message persisted; tenant/profile/account mapping resolved from the connected account. |
+| Worker retry policy | Zernio API client errors `4xx` except `429` | Fail-fast through `failJob()`; `429`, `5xx`, and network failures retain exponential retry/backoff. |
+
+Phase 4 event evidence (redacted): event type `post.platform.failed`, Zernio post ID `[REDACTED]`, platform `facebook`, signature `verified`, webhook processing job `completed`, and RAS sync result `status: failed`.
+
+Before tagging this release, run `npm run check` and verify both the `main` ref and annotated release tag on the remote.
+
 ## Topic lanes
 
 | Topic | Role |
