@@ -76,6 +76,18 @@ test('zernio master webhook verifies payload.id/event, schema, HMAC, audit and d
   });
 });
 
+test('post lifecycle webhook resolves customer from mapped account when Zernio omits profileId', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+  state.connectedAccounts = [{ id: 'account_1', customerId: 'cust_1', zernioAccountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'ag', status: 'connected' }];
+  const rawBody = JSON.stringify({ id: 'evt_post_1', event: 'post.platform.published', post: { _id: 'post_1', status: 'publishing' }, platform: { name: 'facebook', status: 'published', platformPostId: 'facebook_1' }, account: { accountId: 'acct_1', platform: 'facebook', username: 'ag' }, timestamp: now });
+  await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) }, body: rawBody });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, deduped: false, eventId: 'evt_post_1', signature: 'verified' });
+  });
+});
+
 test('zernio master webhook is fail-closed for bad signature and invalid schema', async () => {
   const rawBody = JSON.stringify({ id: 'evt_bad', event: 'account.connected', timestamp: now });
   await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {

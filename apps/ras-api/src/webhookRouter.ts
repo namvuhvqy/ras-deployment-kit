@@ -55,8 +55,9 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
     if ((!validator && !isPostLifecycleEvent) || (validator && !validator(payload))) return endFailure(options.store, res, eventId, `schema_invalid_${eventType}`, 422);
 
     const account = extractAccount(payload);
-    const profileId = account?.profileId ?? stringAt(payload, 'profileId');
-    const accountId = account?.accountId ?? stringAt(payload, 'accountId');
+    const rawAccount = asRecord(payload.account);
+    const profileId = account?.profileId ?? stringAt(rawAccount, 'profileId') ?? stringAt(payload, 'profileId');
+    const accountId = account?.accountId ?? stringAt(rawAccount, 'accountId') ?? stringAt(payload, 'accountId');
     const event = await options.store.recordWebhookEvent({
       id: eventId,
       source: 'zernio',
@@ -75,11 +76,18 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
       await options.store.enqueueJob(webhookJob(eventId, customer.id, account, eventType, payload));
     }
     if (event.inserted && isPostLifecycleEvent) {
-      if (!profileId) return endFailure(options.store, res, eventId, 'missing_zernio_profile', 422);
-      const customer = await customerForProfile(options.store, profileId);
-      if (!customer) return endFailure(options.store, res, eventId, 'unknown_zernio_profile', 422);
+      // OpenAPI WebhookPayloadPostPlatform provides account.accountId but no profileId.
+      // Resolve the RAS tenant from the persisted connected-account map first.
+      const mappedAccount = accountId ? await accountForZernioId(options.store, accountId) : undefined;
+      const customer = profileId
+        ? await customerForProfile(options.store, profileId)
+        : mappedAccount ? await customerForAccount(options.store, mappedAccount.customerId) : undefined;
+      if (!customer) return endFailure(options.store, res, eventId, 'unknown_zernio_account', 422);
       await options.store.enqueueJob(webhookJob(eventId, customer.id, {
-        accountId: accountId ?? '', profileId, platform: account?.platform ?? 'facebook', username: account?.username ?? '',
+        accountId: accountId ?? mappedAccount?.zernioAccountId ?? '',
+        profileId: profileId ?? mappedAccount?.profileId ?? customer.zernioProfileId ?? '',
+        platform: account?.platform ?? mappedAccount?.platform ?? 'facebook',
+        username: account?.username ?? mappedAccount?.username ?? '',
       }, eventType, payload));
     }
 
@@ -110,6 +118,16 @@ function webhookJob(eventId: string, customerId: string, account: AccountEvent, 
 async function customerForProfile(store: JsonRasStore, profileId: string) {
   const state = await store.load();
   return state.customers.find((customer) => customer.zernioProfileId === profileId || customer.zernioProfileIds?.includes(profileId));
+}
+
+async function accountForZernioId(store: JsonRasStore, zernioAccountId: string) {
+  const state = await store.load();
+  return state.connectedAccounts.find((account) => account.zernioAccountId === zernioAccountId);
+}
+
+async function customerForAccount(store: JsonRasStore, customerId: string) {
+  const state = await store.load();
+  return state.customers.find((customer) => customer.id === customerId);
 }
 
 function loadValidators(): Map<string, ValidateFunction> {
