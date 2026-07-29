@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 import { RasJobWorker } from '../packages/worker/src/jobWorker.js';
 import type { RasJob } from '../packages/shared/src/types.js';
-import type { ZernioAdapter } from '../packages/zernio-adapter/src/index.js';
+import { ZernioApiError, type ZernioAdapter } from '../packages/zernio-adapter/src/index.js';
 
 const noopAdapter: ZernioAdapter = {
   async createProfile() {
@@ -112,6 +112,62 @@ test('RasJobWorker requeues transient failures before failing permanently', asyn
     assert.equal(job.retryCount, 1);
     assert.equal(job.lastError, 'zernio 429');
     assert.ok(job.runAfterIso);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('RasJobWorker fails fast for permanent Zernio 400 validation errors', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.enqueueJob(makePublishJob('job_zernio_400', 'profile_a', 'P1'));
+    const invalidPayloadAdapter = {
+      ...noopAdapter,
+      async createPost() {
+        throw new ZernioApiError('Zernio API 400 for /posts', 400, { error: 'invalid payload' });
+      },
+    } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, invalidPayloadAdapter, {
+      batchSize: 1, idleMs: 1, maxRetries: 5, baseRetryMs: 1, singleRun: true, dryRun: false,
+    });
+
+    const result = await worker.runOnce();
+    const job = (await store.load()).jobs[0];
+
+    assert.deepEqual(result, { processed: 1, completed: 0, failed: 1, requeued: 0 });
+    assert.equal(job.status, 'failed');
+    assert.equal(job.retryCount, 1);
+    assert.equal(job.lastError, 'Zernio API 400 for /posts');
+    assert.equal(job.runAfterIso, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('RasJobWorker requeues Zernio 429 rate limits', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.enqueueJob(makePublishJob('job_zernio_429', 'profile_a', 'P1'));
+    const throttledAdapter = {
+      ...noopAdapter,
+      async createPost() {
+        throw new ZernioApiError('Zernio API 429 for /posts', 429, { error: 'rate limited' });
+      },
+    } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, throttledAdapter, {
+      batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false,
+    });
+
+    const result = await worker.runOnce();
+    const job = (await store.load()).jobs[0];
+
+    assert.deepEqual(result, { processed: 1, completed: 0, failed: 0, requeued: 1 });
+    assert.equal(job.status, 'queued');
+    assert.equal(job.retryCount, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

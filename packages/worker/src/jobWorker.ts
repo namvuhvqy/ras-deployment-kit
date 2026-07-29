@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { FairProfileQueue } from '../../queue/src/fairQueue.js';
 import type { RasJob } from '../../shared/src/types.js';
 import type { JsonRasStore } from '../../shared/src/persistentStore.js';
-import type { CreatePostInput, ZernioAdapter } from '../../zernio-adapter/src/index.js';
+import { ZernioApiError, type CreatePostInput, type ZernioAdapter } from '../../zernio-adapter/src/index.js';
 
 export interface WorkerTopicMap {
   backend: number;
@@ -84,6 +84,11 @@ export class RasJobWorker {
       return 'completed';
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isPermanentZernioClientError(error)) {
+        await this.store.failJob(job.id, message);
+        await this.options.notifier?.send(topicForJob(job), `❌ RAS job failed: ${job.type} / ${job.id}\n${message}`);
+        return 'failed';
+      }
       if (job.retryCount + 1 <= this.options.maxRetries) {
         const runAfterIso = new Date(Date.now() + retryDelayMs(job.retryCount, this.options.baseRetryMs)).toISOString();
         await this.store.requeueJob(job.id, message, runAfterIso);
@@ -200,6 +205,10 @@ function assertPublishPostPayload(job: RasJob): CreatePostInput {
     requestId: job.id,
     ...(platformSpecificData ? { platformSpecificData } : {}),
   };
+}
+
+function isPermanentZernioClientError(error: unknown): boolean {
+  return error instanceof ZernioApiError && error.status >= 400 && error.status < 500 && error.status !== 429;
 }
 
 function retryDelayMs(retryCount: number, baseRetryMs: number): number {
