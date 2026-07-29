@@ -220,7 +220,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
   async sendInboxMessage(input: SendInboxMessageInput): Promise<SendInboxMessageResult> {
     const response = await this.request<Record<string, unknown>>(`/inbox/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
       method: 'POST',
-      body: { accountId: input.accountId, text: input.text },
+      body: { accountId: input.accountId, message: input.text },
       requestId: input.requestId,
     });
     const message = unwrapRecord(response, ['message', 'data']);
