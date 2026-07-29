@@ -128,7 +128,7 @@ test('RasJobWorker maps a published webhook by platformPostId when Zernio post i
     });
     await store.enqueueJob({
       ...makePublishJob('webhook_1', 'profile_a', 'P0'), type: 'webhook_process',
-      payload: { eventType: 'post.platform.published', webhookPayload: { post: { platformPostId: 'facebook_42', publishedAt: '2026-07-29T00:00:00.000Z' } } },
+      payload: { eventType: 'post.platform.published', webhookPayload: { platform: { platformPostId: 'facebook_42', publishedAt: '2026-07-29T00:00:00.000Z' } } },
     });
     const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
 

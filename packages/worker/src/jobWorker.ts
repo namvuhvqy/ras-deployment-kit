@@ -122,15 +122,18 @@ export class RasJobWorker {
     if (eventType === 'post.platform.published' || eventType === 'post.platform.failed') {
       const webhookPayload = asRecord(payload.webhookPayload);
       const post = asRecord(webhookPayload.post);
-      const zernioPostId = optionalString(post.id) ?? optionalString(post.postId) ?? optionalString(webhookPayload.postId);
-      const platformPostId = optionalString(post.platformPostId) ?? optionalString(webhookPayload.platformPostId);
+      const platform = asRecord(webhookPayload.platform);
+      // Zernio WebhookPayloadPostPlatform: post._id/id is the Zernio post id;
+      // platform.platformPostId/publishedUrl/error are terminal platform fields.
+      const zernioPostId = optionalString(post._id) ?? optionalString(post.id) ?? optionalString(post.postId) ?? optionalString(webhookPayload.postId);
+      const platformPostId = optionalString(platform.platformPostId) ?? optionalString(post.platformPostId) ?? optionalString(webhookPayload.platformPostId);
       const postId = zernioPostId ?? platformPostId;
       if (!postId) throw new Error('Webhook payload missing post id');
       const saved = await this.store.updateSocialPostStatus({
         postId,
         status: eventType === 'post.platform.published' ? 'published' : 'failed',
-        publishedAtIso: optionalString(post.publishedAt) ?? optionalString(webhookPayload.publishedAt),
-        errorMessage: optionalString(post.error) ?? optionalString(webhookPayload.error),
+        publishedAtIso: optionalString(post.publishedAt) ?? optionalString(platform.publishedAt) ?? optionalString(webhookPayload.publishedAt),
+        errorMessage: optionalString(platform.error) ?? optionalString(post.error) ?? optionalString(webhookPayload.error),
       });
       return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
     }
