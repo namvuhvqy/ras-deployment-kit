@@ -23,7 +23,7 @@ type AccountEvent = {
 };
 
 const accountEvents = new Set(['account.connected', 'account.disconnected']);
-const inboxEvents = new Set(['message.received', 'message.sent']);
+const inboxEvents = new Set(['message.received', 'message.sent', 'message.delivered']);
 const allowedPlatforms = new Set<Platform>(['facebook', 'instagram', 'youtube', 'twitter', 'linkedin', 'tiktok', 'threads', 'bluesky', 'telegram', 'whatsapp', 'reddit']);
 
 export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
@@ -156,14 +156,16 @@ function loadValidators(): Map<string, ValidateFunction> {
       result.set(name.replaceAll('_', '.'), ajv.compile({ ...entry.schema, definitions: document.definitions }));
     }
   }
-  // message.sent carries the same documented inbox envelope as message.received,
-  // with the event discriminator changed and an outgoing direction.
+  // Outbound inbox lifecycle events carry the same documented envelope as
+  // message.received; only the event discriminator differs.
   const receivedSchema = document.events?.message_received?.schema;
   if (receivedSchema) {
-    const sentSchema = structuredClone(receivedSchema) as { properties?: Record<string, { enum?: string[] }> };
-    const event = sentSchema.properties?.event;
-    if (event) event.enum = ['message.sent'];
-    result.set('message.sent', ajv.compile({ ...sentSchema, definitions: document.definitions }));
+    for (const eventType of ['message.sent', 'message.delivered']) {
+      const lifecycleSchema = structuredClone(receivedSchema) as { properties?: Record<string, { enum?: string[] }> };
+      const event = lifecycleSchema.properties?.event;
+      if (event) event.enum = [eventType];
+      result.set(eventType, ajv.compile({ ...lifecycleSchema, definitions: document.definitions }));
+    }
   }
   return result;
 }

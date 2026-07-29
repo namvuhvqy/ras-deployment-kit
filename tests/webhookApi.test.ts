@@ -129,6 +129,26 @@ test('outbound inbox webhook maps tenant by account and queues processing', asyn
   });
 });
 
+test('outbound delivery-status inbox webhook maps tenant and queues processing', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+  state.connectedAccounts = [{ id: 'account_1', customerId: 'cust_1', zernioAccountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'shop', status: 'connected' }];
+  const rawBody = JSON.stringify({
+    id: 'evt_message_delivered_1', event: 'message.delivered',
+    message: { id: 'message_out_1', conversationId: 'conversation_1', platform: 'facebook', platformMessageId: 'platform_message_out_1', direction: 'outgoing', text: 'Đã giao', attachments: [], sender: { id: 'acct_1' }, sentAt: now, isRead: true },
+    statusAt: now,
+    conversation: { id: 'conversation_1', platformConversationId: 'thread_1', status: 'active' },
+    account: { id: 'acct_1', accountId: 'acct_1', profileId: 'untrusted_profile', platform: 'facebook', username: 'shop' }, timestamp: now,
+  });
+  await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) }, body: rawBody });
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as { eventId: string; signature: string };
+    assert.equal(payload.eventId, 'evt_message_delivered_1');
+    assert.equal(payload.signature, 'verified');
+  });
+});
+
 test('zernio master webhook is fail-closed for bad signature and invalid schema', async () => {
   const rawBody = JSON.stringify({ id: 'evt_bad', event: 'account.connected', timestamp: now });
   await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
