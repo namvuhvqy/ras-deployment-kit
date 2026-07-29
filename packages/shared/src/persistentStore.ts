@@ -9,6 +9,8 @@ import type {
   RasCustomer,
   RasEntitlement,
   RasJob,
+  InboxConversation,
+  InboxMessage,
   RasSandboxEnvironment,
   RasServicePackage,
   RasSession,
@@ -27,6 +29,8 @@ export interface RasPersistentState {
   servicePackages: RasServicePackage[];
   connectedAccounts: ConnectedAccount[];
   socialPosts: SocialPost[];
+  inboxConversations: InboxConversation[];
+  inboxMessages: InboxMessage[];
   jobs: RasJob[];
   webhookEvents: StoredWebhookEvent[];
   webhookFailures: StoredWebhookFailure[];
@@ -224,6 +228,8 @@ export class JsonRasStore {
       servicePackages: [],
       connectedAccounts: [],
       socialPosts: [],
+      inboxConversations: [],
+      inboxMessages: [],
       jobs: [],
       webhookEvents: [],
       webhookFailures: [],
@@ -243,6 +249,8 @@ export class JsonRasStore {
     state.servicePackages ??= [];
     state.connectedAccounts ??= [];
     state.socialPosts ??= [];
+    state.inboxConversations ??= [];
+    state.inboxMessages ??= [];
     state.jobs ??= [];
     state.webhookEvents ??= [];
     state.webhookFailures ??= [];
@@ -616,6 +624,59 @@ export class JsonRasStore {
     state.socialPosts[index] = updated;
     await this.write(state);
     return updated;
+  }
+
+  async recordInboxMessage(input: Omit<InboxMessage, 'createdAtIso'> & {
+    createdAtIso?: string;
+    participantId?: string;
+    participantName?: string;
+    participantUsername?: string;
+  }): Promise<{ inserted: boolean; message: InboxMessage; conversation: InboxConversation }> {
+    const state = await this.load();
+    const existing = state.inboxMessages.find((row) => row.customerId === input.customerId && row.providerMessageId === input.providerMessageId);
+    if (existing) {
+      const conversation = state.inboxConversations.find((row) => row.customerId === input.customerId && row.id === existing.conversationId);
+      if (!conversation) throw new Error(`Inbox conversation missing for message: ${existing.id}`);
+      return { inserted: false, message: existing, conversation };
+    }
+    const nowIso = input.createdAtIso ?? new Date().toISOString();
+    const message: InboxMessage = { ...input, text: input.text || undefined, createdAtIso: nowIso };
+    const conversationIndex = state.inboxConversations.findIndex((row) => row.customerId === input.customerId && row.id === input.conversationId);
+    const existingConversation = conversationIndex >= 0 ? state.inboxConversations[conversationIndex] : undefined;
+    const conversation: InboxConversation = {
+      id: input.conversationId,
+      customerId: input.customerId,
+      accountId: input.accountId,
+      platform: input.platform,
+      providerConversationId: existingConversation?.providerConversationId ?? input.conversationId,
+      status: existingConversation?.status ?? 'open',
+      participantId: input.participantId ?? existingConversation?.participantId,
+      participantName: input.participantName ?? existingConversation?.participantName,
+      participantUsername: input.participantUsername ?? existingConversation?.participantUsername,
+      lastMessageAtIso: input.receivedAtIso,
+      unreadCount: (existingConversation?.unreadCount ?? 0) + (input.direction === 'inbound' ? 1 : 0),
+      createdAtIso: existingConversation?.createdAtIso ?? nowIso,
+      updatedAtIso: nowIso,
+    };
+    if (conversationIndex >= 0) state.inboxConversations[conversationIndex] = conversation;
+    else state.inboxConversations.push(conversation);
+    state.inboxMessages.push(message);
+    await this.write(state);
+    return { inserted: true, message, conversation };
+  }
+
+  async listInboxConversations(customerId: string): Promise<InboxConversation[]> {
+    const state = await this.load();
+    return state.inboxConversations
+      .filter((row) => row.customerId === customerId)
+      .sort((left, right) => Date.parse(right.lastMessageAtIso) - Date.parse(left.lastMessageAtIso));
+  }
+
+  async listInboxMessages(customerId: string, conversationId: string): Promise<InboxMessage[]> {
+    const state = await this.load();
+    return state.inboxMessages
+      .filter((row) => row.customerId === customerId && row.conversationId === conversationId)
+      .sort((left, right) => Date.parse(left.receivedAtIso) - Date.parse(right.receivedAtIso));
   }
 
   async getConnectedAccountsForCustomer(customerId: string): Promise<ConnectedAccount[]> {

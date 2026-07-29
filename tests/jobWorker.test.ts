@@ -173,6 +173,31 @@ test('RasJobWorker requeues Zernio 429 rate limits', async () => {
   }
 });
 
+test('RasJobWorker persists an inbound message in draft-only mode without sending a reply', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.enqueueJob({
+      id: 'inbox_webhook_1', customerId: 'cust_inbox', profileId: 'profile_inbox', accountId: 'acct_inbox', platform: 'facebook',
+      type: 'inbox_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+      payload: { eventType: 'message.received', webhookPayload: { message: { id: 'msg_1', conversationId: 'conv_1', platform: 'facebook', platformMessageId: 'provider_1', direction: 'incoming', text: 'Xin chào', sender: { id: 'sender_1', name: 'Anh Nam' }, sentAt: '2026-07-30T00:00:00.000Z' }, conversation: { id: 'conv_1', participantId: 'sender_1' } } },
+    });
+    const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    const result = await worker.runOnce();
+    const state = await store.load();
+
+    assert.deepEqual(result, { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    assert.equal(state.inboxMessages.length, 1);
+    assert.equal(state.inboxMessages[0]?.text, 'Xin chào');
+    assert.equal(state.jobs[0]?.result?.mode, 'draft_only');
+    assert.equal(state.jobs[0]?.result?.outboundSendAttempted, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('RasJobWorker maps a published webhook by platformPostId when Zernio post id is absent', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

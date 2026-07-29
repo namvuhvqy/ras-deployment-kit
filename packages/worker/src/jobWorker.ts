@@ -112,7 +112,7 @@ export class RasJobWorker {
       return { dryRun: false, ...result };
     }
 
-    if (job.type === 'webhook_process') return this.processZernioWebhook(job);
+    if (job.type === 'webhook_process' || job.type === 'inbox_process') return this.processZernioWebhook(job);
 
     if (job.type === 'inbox_reply' || job.type === 'analytics_sync') {
       if (this.options.dryRun) return { dryRun: true, skippedLiveSideEffect: job.type };
@@ -142,6 +142,7 @@ export class RasJobWorker {
       });
       return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
     }
+    if (eventType === 'message.received') return this.processInboundMessage(job, payload);
     if (eventType !== 'account.connected' && eventType !== 'account.disconnected') {
       return { ignored: true, eventType };
     }
@@ -170,6 +171,43 @@ export class RasJobWorker {
       status: saved.status,
       capabilities: detail.capabilities ?? [],
       lastVerifiedAtIso: saved.lastVerifiedAtIso,
+    };
+  }
+
+  private async processInboundMessage(job: RasJob, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const webhookPayload = asRecord(payload.webhookPayload);
+    const message = asRecord(webhookPayload.message);
+    const conversation = asRecord(webhookPayload.conversation);
+    const sender = asRecord(message.sender);
+    const account = asRecord(webhookPayload.account);
+    const providerMessageId = requiredString(message, 'platformMessageId');
+    const conversationId = requiredString(message, 'conversationId');
+    const accountId = job.accountId ?? requiredString(account, 'accountId');
+    const platform = requiredString(message, 'platform') as RasJob['platform'];
+    if (!platform) throw new Error('Inbox message missing platform');
+    const saved = await this.store.recordInboxMessage({
+      id: optionalString(message.id) ?? `inbox_${providerMessageId}`,
+      customerId: job.customerId,
+      accountId,
+      platform,
+      conversationId,
+      providerMessageId,
+      direction: requiredString(message, 'direction') === 'incoming' ? 'inbound' : 'outbound',
+      text: optionalString(message.text),
+      senderId: optionalString(sender.id),
+      senderName: optionalString(sender.name),
+      participantId: optionalString(conversation.participantId) ?? optionalString(sender.id),
+      participantName: optionalString(conversation.participantName) ?? optionalString(sender.name),
+      participantUsername: optionalString(conversation.participantUsername) ?? optionalString(sender.username),
+      receivedAtIso: optionalString(message.sentAt) ?? new Date().toISOString(),
+    });
+    return {
+      eventType: 'message.received',
+      synced: saved.inserted,
+      conversationId: saved.conversation.id,
+      messageId: saved.message.id,
+      mode: 'draft_only',
+      outboundSendAttempted: false,
     };
   }
 }

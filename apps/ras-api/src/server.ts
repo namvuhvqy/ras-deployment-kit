@@ -968,6 +968,26 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/inbox/conversations')) {
+    const [, , customerId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const conversations = await store.listInboxConversations(decodedCustomerId);
+    res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, mode: 'draft_only', conversations }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && /\/inbox\/conversations\/[^/]+\/messages$/.test(req.url)) {
+    const [, , customerId, , , conversationId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const messages = await store.listInboxMessages(decodedCustomerId, decodeURIComponent(conversationId));
+    res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, conversationId: decodeURIComponent(conversationId), messages }));
+    return;
+  }
+
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/connection-summary')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);

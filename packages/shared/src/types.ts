@@ -1,4 +1,4 @@
-export type SocialPlatform = 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky';
+export type SocialPlatform = 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' | 'telegram' | 'whatsapp' | 'reddit';
 export type Platform = SocialPlatform;
 
 export type SandboxStatus = 'provisioning' | 'starting' | 'running' | 'degraded' | 'stopped' | 'failed';
@@ -192,6 +192,40 @@ export interface SocialPost {
   updatedAtIso: string;
 }
 
+export type InboxConversationStatus = 'open' | 'closed';
+export type InboxMessageDirection = 'inbound' | 'outbound';
+
+export interface InboxConversation {
+  id: string;
+  customerId: string;
+  accountId: string;
+  platform: SocialPlatform;
+  providerConversationId: string;
+  status: InboxConversationStatus;
+  participantId?: string;
+  participantName?: string;
+  participantUsername?: string;
+  lastMessageAtIso: string;
+  unreadCount: number;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+export interface InboxMessage {
+  id: string;
+  customerId: string;
+  accountId: string;
+  platform: SocialPlatform;
+  conversationId: string;
+  providerMessageId: string;
+  direction: InboxMessageDirection;
+  text?: string;
+  senderId?: string;
+  senderName?: string;
+  receivedAtIso: string;
+  createdAtIso: string;
+}
+
 export type RasJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
 
 export interface RasJob {
@@ -200,7 +234,7 @@ export interface RasJob {
   profileId: string;
   accountId?: string;
   platform?: SocialPlatform;
-  type: 'publish_post' | 'create_profile' | 'webhook_process' | 'smoke_test' | 'inbox_reply' | 'analytics_sync';
+  type: 'publish_post' | 'create_profile' | 'webhook_process' | 'inbox_process' | 'smoke_test' | 'inbox_reply' | 'analytics_sync';
   priority: number | 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
   status: RasJobStatus;
   payload: Record<string, unknown>;

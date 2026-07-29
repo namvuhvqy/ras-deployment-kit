@@ -88,6 +88,27 @@ test('post lifecycle webhook resolves customer from mapped account when Zernio o
   });
 });
 
+test('inbox webhook maps tenant by account, queues one draft-only processing job, and dedupes', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+  state.connectedAccounts = [{ id: 'account_1', customerId: 'cust_1', zernioAccountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'shop', status: 'connected' }];
+  const rawBody = JSON.stringify({
+    id: 'evt_message_1', event: 'message.received',
+    message: { id: 'message_1', conversationId: 'conversation_1', platform: 'facebook', platformMessageId: 'platform_message_1', direction: 'incoming', text: 'Xin chào', attachments: [], sender: { id: 'sender_1', name: 'Anh Nam' }, sentAt: now, isRead: false },
+    conversation: { id: 'conversation_1', platformConversationId: 'thread_1', status: 'active' },
+    account: { id: 'acct_1', accountId: 'acct_1', profileId: 'untrusted_profile', platform: 'facebook', username: 'shop' }, timestamp: now,
+  });
+  await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
+    const headers = { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) };
+    const response = await fetch(`${baseUrl}/api/v1/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, deduped: false, eventId: 'evt_message_1', signature: 'verified' });
+    const duplicate = await fetch(`${baseUrl}/api/v1/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
+    assert.equal(duplicate.status, 200);
+    assert.deepEqual(await duplicate.json(), { ok: true, deduped: true, eventId: 'evt_message_1', signature: 'verified' });
+  });
+});
+
 test('zernio master webhook is fail-closed for bad signature and invalid schema', async () => {
   const rawBody = JSON.stringify({ id: 'evt_bad', event: 'account.connected', timestamp: now });
   await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {

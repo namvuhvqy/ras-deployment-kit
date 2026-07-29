@@ -88,6 +88,35 @@ test('customer-scoped read endpoints require a matching session bearer token', a
   });
 });
 
+test('inbox read APIs are tenant-scoped and never expose another customer messages', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [
+      { id: 'user_a', email: 'a@example.test', role: 'owner', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'user_b', email: 'b@example.test', role: 'owner', customerId: 'cust_b', status: 'active', createdAtIso: now, updatedAtIso: now },
+    ],
+    sessions: [
+      { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+      { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+    ],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active' }, { id: 'cust_b', name: 'B', status: 'active' }],
+    inboxConversations: [{ id: 'conv_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', providerConversationId: 'conv_a', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now }],
+    inboxMessages: [{ id: 'msg_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', conversationId: 'conv_a', providerMessageId: 'provider_a', direction: 'inbound', text: 'Riêng tư', receivedAtIso: now, createdAtIso: now }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const own = await fetch(`${baseUrl}/customers/cust_a/inbox/conversations`, { headers: { authorization: 'Bearer token_a' } });
+    assert.equal(own.status, 200);
+    const ownPayload = (await own.json()) as { mode: string; conversations: Array<{ id: string }> };
+    assert.equal(ownPayload.mode, 'draft_only');
+    assert.deepEqual(ownPayload.conversations.map((row) => row.id), ['conv_a']);
+    const messages = await fetch(`${baseUrl}/customers/cust_a/inbox/conversations/conv_a/messages`, { headers: { authorization: 'Bearer token_a' } });
+    assert.equal(messages.status, 200);
+    assert.deepEqual((await messages.json() as { messages: Array<{ text: string }> }).messages.map((row) => row.text), ['Riêng tư']);
+    const cross = await fetch(`${baseUrl}/customers/cust_a/inbox/conversations`, { headers: { authorization: 'Bearer token_b' } });
+    assert.equal(cross.status, 403);
+  });
+});
+
 test('mapping endpoints create tenant/customer/profile/account links without root profileId account scope', async () => {
   const state = emptyState();
   state.users = [

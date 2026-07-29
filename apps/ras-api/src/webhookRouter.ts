@@ -23,7 +23,8 @@ type AccountEvent = {
 };
 
 const accountEvents = new Set(['account.connected', 'account.disconnected']);
-const allowedPlatforms = new Set<Platform>(['facebook', 'instagram', 'youtube', 'twitter', 'linkedin', 'tiktok', 'threads', 'bluesky']);
+const inboxEvents = new Set(['message.received']);
+const allowedPlatforms = new Set<Platform>(['facebook', 'instagram', 'youtube', 'twitter', 'linkedin', 'tiktok', 'threads', 'bluesky', 'telegram', 'whatsapp', 'reddit']);
 
 export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
   const validators = loadValidators();
@@ -75,6 +76,17 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
       if (!customer) return endFailure(options.store, res, eventId, 'unknown_zernio_profile', 422);
       await options.store.enqueueJob(webhookJob(eventId, customer.id, account, eventType, payload));
     }
+    if (event.inserted && inboxEvents.has(eventType)) {
+      const mappedAccount = accountId ? await accountForZernioId(options.store, accountId) : undefined;
+      const customer = mappedAccount ? await customerForAccount(options.store, mappedAccount.customerId) : undefined;
+      if (!customer || !mappedAccount) return endFailure(options.store, res, eventId, 'unknown_zernio_account', 422);
+      await options.store.enqueueJob(webhookJob(eventId, customer.id, {
+        accountId: mappedAccount.zernioAccountId,
+        profileId: mappedAccount.profileId ?? customer.zernioProfileId ?? '',
+        platform: mappedAccount.platform,
+        username: mappedAccount.username ?? '',
+      }, eventType, payload, 'inbox_process'));
+    }
     if (event.inserted && isPostLifecycleEvent) {
       // OpenAPI WebhookPayloadPostPlatform provides account.accountId but no profileId.
       // Resolve the RAS tenant from the persisted connected-account map first.
@@ -98,7 +110,7 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
   };
 }
 
-function webhookJob(eventId: string, customerId: string, account: AccountEvent, eventType: string, payload: WebhookPayload): RasJob {
+function webhookJob(eventId: string, customerId: string, account: AccountEvent, eventType: string, payload: WebhookPayload, type: RasJob['type'] = 'webhook_process'): RasJob {
   const now = new Date().toISOString();
   return {
     id: `zernio_webhook_${eventId}`,
@@ -106,7 +118,7 @@ function webhookJob(eventId: string, customerId: string, account: AccountEvent, 
     profileId: account.profileId,
     accountId: account.accountId,
     platform: account.platform,
-    type: 'webhook_process',
+    type,
     priority: 'P0',
     status: 'queued',
     retryCount: 0,

@@ -88,6 +88,14 @@ For any approved production deploy after this gate:
 5. Roll frontend back using the previous Vercel production deployment / rollback action.
 6. Re-run minimal health checks (`GET /health`, dashboard route load) and report the failed step, rollback command/result, and current restored deployment IDs.
 
+## 0.5 v1.1.0 Social Inbox — Chặng A (draft-only)
+
+- [x] Inbox domain contract: tenant-scoped `InboxConversation` / `InboxMessage`, provider-message idempotency, unread state, and SQL migration statements.
+- [x] Inbound router: signed Zernio `message.received` is schema-validated, event-deduped, and tenant-resolved **only** through the persisted connected-account mapping.
+- [x] Worker: `webhook_process` persists inbound/outbound mirror messages with `mode: draft_only`; it never calls an inbox send endpoint.
+- [x] Read APIs: authenticated customer-scoped conversation and message endpoints; cross-tenant requests return `403`.
+- [ ] Human-gated draft creation / send approval, live Zernio inbox webhook registration, and real DM E2E are explicitly deferred to Chặng B.
+
 ## 1. MVP product scope
 
 RunAgentSys MVP has **two service lines** managed by one backend/control panel:

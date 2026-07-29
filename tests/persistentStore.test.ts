@@ -107,6 +107,38 @@ test('JsonRasStore persists customer, account, queue, webhook idempotency, and a
   }
 });
 
+test('JsonRasStore persists inbound inbox messages once and isolates conversations by tenant', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_a', name: 'Shop A', zernioProfileId: 'profile_a', status: 'active' });
+    await store.upsertCustomer({ id: 'cust_b', name: 'Shop B', zernioProfileId: 'profile_b', status: 'active' });
+
+    const first = await store.recordInboxMessage({
+      id: 'msg_1', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', conversationId: 'conv_shared',
+      direction: 'inbound', text: 'Xin chào', providerMessageId: 'provider_msg_1', receivedAtIso: '2026-07-30T00:00:00.000Z',
+    });
+    const duplicate = await store.recordInboxMessage({
+      id: 'msg_duplicated', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', conversationId: 'conv_shared',
+      direction: 'inbound', text: 'Xin chào duplicate', providerMessageId: 'provider_msg_1', receivedAtIso: '2026-07-30T00:00:01.000Z',
+    });
+    await store.recordInboxMessage({
+      id: 'msg_2', customerId: 'cust_b', accountId: 'acct_b', platform: 'facebook', conversationId: 'conv_shared',
+      direction: 'inbound', text: 'Khách B', providerMessageId: 'provider_msg_2', receivedAtIso: '2026-07-30T00:00:02.000Z',
+    });
+
+    assert.equal(first.inserted, true);
+    assert.equal(duplicate.inserted, false);
+    assert.equal((await store.listInboxConversations('cust_a')).length, 1);
+    assert.equal((await store.listInboxMessages('cust_a', 'conv_shared')).length, 1);
+    assert.equal((await store.listInboxMessages('cust_b', 'conv_shared')).length, 1);
+    assert.equal((await store.listInboxMessages('cust_a', 'conv_shared'))[0]?.text, 'Xin chào');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('JsonRasStore persists PayPal capture before provisioning and keeps pending retry state on provision failure', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {
