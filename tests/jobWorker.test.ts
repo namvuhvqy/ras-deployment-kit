@@ -211,7 +211,7 @@ test('RasJobWorker sends an approved inbox reply once and persists provider deli
     const draft = await store.createInboxDraftReply({ customerId: 'cust_1', conversationId: 'conv_1', text: 'Đã nhận ạ', createdByUserId: 'user_1' });
     const approval = await store.approveInboxDraftReply({ customerId: 'cust_1', draftId: draft.id, approvedByUserId: 'user_1' });
     let calls = 0;
-    const adapter = { ...noopAdapter, async sendInboxMessage(input) { calls += 1; assert.deepEqual(input, { conversationId: 'conv_1', text: 'Đã nhận ạ', requestId: approval.job.id }); return { providerMessageId: 'provider_out_1' }; } } satisfies ZernioAdapter;
+    const adapter = { ...noopAdapter, async sendInboxMessage(input) { calls += 1; assert.deepEqual(input, { conversationId: 'conv_1', accountId: 'acct_1', text: 'Đã nhận ạ', requestId: approval.job.id }); return { providerMessageId: 'provider_out_1' }; } } satisfies ZernioAdapter;
     const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
     assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
     const saved = await store.load();

@@ -182,7 +182,8 @@ export class RasJobWorker {
     const conversationId = requiredString(payload, 'conversationId');
     const text = requiredString(payload, 'text');
     if (this.options.dryRun) return { dryRun: true, draftId, conversationId, outboundSendAttempted: false };
-    const result = await this.adapter.sendInboxMessage({ conversationId, text, requestId: job.id });
+    const accountId = requiredString(payload, 'accountId');
+    const result = await this.adapter.sendInboxMessage({ conversationId, accountId, text, requestId: job.id });
     const draft = await this.store.markInboxDraftReplySent({ customerId: job.customerId, draftId, providerMessageId: result.providerMessageId });
     return { draftId: draft.id, conversationId, providerMessageId: result.providerMessageId, outboundSendAttempted: true };
   }

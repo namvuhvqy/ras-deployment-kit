@@ -154,10 +154,10 @@ test('LiveZernioAdapter sends a conversation message using documented inbox path
   };
   try {
     const adapter = new LiveZernioAdapter({ apiKey: 'test_key', baseUrl: 'https://zernio.example/api/v1' });
-    assert.deepEqual(await adapter.sendInboxMessage({ conversationId: 'conversation/1', text: 'Đã nhận ạ', requestId: 'reply_job_1' }), { providerMessageId: 'outbound_1' });
+    assert.deepEqual(await adapter.sendInboxMessage({ conversationId: 'conversation/1', accountId: 'account_1', text: 'Đã nhận ạ', requestId: 'reply_job_1' }), { providerMessageId: 'outbound_1' });
     assert.equal(calls[0].url, 'https://zernio.example/api/v1/inbox/conversations/conversation%2F1/messages');
     assert.equal((calls[0].init.headers as Record<string, string>)['x-request-id'], 'reply_job_1');
-    assert.equal(calls[0].init.body, JSON.stringify({ text: 'Đã nhận ạ' }));
+    assert.equal(calls[0].init.body, JSON.stringify({ accountId: 'account_1', text: 'Đã nhận ạ' }));
   } finally { globalThis.fetch = originalFetch; }
 });
 

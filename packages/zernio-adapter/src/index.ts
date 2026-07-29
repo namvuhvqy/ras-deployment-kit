@@ -52,6 +52,8 @@ export interface CreatePostResult {
 
 export interface SendInboxMessageInput {
   conversationId: string;
+  /** Required by Zernio to select the connected sender account. */
+  accountId: string;
   text: string;
   requestId?: string;
 }
@@ -218,7 +220,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
   async sendInboxMessage(input: SendInboxMessageInput): Promise<SendInboxMessageResult> {
     const response = await this.request<Record<string, unknown>>(`/inbox/conversations/${encodeURIComponent(input.conversationId)}/messages`, {
       method: 'POST',
-      body: { text: input.text },
+      body: { accountId: input.accountId, text: input.text },
       requestId: input.requestId,
     });
     const message = unwrapRecord(response, ['message', 'data']);
