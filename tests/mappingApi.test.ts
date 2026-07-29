@@ -117,6 +117,37 @@ test('inbox read APIs are tenant-scoped and never expose another customer messag
   });
 });
 
+test('inbox draft endpoint creates a tenant-scoped pending-review reply and rejects cross-tenant access', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [
+      { id: 'user_a', email: 'a@example.test', role: 'owner', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'user_b', email: 'b@example.test', role: 'owner', customerId: 'cust_b', status: 'active', createdAtIso: now, updatedAtIso: now },
+    ],
+    sessions: [
+      { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+      { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
+    ],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active' }, { id: 'cust_b', name: 'B', status: 'active' }],
+    inboxConversations: [{ id: 'conv_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', providerConversationId: 'conv_a', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const own = await fetch(`${baseUrl}/customers/cust_a/inbox/conversations/conv_a/drafts`, {
+      method: 'POST', headers: { authorization: 'Bearer token_a', 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Em hỗ trợ anh ngay ạ.' }),
+    });
+    assert.equal(own.status, 201);
+    const payload = (await own.json()) as { mode: string; draft: { status: string; text: string; sendAttempted: boolean } };
+    assert.equal(payload.mode, 'draft_only');
+    assert.equal(payload.draft.status, 'pending_review');
+    assert.equal(payload.draft.text, 'Em hỗ trợ anh ngay ạ.');
+    assert.equal(payload.draft.sendAttempted, false);
+    const cross = await fetch(`${baseUrl}/customers/cust_a/inbox/conversations/conv_a/drafts`, {
+      method: 'POST', headers: { authorization: 'Bearer token_b', 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Không được phép' }),
+    });
+    assert.equal(cross.status, 403);
+  });
+});
+
 test('mapping endpoints create tenant/customer/profile/account links without root profileId account scope', async () => {
   const state = emptyState();
   state.users = [

@@ -59,6 +59,16 @@ export const createTableStatements = [
     created_at TEXT NOT NULL,
     UNIQUE(customer_id, provider_message_id)
   )`,
+  `CREATE TABLE IF NOT EXISTS inbox_draft_replies (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    conversation_id TEXT NOT NULL REFERENCES inbox_conversations(id),
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_review',
+    send_attempted INTEGER NOT NULL DEFAULT 0,
+    created_by_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS job_queue (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL REFERENCES customers(id),

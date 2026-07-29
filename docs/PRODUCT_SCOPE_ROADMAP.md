@@ -94,7 +94,8 @@ For any approved production deploy after this gate:
 - [x] Inbound router: signed Zernio `message.received` is schema-validated, event-deduped, and tenant-resolved **only** through the persisted connected-account mapping.
 - [x] Worker: `webhook_process` persists inbound/outbound mirror messages with `mode: draft_only`; it never calls an inbox send endpoint.
 - [x] Read APIs: authenticated customer-scoped conversation and message endpoints; cross-tenant requests return `403`.
-- [ ] Human-gated draft creation / send approval, live Zernio inbox webhook registration, and real DM E2E are explicitly deferred to Chặng B.
+- [x] Human-gated draft creation: authenticated tenant owner can create a persisted `pending_review` draft; `sendAttempted=false` and no outbound provider call exists in this stage.
+- [ ] Send approval/execution, live Zernio inbox webhook registration, and real DM E2E are explicitly deferred to Chặng B.
 
 ## 1. MVP product scope
 

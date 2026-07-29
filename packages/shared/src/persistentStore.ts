@@ -10,6 +10,7 @@ import type {
   RasEntitlement,
   RasJob,
   InboxConversation,
+  InboxDraftReply,
   InboxMessage,
   RasSandboxEnvironment,
   RasServicePackage,
@@ -31,6 +32,7 @@ export interface RasPersistentState {
   socialPosts: SocialPost[];
   inboxConversations: InboxConversation[];
   inboxMessages: InboxMessage[];
+  inboxDraftReplies: InboxDraftReply[];
   jobs: RasJob[];
   webhookEvents: StoredWebhookEvent[];
   webhookFailures: StoredWebhookFailure[];
@@ -230,6 +232,7 @@ export class JsonRasStore {
       socialPosts: [],
       inboxConversations: [],
       inboxMessages: [],
+      inboxDraftReplies: [],
       jobs: [],
       webhookEvents: [],
       webhookFailures: [],
@@ -251,6 +254,7 @@ export class JsonRasStore {
     state.socialPosts ??= [];
     state.inboxConversations ??= [];
     state.inboxMessages ??= [];
+    state.inboxDraftReplies ??= [];
     state.jobs ??= [];
     state.webhookEvents ??= [];
     state.webhookFailures ??= [];
@@ -677,6 +681,25 @@ export class JsonRasStore {
     return state.inboxMessages
       .filter((row) => row.customerId === customerId && row.conversationId === conversationId)
       .sort((left, right) => Date.parse(left.receivedAtIso) - Date.parse(right.receivedAtIso));
+  }
+
+  async createInboxDraftReply(input: Omit<InboxDraftReply, 'id' | 'status' | 'sendAttempted' | 'createdAtIso'>): Promise<InboxDraftReply> {
+    const state = await this.load();
+    const conversation = state.inboxConversations.find((row) => row.customerId === input.customerId && row.id === input.conversationId);
+    if (!conversation) throw new Error('inbox_conversation_not_found');
+    const text = input.text.trim();
+    if (!text) throw new Error('inbox_draft_text_required');
+    const draft: InboxDraftReply = {
+      id: `inbox_draft_${crypto.randomUUID()}`,
+      ...input,
+      text,
+      status: 'pending_review',
+      sendAttempted: false,
+      createdAtIso: new Date().toISOString(),
+    };
+    state.inboxDraftReplies.push(draft);
+    await this.write(state);
+    return draft;
   }
 
   async getConnectedAccountsForCustomer(customerId: string): Promise<ConnectedAccount[]> {

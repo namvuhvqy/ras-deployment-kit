@@ -968,6 +968,36 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url?.startsWith('/customers/') && /\/inbox\/conversations\/[^/]+\/drafts$/.test(req.url)) {
+    const [, , customerId, , , conversationId] = req.url.split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const decodedConversationId = decodeURIComponent(conversationId);
+    const access = await requireCustomerAccess(req, decodedCustomerId);
+    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const body = await readJsonBody(req);
+    const text = stringField(body, 'text');
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!text || !dashboard) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'inbox_draft_text_required' }));
+      return;
+    }
+    try {
+      const draft = await store.createInboxDraftReply({
+        customerId: decodedCustomerId,
+        conversationId: decodedConversationId,
+        text,
+        createdByUserId: dashboard.user.id,
+      });
+      res.statusCode = 201;
+      res.end(JSON.stringify({ ok: true, mode: 'draft_only', draft }));
+    } catch (error) {
+      res.statusCode = error instanceof Error && error.message === 'inbox_conversation_not_found' ? 404 : 400;
+      res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'inbox_draft_failed' }));
+    }
+    return;
+  }
+
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/inbox/conversations')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);

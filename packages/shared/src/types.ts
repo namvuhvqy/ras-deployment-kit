@@ -211,6 +211,17 @@ export interface InboxConversation {
   updatedAtIso: string;
 }
 
+export interface InboxDraftReply {
+  id: string;
+  customerId: string;
+  conversationId: string;
+  text: string;
+  status: 'pending_review';
+  sendAttempted: false;
+  createdByUserId: string;
+  createdAtIso: string;
+}
+
 export interface InboxMessage {
   id: string;
   customerId: string;
