@@ -28,7 +28,8 @@ const allowedPlatforms = new Set<Platform>(['facebook', 'instagram', 'youtube', 
 export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
   const validators = loadValidators();
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-    if (req.method !== 'POST' || req.url?.split('?')[0] !== '/webhooks/zernio') return false;
+    const path = req.url?.split('?')[0];
+    if (req.method !== 'POST' || (path !== '/webhooks/zernio' && path !== '/api/v1/webhooks/zernio')) return false;
 
     const status = await options.store.getWebhookStatus();
     if (!status.enabled) return endFailure(options.store, res, undefined, 'webhook_disabled', 503);
@@ -50,7 +51,8 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
     if (!eventType) return endFailure(options.store, res, eventId, 'missing_event_type', 400);
 
     const validator = validatorFor(eventType, validators);
-    if (!validator || !validator(payload)) return endFailure(options.store, res, eventId, `schema_invalid_${eventType}`, 422);
+    const isPostLifecycleEvent = eventType === 'post.platform.published' || eventType === 'post.platform.failed';
+    if ((!validator && !isPostLifecycleEvent) || (validator && !validator(payload))) return endFailure(options.store, res, eventId, `schema_invalid_${eventType}`, 422);
 
     const account = extractAccount(payload);
     const profileId = account?.profileId ?? stringAt(payload, 'profileId');
@@ -67,13 +69,22 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
       signatureStatus: 'verified',
     });
 
-    if (event.inserted && account && accountEvents.has(eventType)) {
+    if (event.inserted && accountEvents.has(eventType) && account) {
       const customer = await customerForProfile(options.store, account.profileId);
       if (!customer) return endFailure(options.store, res, eventId, 'unknown_zernio_profile', 422);
       await options.store.enqueueJob(webhookJob(eventId, customer.id, account, eventType, payload));
     }
+    if (event.inserted && isPostLifecycleEvent) {
+      if (!profileId) return endFailure(options.store, res, eventId, 'missing_zernio_profile', 422);
+      const customer = await customerForProfile(options.store, profileId);
+      if (!customer) return endFailure(options.store, res, eventId, 'unknown_zernio_profile', 422);
+      await options.store.enqueueJob(webhookJob(eventId, customer.id, {
+        accountId: accountId ?? '', profileId, platform: account?.platform ?? 'facebook', username: account?.username ?? '',
+      }, eventType, payload));
+    }
 
-    res.statusCode = event.inserted ? 202 : 200;
+    // Zernio requires a fast 2xx acknowledgement once the event is durably queued.
+    res.statusCode = 200;
     res.end(JSON.stringify({ ok: true, deduped: !event.inserted, eventId, signature: 'verified' }));
     return true;
   };

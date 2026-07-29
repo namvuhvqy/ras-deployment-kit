@@ -103,6 +103,7 @@ export class RasJobWorker {
         return { dryRun: true, zernioPostId: `dry_worker_${job.id}` };
       }
       const result = await this.adapter.createPost(input);
+      await this.store.attachZernioPostId(job.id, result.zernioPostId);
       return { dryRun: false, ...result };
     }
 
@@ -118,6 +119,21 @@ export class RasJobWorker {
   private async processZernioWebhook(job: RasJob): Promise<Record<string, unknown>> {
     const payload = asRecord(job.payload);
     const eventType = requiredString(payload, 'eventType');
+    if (eventType === 'post.platform.published' || eventType === 'post.platform.failed') {
+      const webhookPayload = asRecord(payload.webhookPayload);
+      const post = asRecord(webhookPayload.post);
+      const zernioPostId = optionalString(post.id) ?? optionalString(post.postId) ?? optionalString(webhookPayload.postId);
+      const platformPostId = optionalString(post.platformPostId) ?? optionalString(webhookPayload.platformPostId);
+      const postId = zernioPostId ?? platformPostId;
+      if (!postId) throw new Error('Webhook payload missing post id');
+      const saved = await this.store.updateSocialPostStatus({
+        postId,
+        status: eventType === 'post.platform.published' ? 'published' : 'failed',
+        publishedAtIso: optionalString(post.publishedAt) ?? optionalString(webhookPayload.publishedAt),
+        errorMessage: optionalString(post.error) ?? optionalString(webhookPayload.error),
+      });
+      return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
+    }
     if (eventType !== 'account.connected' && eventType !== 'account.disconnected') {
       return { ignored: true, eventType };
     }
@@ -178,6 +194,7 @@ function assertPublishPostPayload(job: RasJob): CreatePostInput {
     mediaUrls,
     ...(scheduleAtIso ? { scheduleAtIso } : {}),
     ...(isDraft !== undefined ? { isDraft } : {}),
+    requestId: job.id,
     ...(platformSpecificData ? { platformSpecificData } : {}),
   };
 }

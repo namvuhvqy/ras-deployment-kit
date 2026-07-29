@@ -70,7 +70,8 @@ test('RasJobWorker forwards safe draft flag into publish payload', async () => {
     draftJob.payload = { ...draftJob.payload, isDraft: true };
     await store.enqueueJob(draftJob);
     let seenDraft;
-    const adapter = { ...noopAdapter, async createPost(input) { seenDraft = input.isDraft; return { zernioPostId: 'draft_1', status: 'draft' }; } } satisfies ZernioAdapter;
+    let seenRequestId;
+    const adapter = { ...noopAdapter, async createPost(input) { seenDraft = input.isDraft; seenRequestId = input.requestId; return { zernioPostId: 'draft_1', status: 'draft' }; } } satisfies ZernioAdapter;
     const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
 
     const result = await worker.runOnce();
@@ -78,7 +79,9 @@ test('RasJobWorker forwards safe draft flag into publish payload', async () => {
 
     assert.deepEqual(result, { processed: 1, completed: 1, failed: 0, requeued: 0 });
     assert.equal(seenDraft, true);
+    assert.equal(seenRequestId, 'job_draft');
     assert.equal(job.result?.status, 'draft');
+    assert.equal((await store.load()).socialPosts[0]?.zernioPostId, 'draft_1');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -109,6 +112,32 @@ test('RasJobWorker requeues transient failures before failing permanently', asyn
     assert.equal(job.retryCount, 1);
     assert.equal(job.lastError, 'zernio 429');
     assert.ok(job.runAfterIso);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('RasJobWorker maps a published webhook by platformPostId when Zernio post id is absent', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertSocialPost({
+      id: 'post_1', jobId: 'job_1', customerId: 'customer_profile_a', platform: 'facebook',
+      platformPostId: 'facebook_42', status: 'queued', updatedAtIso: new Date(0).toISOString(),
+    });
+    await store.enqueueJob({
+      ...makePublishJob('webhook_1', 'profile_a', 'P0'), type: 'webhook_process',
+      payload: { eventType: 'post.platform.published', webhookPayload: { post: { platformPostId: 'facebook_42', publishedAt: '2026-07-29T00:00:00.000Z' } } },
+    });
+    const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    const result = await worker.runOnce();
+    const post = (await store.load()).socialPosts[0];
+
+    assert.deepEqual(result, { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    assert.equal(post?.status, 'published');
+    assert.equal(post?.publishedAtIso, '2026-07-29T00:00:00.000Z');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

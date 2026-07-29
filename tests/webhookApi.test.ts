@@ -65,8 +65,8 @@ test('zernio master webhook verifies payload.id/event, schema, HMAC, audit and d
   const rawBody = JSON.stringify({ id: 'evt_1', event: 'account.connected', account: { accountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'ag' }, timestamp: now });
   await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
     const headers = { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) };
-    const first = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
-    assert.equal(first.status, 202);
+    const first = await fetch(`${baseUrl}/api/v1/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
+    assert.equal(first.status, 200);
     assert.deepEqual(await first.json(), { ok: true, deduped: false, eventId: 'evt_1', signature: 'verified' });
     const duplicate = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
     assert.equal(duplicate.status, 200);

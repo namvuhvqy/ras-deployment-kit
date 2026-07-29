@@ -12,6 +12,7 @@ import type {
   RasSandboxEnvironment,
   RasServicePackage,
   RasSession,
+  SocialPost,
   RasUser,
 } from './types.js';
 
@@ -25,6 +26,7 @@ export interface RasPersistentState {
   agents: RasAgentInstance[];
   servicePackages: RasServicePackage[];
   connectedAccounts: ConnectedAccount[];
+  socialPosts: SocialPost[];
   jobs: RasJob[];
   webhookEvents: StoredWebhookEvent[];
   webhookFailures: StoredWebhookFailure[];
@@ -221,6 +223,7 @@ export class JsonRasStore {
       agents: [],
       servicePackages: [],
       connectedAccounts: [],
+      socialPosts: [],
       jobs: [],
       webhookEvents: [],
       webhookFailures: [],
@@ -239,6 +242,7 @@ export class JsonRasStore {
     state.agents ??= [];
     state.servicePackages ??= [];
     state.connectedAccounts ??= [];
+    state.socialPosts ??= [];
     state.jobs ??= [];
     state.webhookEvents ??= [];
     state.webhookFailures ??= [];
@@ -574,6 +578,46 @@ export class JsonRasStore {
     return state.connectedAccounts.find((account) => account.id === accountId);
   }
 
+  async updateSocialPostStatus(input: {
+    postId: string;
+    status: SocialPost['status'];
+    publishedAtIso?: string;
+    errorMessage?: string;
+  }): Promise<SocialPost> {
+    const state = await this.load();
+    const index = state.socialPosts.findIndex((post) => post.zernioPostId === input.postId || post.platformPostId === input.postId || post.id === input.postId);
+    if (index < 0) throw new Error(`Social post not found: ${input.postId}`);
+    const updated: SocialPost = {
+      ...state.socialPosts[index],
+      status: input.status,
+      ...(input.publishedAtIso ? { publishedAtIso: input.publishedAtIso } : {}),
+      ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
+      updatedAtIso: new Date().toISOString(),
+    };
+    state.socialPosts[index] = updated;
+    await this.write(state);
+    return updated;
+  }
+
+  async upsertSocialPost(input: SocialPost): Promise<SocialPost> {
+    const state = await this.load();
+    const index = state.socialPosts.findIndex((post) => post.id === input.id || post.jobId === input.jobId);
+    if (index < 0) state.socialPosts.push(input);
+    else state.socialPosts[index] = { ...state.socialPosts[index], ...input, updatedAtIso: new Date().toISOString() };
+    await this.write(state);
+    return index < 0 ? input : state.socialPosts[index];
+  }
+
+  async attachZernioPostId(jobId: string, zernioPostId: string): Promise<SocialPost> {
+    const state = await this.load();
+    const index = state.socialPosts.findIndex((post) => post.jobId === jobId);
+    if (index < 0) throw new Error(`Social post not found for job: ${jobId}`);
+    const updated = { ...state.socialPosts[index], zernioPostId, updatedAtIso: new Date().toISOString() };
+    state.socialPosts[index] = updated;
+    await this.write(state);
+    return updated;
+  }
+
   async getConnectedAccountsForCustomer(customerId: string): Promise<ConnectedAccount[]> {
     const state = await this.load();
     return state.connectedAccounts.filter((account) => account.customerId === customerId);
@@ -636,6 +680,18 @@ export class JsonRasStore {
   async enqueueJob(job: RasJob): Promise<RasJob> {
     const state = await this.load();
     if (state.jobs.some((row) => row.id === job.id)) throw new Error(`Duplicate job id: ${job.id}`);
+    if (job.type === 'publish_post' && !state.socialPosts.some((post) => post.jobId === job.id)) {
+      const platform = typeof job.payload.platform === 'string' ? job.payload.platform : job.platform;
+      if (!platform) throw new Error(`Publish job missing platform: ${job.id}`);
+      state.socialPosts.push({
+        id: job.id,
+        jobId: job.id,
+        customerId: job.customerId,
+        platform: platform as SocialPost['platform'],
+        status: 'queued',
+        updatedAtIso: new Date().toISOString(),
+      });
+    }
     state.jobs.push(job);
     await this.write(state);
     return job;

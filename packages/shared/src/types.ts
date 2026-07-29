@@ -177,6 +177,21 @@ export interface ConnectedAccount {
   lastVerifiedAtIso?: string;
 }
 
+export type SocialPostStatus = 'queued' | 'scheduled' | 'published' | 'failed';
+
+export interface SocialPost {
+  id: string;
+  customerId: string;
+  jobId: string;
+  platform: SocialPlatform;
+  zernioPostId?: string;
+  platformPostId?: string;
+  status: SocialPostStatus;
+  publishedAtIso?: string;
+  errorMessage?: string;
+  updatedAtIso: string;
+}
+
 export type RasJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
 
 export interface RasJob {

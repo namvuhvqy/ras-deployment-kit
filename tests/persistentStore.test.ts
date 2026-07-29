@@ -52,6 +52,7 @@ test('JsonRasStore persists customer, account, queue, webhook idempotency, and a
       customerId: 'cust_1',
       profileId: 'profile_1',
       accountId: 'zacct_1',
+      platform: 'facebook',
       type: 'publish_post',
       priority: 'P1',
       payload: { content: 'hello' },
@@ -90,6 +91,11 @@ test('JsonRasStore persists customer, account, queue, webhook idempotency, and a
     const queued = await store.getQueuedJobs();
     assert.equal(state.customers.length, 1);
     assert.equal(state.connectedAccounts.length, 1);
+    assert.equal(state.socialPosts.length, 1);
+    assert.equal(state.socialPosts[0]?.id, 'job_1');
+    assert.equal(state.socialPosts[0]?.jobId, 'job_1');
+    assert.equal(state.socialPosts[0]?.platform, 'facebook');
+    assert.equal(state.socialPosts[0]?.status, 'queued');
     assert.equal(queued.length, 1);
     assert.equal(state.auditLogs.length, 1);
     assert.equal(firstWebhook.inserted, true);

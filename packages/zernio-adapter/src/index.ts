@@ -19,6 +19,8 @@ export interface CreatePostInput {
   mediaUrls?: string[];
   scheduleAtIso?: string;
   isDraft?: boolean;
+  /** Stable caller identifier used by Zernio to deduplicate retry-safe requests. */
+  requestId?: string;
   platformSpecificData?: Record<string, unknown>;
 }
 
@@ -151,6 +153,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
     const params = new URLSearchParams({
       profileId: input.profileId,
       redirect_url: input.redirectUrl,
+      headless: 'true',
     });
     const response = await this.request<Record<string, unknown>>(`/connect/${input.platform}?${params.toString()}`);
     return stringFrom(response, ['authUrl', 'url', 'connectUrl']);
@@ -187,6 +190,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
     const response = await this.request<Record<string, unknown>>('/posts', {
       method: 'POST',
       body: createPostPayload(input),
+      requestId: input.requestId,
     });
     const post = unwrapRecord(response, ['post', 'data']);
 

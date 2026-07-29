@@ -66,12 +66,14 @@ test('LiveZernioAdapter createPost sends Zernio payload and maps response', asyn
       content: 'Xin chào RAS',
       mediaUrls: ['https://cdn.example/video.mp4'],
       scheduleAtIso: '2026-07-20T10:00:00.000Z',
+      requestId: 'job_1',
     });
 
     assert.deepEqual(result, { zernioPostId: 'post_123', status: 'scheduled' });
     assert.equal(calls[0].url, 'https://example.test/api/v1/posts');
     assert.equal(calls[0].init.method, 'POST');
     assert.equal((calls[0].init.headers as Record<string, string>).authorization, 'Bearer test-key');
+    assert.equal((calls[0].init.headers as Record<string, string>)['x-request-id'], 'job_1');
     assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
       content: 'Xin chào RAS',
       platforms: [{ platform: 'facebook', accountId: 'account_1' }],
