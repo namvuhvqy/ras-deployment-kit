@@ -182,7 +182,19 @@ The following live, controlled E2E evidence is intentionally redacted. It contai
 
 Phase 4 event evidence (redacted): event type `post.platform.failed`, Zernio post ID `[REDACTED]`, platform `facebook`, signature `verified`, webhook processing job `completed`, and RAS sync result `status: failed`.
 
-Before tagging this release, run `npm run check` and verify both the `main` ref and annotated release tag on the remote.
+## Inbox E2E — staging evidence (2026-07-29)
+
+| Checkpoint | Result |
+|---|---|
+| Signed inbound | Facebook `message.received` was HMAC-verified, tenant-mapped, persisted, and processed. |
+| Human gate | Tenant-bound user created one `pending_review` draft and explicitly approved it; exactly one `inbox_reply` job completed. |
+| Provider send | Zernio accepted the approved Facebook reply and returned a provider message identifier; RAS persisted the delivery attempt. |
+| Delivery lifecycle | Zernio delivered a signed `message.delivered` event for the same outgoing platform message. RAS now validates, tenant-routes, and queues this lifecycle event. |
+| `message.sent` | **Not observed.** The webhook subscribed to this event, but Zernio delivery logs contain no `message.sent` attempt for the affected outgoing Facebook message. Zernio support confirmed Facebook `message.sent` follows Meta's outgoing-echo path, independent of `message.delivered`, and engineering investigation is pending. |
+
+All Inbox identifiers, timestamps, account IDs, message IDs, event IDs, signatures, and message text are retained only in redacted operational evidence. Do not treat `message.sent` as a production gate for Facebook until Zernio engineering confirms the outgoing-echo behavior. `message.delivered` is retained as the observed platform lifecycle signal; its original pre-patch delivery received HTTP 422 and awaits Zernio retry for live replay verification.
+
+Before tagging a release, run `npm run check` and verify both the `main` ref and annotated release tag on the remote.
 
 ## Topic lanes
 
