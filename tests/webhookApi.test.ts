@@ -109,6 +109,26 @@ test('inbox webhook maps tenant by account, queues one draft-only processing job
   });
 });
 
+test('outbound inbox webhook maps tenant by account and queues processing', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+  state.connectedAccounts = [{ id: 'account_1', customerId: 'cust_1', zernioAccountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'shop', status: 'connected' }];
+  const rawBody = JSON.stringify({
+    id: 'evt_message_sent_1', event: 'message.sent',
+    message: { id: 'message_out_1', conversationId: 'conversation_1', platform: 'facebook', platformMessageId: 'platform_message_out_1', direction: 'outgoing', text: 'Đã nhận ạ', attachments: [], sender: { id: 'acct_1', name: 'Shop' }, sentAt: now, isRead: true },
+    conversation: { id: 'conversation_1', platformConversationId: 'thread_1', status: 'active' },
+    account: { id: 'acct_1', accountId: 'acct_1', profileId: 'untrusted_profile', platform: 'facebook', username: 'shop' }, timestamp: now,
+  });
+  await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {
+    const headers = { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) };
+    const response = await fetch(`${baseUrl}/api/v1/webhooks/zernio`, { method: 'POST', headers, body: rawBody });
+    assert.equal(response.status, 200);
+    const status = await fetch(`${baseUrl}/webhooks/zernio/status`);
+    const payload = (await status.json()) as { status: { recentEvents: Array<{ id: string; eventType: string }> } };
+    assert.ok(payload.status.recentEvents.some((entry) => entry.id === 'evt_message_sent_1' && entry.eventType === 'message.sent'));
+  });
+});
+
 test('zernio master webhook is fail-closed for bad signature and invalid schema', async () => {
   const rawBody = JSON.stringify({ id: 'evt_bad', event: 'account.connected', timestamp: now });
   await withApi(emptyState(), { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl) => {

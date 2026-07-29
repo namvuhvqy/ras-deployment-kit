@@ -23,7 +23,7 @@ type AccountEvent = {
 };
 
 const accountEvents = new Set(['account.connected', 'account.disconnected']);
-const inboxEvents = new Set(['message.received']);
+const inboxEvents = new Set(['message.received', 'message.sent']);
 const allowedPlatforms = new Set<Platform>(['facebook', 'instagram', 'youtube', 'twitter', 'linkedin', 'tiktok', 'threads', 'bluesky', 'telegram', 'whatsapp', 'reddit']);
 
 export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
@@ -155,6 +155,15 @@ function loadValidators(): Map<string, ValidateFunction> {
       // Event schemas use local #/definitions references from the supplied document.
       result.set(name.replaceAll('_', '.'), ajv.compile({ ...entry.schema, definitions: document.definitions }));
     }
+  }
+  // message.sent carries the same documented inbox envelope as message.received,
+  // with the event discriminator changed and an outgoing direction.
+  const receivedSchema = document.events?.message_received?.schema;
+  if (receivedSchema) {
+    const sentSchema = structuredClone(receivedSchema) as { properties?: Record<string, { enum?: string[] }> };
+    const event = sentSchema.properties?.event;
+    if (event) event.enum = ['message.sent'];
+    result.set('message.sent', ajv.compile({ ...sentSchema, definitions: document.definitions }));
   }
   return result;
 }
