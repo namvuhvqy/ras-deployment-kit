@@ -54,6 +54,23 @@ function emptyState(): Record<string, unknown> {
   };
 }
 
+test('internal user provisioning creates a tenant-bound login identity', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'ras-smoke', name: 'RAS Smoke', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 1, activeConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } }];
+  await withApi(state, async (baseUrl) => {
+    const forbidden = await fetch(`${baseUrl}/mappings/users`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ customerId: 'ras-smoke', email: 'inbox-e2e@ras.test', password: 'test-password' }) });
+    assert.equal(forbidden.status, 401);
+    const provision = await fetch(`${baseUrl}/mappings/users`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' }, body: JSON.stringify({ customerId: 'ras-smoke', email: 'inbox-e2e@ras.test', displayName: 'Inbox E2E', password: 'test-password' }) });
+    assert.equal(provision.status, 201);
+    const login = await fetch(`${baseUrl}/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'inbox-e2e@ras.test', password: 'test-password' }) });
+    assert.equal(login.status, 200);
+    const token = ((await login.json()) as { token: string }).token;
+    const access = await fetch(`${baseUrl}/customers/ras-smoke/inbox/conversations`, { headers: { authorization: `Bearer ${token}` } });
+    assert.notEqual(access.status, 401);
+    assert.notEqual(access.status, 403);
+  });
+});
+
 test('customer-scoped read endpoints require a matching session bearer token', async () => {
   const state = emptyState();
   Object.assign(state, {

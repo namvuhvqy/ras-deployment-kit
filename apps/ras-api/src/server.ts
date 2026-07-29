@@ -779,6 +779,49 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/mappings/users') {
+    if (!requireInternalAccess(req)) {
+      endInternalAccessError(res);
+      return;
+    }
+    const body = await readJsonBody(req);
+    const customerId = stringField(body, 'customerId');
+    const email = stringField(body, 'email')?.toLowerCase();
+    const password = stringField(body, 'password');
+    if (!customerId || !email || !password) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'missing_user_mapping_fields' }));
+      return;
+    }
+    const state = await store.load();
+    if (!state.customers.some((row) => row.id === customerId)) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    const existing = state.users.find((row) => row.email.toLowerCase() === email);
+    if (existing && existing.customerId !== customerId) {
+      res.statusCode = 409;
+      res.end(JSON.stringify({ ok: false, error: 'email_customer_conflict' }));
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const user = await store.upsertUser({
+      id: existing?.id ?? `user_${email.replace(/[^a-z0-9]+/g, '_')}_${Date.now().toString(36)}`,
+      email,
+      displayName: stringField(body, 'displayName') ?? existing?.displayName,
+      role: 'owner',
+      customerId,
+      status: 'active',
+      password,
+      createdAtIso: existing?.createdAtIso ?? nowIso,
+      updatedAtIso: nowIso,
+    });
+    res.statusCode = existing ? 200 : 201;
+    res.end(JSON.stringify({ ok: true, user: { id: user.id, email: user.email, customerId: user.customerId, role: user.role } }));
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/mappings/accounts') {
     if (!requireInternalAccess(req)) {
       endInternalAccessError(res);
