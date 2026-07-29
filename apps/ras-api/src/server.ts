@@ -1028,7 +1028,10 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.url === '/dry-run/customer') {
-    const customer = await adapter.createProfile({ customerId: 'demo', name: 'Demo Customer' });
+    const existing = (await store.load()).customers.find((customer) => customer.id === 'demo');
+    const customer = existing?.zernioProfileId
+      ? existing
+      : await adapter.createProfile({ customerId: 'demo', name: 'Demo Customer' });
     await store.upsertCustomer(customer);
     await store.appendAuditLog({
       id: `audit_${Date.now()}`,
