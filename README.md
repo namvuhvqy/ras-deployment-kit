@@ -189,10 +189,10 @@ Phase 4 event evidence (redacted): event type `post.platform.failed`, Zernio pos
 | Signed inbound | Facebook `message.received` was HMAC-verified, tenant-mapped, persisted, and processed. |
 | Human gate | Tenant-bound user created one `pending_review` draft and explicitly approved it; exactly one `inbox_reply` job completed. |
 | Provider send | Zernio accepted the approved Facebook reply and returned a provider message identifier; RAS persisted the delivery attempt. |
-| Delivery lifecycle | Zernio delivered a signed `message.delivered` event for the same outgoing platform message. RAS now validates, tenant-routes, and queues this lifecycle event. |
-| `message.sent` | **Not observed.** The webhook subscribed to this event, but Zernio delivery logs contain no `message.sent` attempt for the affected outgoing Facebook message. Zernio support confirmed Facebook `message.sent` follows Meta's outgoing-echo path, independent of `message.delivered`, and engineering investigation is pending. |
+| Delivery lifecycle | After the provider fix, a new approved staging Facebook reply delivered signed `message.sent` and `message.delivered` to RAS, both HTTP `200` on first attempt. RAS validated, tenant-routed, queued, and completed both lifecycle jobs without a second provider send. |
+| Provider RCA | Zernio confirmed its prior Facebook/Instagram API-send echo dedupe incorrectly suppressed `message.sent`; this was fixed in Zernio production. `message.sent` now emits exactly once from its send-path row. `message.delivered` remains an independent event, so order is not guaranteed. |
 
-All Inbox identifiers, timestamps, account IDs, message IDs, event IDs, signatures, and message text are retained only in redacted operational evidence. Do not treat `message.sent` as a production gate for Facebook until Zernio engineering confirms the outgoing-echo behavior. `message.delivered` is retained as the observed platform lifecycle signal; its original pre-patch delivery received HTTP 422 and awaits Zernio retry for live replay verification.
+All Inbox identifiers, timestamps, account IDs, message IDs, event IDs, signatures, and message text are retained only in redacted operational evidence. RAS deduplicates provider lifecycle events by root `payload.id`; both `message.sent` and `message.delivered` are accepted as real lifecycle events. Historical `message.delivered` HTTP `422` entries predate commit `8fcd968` and are not evidence against the deployed handler.
 
 Before tagging a release, run `npm run check` and verify both the `main` ref and annotated release tag on the remote.
 
