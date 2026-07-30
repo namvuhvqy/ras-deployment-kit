@@ -201,6 +201,28 @@ test('RasJobWorker persists an inbound message in draft-only mode without sendin
   }
 });
 
+test('RasJobWorker persists an outbound delivery lifecycle message without sending a reply', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.enqueueJob({
+      id: 'delivery_webhook_1', customerId: 'cust_inbox', profileId: 'profile_inbox', accountId: 'acct_inbox', platform: 'facebook',
+      type: 'inbox_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+      payload: { eventType: 'message.delivered', webhookPayload: { message: { id: 'msg_out_1', conversationId: 'conv_1', platform: 'facebook', platformMessageId: 'provider_out_1', direction: 'outgoing', text: 'Đã giao', sender: { id: 'acct_inbox', name: 'Shop' }, sentAt: '2026-07-30T00:00:00.000Z' }, conversation: { id: 'conv_1' }, account: { accountId: 'acct_inbox' } } },
+    });
+    const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const state = await store.load();
+    assert.equal(state.inboxMessages.length, 1);
+    assert.equal(state.inboxMessages[0]?.direction, 'outbound');
+    assert.equal(state.inboxMessages[0]?.providerMessageId, 'provider_out_1');
+    assert.equal(state.jobs[0]?.result?.eventType, 'message.delivered');
+    assert.equal(state.jobs[0]?.result?.outboundSendAttempted, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('RasJobWorker sends an approved inbox reply once and persists provider delivery evidence', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

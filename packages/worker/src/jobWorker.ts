@@ -144,7 +144,7 @@ export class RasJobWorker {
       });
       return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
     }
-    if (eventType === 'message.received' || eventType === 'message.sent') return this.processInboxMessage(job, payload, eventType);
+    if (eventType === 'message.received' || eventType === 'message.sent' || eventType === 'message.delivered') return this.processInboxMessage(job, payload, eventType);
     if (eventType !== 'account.connected' && eventType !== 'account.disconnected') {
       return { ignored: true, eventType };
     }
@@ -188,7 +188,7 @@ export class RasJobWorker {
     return { draftId: draft.id, conversationId, providerMessageId: result.providerMessageId, outboundSendAttempted: true };
   }
 
-  private async processInboxMessage(job: RasJob, payload: Record<string, unknown>, eventType: 'message.received' | 'message.sent'): Promise<Record<string, unknown>> {
+  private async processInboxMessage(job: RasJob, payload: Record<string, unknown>, eventType: 'message.received' | 'message.sent' | 'message.delivered'): Promise<Record<string, unknown>> {
     const webhookPayload = asRecord(payload.webhookPayload);
     const message = asRecord(webhookPayload.message);
     const conversation = asRecord(webhookPayload.conversation);
