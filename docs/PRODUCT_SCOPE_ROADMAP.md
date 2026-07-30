@@ -98,6 +98,15 @@ For any approved production deploy after this gate:
 - [x] Approval/execution contract: an authenticated tenant owner explicitly approves a pending draft; exactly one idempotent `inbox_reply` job is queued with approver audit data. The worker sends only queued approved drafts, uses the job ID as the provider idempotency key, then persists provider message evidence.
 - [ ] Staging live Zernio inbox webhook registration and real account-test DM E2E remain gated by a preflight check of the staging live credentials, mapped account capability, and webhook configuration.
 
+### 0.5.1 Staging lifecycle-fix release checkpoint — 2026-07-30
+
+- [x] Staging deployed commit `8fcd9688aaf4ad61347dba6c739cd8f5f1bb1557` (`fix(inbox): process delivery lifecycle events`) using a clean source tree and preserved staged environment/data volume.
+- [x] Release scope is limited to worker handling for signed `message.delivered`; it persists the outbound lifecycle mirror and does **not** send an additional reply.
+- [x] Local release gate: `npm run check` passed (57/57 tests); the regression test proves `message.delivered` completes with `outboundSendAttempted=false`.
+- [x] Staging post-deploy smoke: API health returned `200` twice; API and worker are running on image `sha256:748bbf0f61553b4b1ecfb09b4b9981f738198168501895446cffbfa9be85647e` with API health `healthy` and restart count `0`; unsigned webhook is fail-closed with `400 missing_signature`.
+- [ ] **Production release gate (blocked, do not deploy yet):** obtain one real signed staging `message.delivered` replay/new delivery for the affected mapped Facebook test account, then inspect durable `inboxMessages`/job result for one persisted outbound mirror and no second provider send. This is required external E2E evidence for this lifecycle fix; local regression and unsigned-route smoke are not substitutes.
+- [ ] Before production, prepare an isolated production release candidate: record current production backend artifact and frontend deployment IDs, verify production deployment transport/configuration, re-run `npm run check`, and keep unrelated dirty frontend payment work out of the release.
+
 ## 1. MVP product scope
 
 RunAgentSys MVP has **two service lines** managed by one backend/control panel:
