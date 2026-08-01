@@ -518,7 +518,7 @@ const server = createServer(async (req, res) => {
       ? body.scopes as string[]
       : [];
     const expiresAtIso = stringField(body, 'expiresAtIso');
-    if (!name || scopes.length === 0 || (expiresAtIso && !Number.isFinite(Date.parse(expiresAtIso)))) {
+    if (!name || scopes.length === 0 || (expiresAtIso && (!Number.isFinite(Date.parse(expiresAtIso)) || Date.parse(expiresAtIso) <= Date.now()))) {
       res.statusCode = 400;
       res.end(JSON.stringify({ ok: false, error: 'invalid_pat_request' }));
       return;
@@ -534,6 +534,25 @@ const server = createServer(async (req, res) => {
     const principal = await requireSessionPrincipal(req);
     if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
     res.end(JSON.stringify({ ok: true, tokens: await store.listPersonalAccessTokens(principal.customerId) }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url?.startsWith('/api/v1/personal-access-tokens/') && req.url.endsWith('/rotate')) {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal?.userId) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
+    const tokenId = decodeURIComponent(req.url.slice('/api/v1/personal-access-tokens/'.length, -'/rotate'.length));
+    const body = await readJsonBody(req);
+    const expiresAtIso = stringField(body, 'expiresAtIso');
+    if (expiresAtIso && (!Number.isFinite(Date.parse(expiresAtIso)) || Date.parse(expiresAtIso) <= Date.now())) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_pat_expiry' }));
+      return;
+    }
+    const rotated = await store.rotatePersonalAccessToken({ customerId: principal.customerId, tokenId, createdByUserId: principal.userId, expiresAtIso });
+    if (!rotated) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'pat_not_found_or_inactive' })); return; }
+    await store.appendAuditLog({ id: `audit_${Date.now()}_${rotated.token.id}`, customerId: principal.customerId, action: 'pat.rotated', targetType: 'personal_access_token', targetId: rotated.token.id, metadata: { previousTokenId: tokenId, scopes: rotated.token.scopes, tokenPrefix: rotated.token.tokenPrefix }, createdAtIso: new Date().toISOString() });
+    res.statusCode = 201;
+    res.end(JSON.stringify({ ok: true, token: { ...rotated.token, tokenHash: undefined }, plaintextToken: rotated.plaintext }));
     return;
   }
 

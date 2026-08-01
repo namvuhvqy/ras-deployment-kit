@@ -186,6 +186,13 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       ['agent_1', 'agent_2'],
     );
 
+    const pastExpiryPat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'expired-request', scopes: ['accounts:read'], expiresAtIso: '2020-01-01T00:00:00.000Z' }),
+    });
+    assert.equal(pastExpiryPat.status, 400);
+
     const createPat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens`, {
       method: 'POST',
       headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' },
@@ -203,16 +210,27 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.equal(patPrincipal.principal.customerId, 'cust_1');
     assert.deepEqual(patPrincipal.principal.scopes, ['accounts:read']);
 
-    const patMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    const rotatePat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens/${patPayload.token.id}/rotate`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ expiresAtIso: '2027-01-01T00:00:00.000Z' }),
+    });
+    assert.equal(rotatePat.status, 201);
+    const rotatedPat = (await rotatePat.json()) as { plaintextToken: string; token: { id: string; scopes: string[]; expiresAtIso?: string; tokenHash?: string } };
+    assert.notEqual(rotatedPat.token.id, patPayload.token.id);
+    assert.equal(rotatedPat.token.tokenHash, undefined);
+    assert.deepEqual(rotatedPat.token.scopes, ['accounts:read']);
+    assert.equal(rotatedPat.token.expiresAtIso, '2027-01-01T00:00:00.000Z');
+    const oldPatAfterRotation = await fetch(`http://127.0.0.1:${port}/api/v1/me`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    assert.equal(oldPatAfterRotation.status, 401);
+    const patMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(patMapping.status, 200);
-    const secondPatMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    const secondPatMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(secondPatMapping.status, 200);
-    const thirdPatMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    const thirdPatMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(thirdPatMapping.status, 200);
-    const rateLimited = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    const rateLimited = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(rateLimited.status, 429);
     assert.ok(Number(rateLimited.headers.get('retry-after')) > 0);
-    const insufficientScope = await fetch(`http://127.0.0.1:${port}/customers/cust_1/connect/facebook`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    const insufficientScope = await fetch(`http://127.0.0.1:${port}/customers/cust_1/connect/facebook`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(insufficientScope.status, 403);
 
     const createInboxPat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens`, {
@@ -239,9 +257,9 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     const deniedDraft = await fetch(`http://127.0.0.1:${port}/customers/cust_1/inbox/conversations/conv_1/drafts`, { method: 'POST', headers: { authorization: `Bearer ${readOnlyInboxPayload.plaintextToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Không được phép' }) });
     assert.equal(deniedDraft.status, 403);
 
-    const revokePat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens/${patPayload.token.id}`, { method: 'DELETE', headers: { authorization: `Bearer ${loginPayload.token}` } });
+    const revokePat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens/${rotatedPat.token.id}`, { method: 'DELETE', headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(revokePat.status, 204);
-    const revokedPat = await fetch(`http://127.0.0.1:${port}/api/v1/me`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    const revokedPat = await fetch(`http://127.0.0.1:${port}/api/v1/me`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(revokedPat.status, 401);
 
     const missing = await fetch(`http://127.0.0.1:${port}/customers/missing/mapping`, { headers: { authorization: `Bearer ${loginPayload.token}` } });

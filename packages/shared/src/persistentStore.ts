@@ -467,6 +467,29 @@ export class JsonRasStore {
     return { token, plaintext };
   }
 
+  async rotatePersonalAccessToken(input: { customerId: string; tokenId: string; createdByUserId: string; expiresAtIso?: string }): Promise<{ token: RasPersonalAccessToken; plaintext: string } | undefined> {
+    const state = await this.load();
+    const previous = state.personalAccessTokens.find((row) => row.id === input.tokenId && row.customerId === input.customerId);
+    if (!previous || previous.revokedAtIso || (previous.expiresAtIso && Date.parse(previous.expiresAtIso) <= Date.now())) return undefined;
+    const plaintext = `ras_pat_${randomBytes(32).toString('base64url')}`;
+    const now = new Date().toISOString();
+    const token: RasPersonalAccessToken = {
+      id: `pat_${randomBytes(12).toString('hex')}`,
+      customerId: previous.customerId,
+      createdByUserId: input.createdByUserId,
+      name: previous.name,
+      tokenPrefix: plaintext.slice(0, 16),
+      tokenHash: hashPat(plaintext),
+      scopes: [...previous.scopes],
+      expiresAtIso: input.expiresAtIso ?? previous.expiresAtIso,
+      createdAtIso: now,
+    };
+    previous.revokedAtIso = now;
+    state.personalAccessTokens.push(token);
+    await this.write(state);
+    return { token, plaintext };
+  }
+
   async listPersonalAccessTokens(customerId: string): Promise<Array<Omit<RasPersonalAccessToken, 'tokenHash'>>> {
     const state = await this.load();
     return state.personalAccessTokens.filter((row) => row.customerId === customerId).map(({ tokenHash: _hash, ...safe }) => safe);
