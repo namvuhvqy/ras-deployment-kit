@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
@@ -15,6 +16,9 @@ import type {
   RasSandboxEnvironment,
   RasServicePackage,
   RasSession,
+  RasPersonalAccessToken,
+  RasPrincipal,
+  RasApiRateLimitBucket,
   SocialPost,
   RasUser,
 } from './types.js';
@@ -24,6 +28,8 @@ export interface RasPersistentState {
   migratedAtIso: string;
   users: RasUser[];
   sessions: RasSession[];
+  personalAccessTokens: RasPersonalAccessToken[];
+  apiRateLimitBuckets: RasApiRateLimitBucket[];
   customers: RasCustomer[];
   sandboxes: RasSandboxEnvironment[];
   agents: RasAgentInstance[];
@@ -224,6 +230,8 @@ export class JsonRasStore {
       migratedAtIso: now,
       users: [],
       sessions: [],
+      personalAccessTokens: [],
+      apiRateLimitBuckets: [],
       customers: [],
       sandboxes: [],
       agents: [],
@@ -246,6 +254,8 @@ export class JsonRasStore {
     state.migratedAtIso = now;
     state.users ??= [];
     state.sessions ??= [];
+    state.personalAccessTokens ??= [];
+    state.apiRateLimitBuckets ??= [];
     state.customers ??= [];
     state.sandboxes ??= [];
     state.agents ??= [];
@@ -401,6 +411,97 @@ export class JsonRasStore {
       servicePackages: state.servicePackages.filter((row) => row.id === customer.servicePackageId),
       connectedAccounts,
     };
+  }
+
+  async resolvePrincipal(token: string, nowIso: string = new Date().toISOString()): Promise<RasPrincipal | undefined> {
+    const state = await this.load();
+    const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
+    if (session) {
+      const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
+      if (user) return { authType: 'session', customerId: user.customerId, userId: user.id, scopes: ['*'] };
+    }
+    const pat = state.personalAccessTokens.find((row) => row.tokenHash === hashPat(token) && !row.revokedAtIso && (!row.expiresAtIso || Date.parse(row.expiresAtIso) > Date.parse(nowIso)));
+    if (!pat) return undefined;
+    pat.lastUsedAtIso = nowIso;
+    await this.write(state);
+    return { authType: 'pat', customerId: pat.customerId, userId: pat.createdByUserId, scopes: pat.scopes, tokenId: pat.id };
+  }
+
+  async consumePatRateLimit(input: { customerId: string; tokenId: string; limit: number; windowMs: number; nowIso?: string }): Promise<{ allowed: boolean; remaining: number; retryAfterSeconds: number }> {
+    const state = await this.load();
+    const nowMs = Date.parse(input.nowIso ?? new Date().toISOString());
+    const windowStartedAtMs = Math.floor(nowMs / input.windowMs) * input.windowMs;
+    const key = `${input.customerId}:${input.tokenId}:${windowStartedAtMs}`;
+    state.apiRateLimitBuckets = state.apiRateLimitBuckets.filter((row) => Date.parse(row.windowStartedAtIso) >= windowStartedAtMs - input.windowMs);
+    let bucket = state.apiRateLimitBuckets.find((row) => row.key === key);
+    if (!bucket) {
+      bucket = { key, customerId: input.customerId, tokenId: input.tokenId, windowStartedAtIso: new Date(windowStartedAtMs).toISOString(), requestCount: 0, updatedAtIso: new Date(nowMs).toISOString() };
+      state.apiRateLimitBuckets.push(bucket);
+    }
+    if (bucket.requestCount >= input.limit) {
+      await this.write(state);
+      return { allowed: false, remaining: 0, retryAfterSeconds: Math.max(1, Math.ceil((windowStartedAtMs + input.windowMs - nowMs) / 1000)) };
+    }
+    bucket.requestCount += 1;
+    bucket.updatedAtIso = new Date(nowMs).toISOString();
+    await this.write(state);
+    return { allowed: true, remaining: input.limit - bucket.requestCount, retryAfterSeconds: 0 };
+  }
+
+  async createPersonalAccessToken(input: { customerId: string; createdByUserId: string; name: string; scopes: string[]; expiresAtIso?: string }): Promise<{ token: RasPersonalAccessToken; plaintext: string }> {
+    const state = await this.load();
+    const plaintext = `ras_pat_${randomBytes(32).toString('base64url')}`;
+    const token: RasPersonalAccessToken = {
+      id: `pat_${randomBytes(12).toString('hex')}`,
+      customerId: input.customerId,
+      createdByUserId: input.createdByUserId,
+      name: input.name,
+      tokenPrefix: plaintext.slice(0, 16),
+      tokenHash: hashPat(plaintext),
+      scopes: [...new Set(input.scopes)].sort(),
+      expiresAtIso: input.expiresAtIso,
+      createdAtIso: new Date().toISOString(),
+    };
+    state.personalAccessTokens.push(token);
+    await this.write(state);
+    return { token, plaintext };
+  }
+
+  async rotatePersonalAccessToken(input: { customerId: string; tokenId: string; createdByUserId: string; expiresAtIso?: string }): Promise<{ token: RasPersonalAccessToken; plaintext: string } | undefined> {
+    const state = await this.load();
+    const previous = state.personalAccessTokens.find((row) => row.id === input.tokenId && row.customerId === input.customerId);
+    if (!previous || previous.revokedAtIso || (previous.expiresAtIso && Date.parse(previous.expiresAtIso) <= Date.now())) return undefined;
+    const plaintext = `ras_pat_${randomBytes(32).toString('base64url')}`;
+    const now = new Date().toISOString();
+    const token: RasPersonalAccessToken = {
+      id: `pat_${randomBytes(12).toString('hex')}`,
+      customerId: previous.customerId,
+      createdByUserId: input.createdByUserId,
+      name: previous.name,
+      tokenPrefix: plaintext.slice(0, 16),
+      tokenHash: hashPat(plaintext),
+      scopes: [...previous.scopes],
+      expiresAtIso: input.expiresAtIso ?? previous.expiresAtIso,
+      createdAtIso: now,
+    };
+    previous.revokedAtIso = now;
+    state.personalAccessTokens.push(token);
+    await this.write(state);
+    return { token, plaintext };
+  }
+
+  async listPersonalAccessTokens(customerId: string): Promise<Array<Omit<RasPersonalAccessToken, 'tokenHash'>>> {
+    const state = await this.load();
+    return state.personalAccessTokens.filter((row) => row.customerId === customerId).map(({ tokenHash: _hash, ...safe }) => safe);
+  }
+
+  async revokePersonalAccessToken(input: { customerId: string; tokenId: string }): Promise<boolean> {
+    const state = await this.load();
+    const token = state.personalAccessTokens.find((row) => row.id === input.tokenId && row.customerId === input.customerId);
+    if (!token || token.revokedAtIso) return false;
+    token.revokedAtIso = new Date().toISOString();
+    await this.write(state);
+    return true;
   }
 
   async upsertCustomer(customer: RasCustomer): Promise<RasCustomer> {
@@ -965,6 +1066,10 @@ export class JsonRasStore {
     await mkdir(dirname(this.path), { recursive: true });
     await writeFile(this.path, `${JSON.stringify(state, null, 2)}\n`);
   }
+}
+
+function hashPat(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 export function createStoreFromEnv(env: NodeJS.ProcessEnv = process.env): JsonRasStore {

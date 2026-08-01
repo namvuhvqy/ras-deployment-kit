@@ -105,6 +105,39 @@ export interface RasSession {
   createdAtIso: string;
 }
 
+/** External API token. The plaintext credential is never persisted. */
+export interface RasPersonalAccessToken {
+  id: string;
+  customerId: string;
+  createdByUserId: string;
+  name: string;
+  tokenPrefix: string;
+  tokenHash: string;
+  scopes: string[];
+  expiresAtIso?: string;
+  lastUsedAtIso?: string;
+  revokedAtIso?: string;
+  createdAtIso: string;
+}
+
+export interface RasPrincipal {
+  authType: 'session' | 'pat';
+  customerId: string;
+  userId?: string;
+  scopes: string[];
+  tokenId?: string;
+}
+
+/** Persisted fixed-window limiter state. It deliberately never contains a bearer credential. */
+export interface RasApiRateLimitBucket {
+  key: string;
+  customerId: string;
+  tokenId: string;
+  windowStartedAtIso: string;
+  requestCount: number;
+  updatedAtIso: string;
+}
+
 export interface RasCustomer {
   id: string;
   tenantId?: string;

@@ -166,16 +166,42 @@ function consumeOAuthState(state: string | undefined): { redirectTo: string } | 
   return { redirectTo: stored.redirectTo };
 }
 
-async function requireCustomerAccess(req: IncomingMessage, customerId: string): Promise<'ok' | 'unauthorized' | 'forbidden'> {
-  const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-  if (!dashboard) return 'unauthorized';
-  if (dashboard.customer.id !== customerId) return 'forbidden';
-  return 'ok';
+function hasScope(scopes: string[], requiredScope?: string): boolean {
+  return !requiredScope || scopes.includes('*') || scopes.includes(requiredScope);
 }
 
-function endCustomerAccessError(res: { statusCode: number; end: (chunk: string) => void }, access: 'unauthorized' | 'forbidden') {
-  res.statusCode = access === 'unauthorized' ? 401 : 403;
-  res.end(JSON.stringify({ ok: false, error: access }));
+type CustomerAccess = 'ok' | 'unauthorized' | 'forbidden' | 'rate_limited';
+
+async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<{ status: CustomerAccess; retryAfterSeconds?: number; remaining?: number; principal?: import('../../../packages/shared/src/types.js').RasPrincipal }> {
+  const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+  if (!principal) return { status: 'unauthorized' };
+  if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden', principal };
+  if (principal.authType === 'pat' && principal.tokenId) {
+    const limit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
+    const result = await store.consumePatRateLimit({ customerId, tokenId: principal.tokenId, limit: Number.isFinite(limit) && limit > 0 ? limit : 120, windowMs: 60_000 });
+    if (!result.allowed) {
+      await store.appendAuditLog({ id: `audit_${Date.now()}_${principal.tokenId}`, customerId, action: 'pat.rate_limited', targetType: 'personal_access_token', targetId: principal.tokenId, metadata: { requiredScope, retryAfterSeconds: result.retryAfterSeconds }, createdAtIso: new Date().toISOString() });
+      return { status: 'rate_limited', retryAfterSeconds: result.retryAfterSeconds, remaining: 0, principal };
+    }
+    return { status: 'ok', remaining: result.remaining, principal };
+  }
+  return { status: 'ok', principal };
+}
+
+async function requireSessionPrincipal(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
+  const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+  return principal?.authType === 'session' ? principal : undefined;
+}
+
+function endCustomerAccessError(res: { statusCode: number; setHeader: (name: string, value: string | number) => void; end: (chunk?: string) => void }, access: { status: CustomerAccess; retryAfterSeconds?: number }) {
+  if (access.status === 'rate_limited') {
+    res.statusCode = 429;
+    res.setHeader('retry-after', String(access.retryAfterSeconds ?? 60));
+    res.end(JSON.stringify({ ok: false, error: 'rate_limited', retryAfterSeconds: access.retryAfterSeconds ?? 60 }));
+    return;
+  }
+  res.statusCode = access.status === 'unauthorized' ? 401 : 403;
+  res.end(JSON.stringify({ ok: false, error: access.status }));
 }
 
 function requireInternalAccess(req: IncomingMessage): boolean {
@@ -479,6 +505,76 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/api/v1/personal-access-tokens') {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal?.userId) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'session_auth_required' }));
+      return;
+    }
+    const body = await readJsonBody(req);
+    const name = stringField(body, 'name');
+    const scopes = Array.isArray(body.scopes) && body.scopes.every((scope) => typeof scope === 'string' && scope.length > 0)
+      ? body.scopes as string[]
+      : [];
+    const expiresAtIso = stringField(body, 'expiresAtIso');
+    if (!name || scopes.length === 0 || (expiresAtIso && (!Number.isFinite(Date.parse(expiresAtIso)) || Date.parse(expiresAtIso) <= Date.now()))) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_pat_request' }));
+      return;
+    }
+    const created = await store.createPersonalAccessToken({ customerId: principal.customerId, createdByUserId: principal.userId, name, scopes, expiresAtIso });
+    await store.appendAuditLog({ id: `audit_${Date.now()}_${created.token.id}`, customerId: principal.customerId, action: 'pat.created', targetType: 'personal_access_token', targetId: created.token.id, metadata: { scopes: created.token.scopes, tokenPrefix: created.token.tokenPrefix }, createdAtIso: new Date().toISOString() });
+    res.statusCode = 201;
+    res.end(JSON.stringify({ ok: true, token: { ...created.token, tokenHash: undefined }, plaintextToken: created.plaintext }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/v1/personal-access-tokens') {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
+    res.end(JSON.stringify({ ok: true, tokens: await store.listPersonalAccessTokens(principal.customerId) }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url?.startsWith('/api/v1/personal-access-tokens/') && req.url.endsWith('/rotate')) {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal?.userId) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
+    const tokenId = decodeURIComponent(req.url.slice('/api/v1/personal-access-tokens/'.length, -'/rotate'.length));
+    const body = await readJsonBody(req);
+    const expiresAtIso = stringField(body, 'expiresAtIso');
+    if (expiresAtIso && (!Number.isFinite(Date.parse(expiresAtIso)) || Date.parse(expiresAtIso) <= Date.now())) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_pat_expiry' }));
+      return;
+    }
+    const rotated = await store.rotatePersonalAccessToken({ customerId: principal.customerId, tokenId, createdByUserId: principal.userId, expiresAtIso });
+    if (!rotated) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'pat_not_found_or_inactive' })); return; }
+    await store.appendAuditLog({ id: `audit_${Date.now()}_${rotated.token.id}`, customerId: principal.customerId, action: 'pat.rotated', targetType: 'personal_access_token', targetId: rotated.token.id, metadata: { previousTokenId: tokenId, scopes: rotated.token.scopes, tokenPrefix: rotated.token.tokenPrefix }, createdAtIso: new Date().toISOString() });
+    res.statusCode = 201;
+    res.end(JSON.stringify({ ok: true, token: { ...rotated.token, tokenHash: undefined }, plaintextToken: rotated.plaintext }));
+    return;
+  }
+
+  if (req.method === 'DELETE' && req.url?.startsWith('/api/v1/personal-access-tokens/')) {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
+    const tokenId = decodeURIComponent(req.url.split('/').pop() ?? '');
+    const revoked = await store.revokePersonalAccessToken({ customerId: principal.customerId, tokenId });
+    if (!revoked) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'pat_not_found' })); return; }
+    await store.appendAuditLog({ id: `audit_${Date.now()}_${tokenId}`, customerId: principal.customerId, action: 'pat.revoked', targetType: 'personal_access_token', targetId: tokenId, metadata: {}, createdAtIso: new Date().toISOString() });
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/v1/me') {
+    const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+    if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    res.end(JSON.stringify({ ok: true, principal }));
+    return;
+  }
+
   if (req.method === 'GET' && req.url === '/dashboard') {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) {
@@ -697,8 +793,8 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const access = await requireCustomerAccess(req, customerId);
-    if (access !== 'ok') {
+    const access = await requireCustomerAccess(req, customerId, 'accounts:connect');
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -873,7 +969,7 @@ const server = createServer(async (req, res) => {
     const [, , , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -890,8 +986,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/mapping')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'accounts:read');
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -920,7 +1016,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -938,7 +1034,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -960,7 +1056,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -987,7 +1083,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -1015,15 +1111,14 @@ const server = createServer(async (req, res) => {
     const [, , customerId, , , draftId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const decodedDraftId = decodeURIComponent(draftId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
-    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-    if (!dashboard) { endCustomerAccessError(res, 'unauthorized'); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:approve');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    if (!access.principal?.userId) { endCustomerAccessError(res, { status: 'unauthorized' }); return; }
     try {
       const { draft, job } = await store.approveInboxDraftReply({
         customerId: decodedCustomerId,
         draftId: decodedDraftId,
-        approvedByUserId: dashboard.user.id,
+        approvedByUserId: access.principal.userId,
       });
       await store.appendAuditLog({
         id: `audit_${Date.now()}_${draft.id}`,
@@ -1031,7 +1126,7 @@ const server = createServer(async (req, res) => {
         action: 'inbox.draft.approved',
         targetType: 'inbox_draft_reply',
         targetId: draft.id,
-        metadata: { jobId: job.id, conversationId: draft.conversationId, approvedByUserId: dashboard.user.id },
+        metadata: { jobId: job.id, conversationId: draft.conversationId, approvedByUserId: access.principal.userId },
         createdAtIso: new Date().toISOString(),
       });
       res.statusCode = 202;
@@ -1048,12 +1143,11 @@ const server = createServer(async (req, res) => {
     const [, , customerId, , , conversationId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const decodedConversationId = decodeURIComponent(conversationId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:draft');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     const body = await readJsonBody(req);
     const text = stringField(body, 'text');
-    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-    if (!text || !dashboard) {
+    if (!text || !access.principal?.userId) {
       res.statusCode = 400;
       res.end(JSON.stringify({ ok: false, error: 'inbox_draft_text_required' }));
       return;
@@ -1063,7 +1157,7 @@ const server = createServer(async (req, res) => {
         customerId: decodedCustomerId,
         conversationId: decodedConversationId,
         text,
-        createdByUserId: dashboard.user.id,
+        createdByUserId: access.principal.userId,
       });
       res.statusCode = 201;
       res.end(JSON.stringify({ ok: true, mode: 'draft_only', draft }));
@@ -1077,8 +1171,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/inbox/conversations')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     const conversations = await store.listInboxConversations(decodedCustomerId);
     res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, mode: 'draft_only', conversations }));
     return;
@@ -1087,8 +1181,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && /\/inbox\/conversations\/[^/]+\/messages$/.test(req.url)) {
     const [, , customerId, , , conversationId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     const messages = await store.listInboxMessages(decodedCustomerId, decodeURIComponent(conversationId));
     res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, conversationId: decodeURIComponent(conversationId), messages }));
     return;
@@ -1098,7 +1192,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
