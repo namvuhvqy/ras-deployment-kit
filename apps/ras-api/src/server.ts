@@ -170,11 +170,22 @@ function hasScope(scopes: string[], requiredScope?: string): boolean {
   return !requiredScope || scopes.includes('*') || scopes.includes(requiredScope);
 }
 
-async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<'ok' | 'unauthorized' | 'forbidden'> {
+type CustomerAccess = 'ok' | 'unauthorized' | 'forbidden' | 'rate_limited';
+
+async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<{ status: CustomerAccess; retryAfterSeconds?: number; remaining?: number; principal?: import('../../../packages/shared/src/types.js').RasPrincipal }> {
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
-  if (!principal) return 'unauthorized';
-  if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return 'forbidden';
-  return 'ok';
+  if (!principal) return { status: 'unauthorized' };
+  if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden', principal };
+  if (principal.authType === 'pat' && principal.tokenId) {
+    const limit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
+    const result = await store.consumePatRateLimit({ customerId, tokenId: principal.tokenId, limit: Number.isFinite(limit) && limit > 0 ? limit : 120, windowMs: 60_000 });
+    if (!result.allowed) {
+      await store.appendAuditLog({ id: `audit_${Date.now()}_${principal.tokenId}`, customerId, action: 'pat.rate_limited', targetType: 'personal_access_token', targetId: principal.tokenId, metadata: { requiredScope, retryAfterSeconds: result.retryAfterSeconds }, createdAtIso: new Date().toISOString() });
+      return { status: 'rate_limited', retryAfterSeconds: result.retryAfterSeconds, remaining: 0, principal };
+    }
+    return { status: 'ok', remaining: result.remaining, principal };
+  }
+  return { status: 'ok', principal };
 }
 
 async function requireSessionPrincipal(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
@@ -182,9 +193,15 @@ async function requireSessionPrincipal(req: IncomingMessage): Promise<import('..
   return principal?.authType === 'session' ? principal : undefined;
 }
 
-function endCustomerAccessError(res: { statusCode: number; end: (chunk: string) => void }, access: 'unauthorized' | 'forbidden') {
-  res.statusCode = access === 'unauthorized' ? 401 : 403;
-  res.end(JSON.stringify({ ok: false, error: access }));
+function endCustomerAccessError(res: { statusCode: number; setHeader: (name: string, value: string | number) => void; end: (chunk?: string) => void }, access: { status: CustomerAccess; retryAfterSeconds?: number }) {
+  if (access.status === 'rate_limited') {
+    res.statusCode = 429;
+    res.setHeader('retry-after', String(access.retryAfterSeconds ?? 60));
+    res.end(JSON.stringify({ ok: false, error: 'rate_limited', retryAfterSeconds: access.retryAfterSeconds ?? 60 }));
+    return;
+  }
+  res.statusCode = access.status === 'unauthorized' ? 401 : 403;
+  res.end(JSON.stringify({ ok: false, error: access.status }));
 }
 
 function requireInternalAccess(req: IncomingMessage): boolean {
@@ -758,7 +775,7 @@ const server = createServer(async (req, res) => {
     }
 
     const access = await requireCustomerAccess(req, customerId, 'accounts:connect');
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -933,7 +950,7 @@ const server = createServer(async (req, res) => {
     const [, , , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -951,7 +968,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId, 'accounts:read');
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -980,7 +997,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -998,7 +1015,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -1020,7 +1037,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -1047,7 +1064,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }
@@ -1075,15 +1092,14 @@ const server = createServer(async (req, res) => {
     const [, , customerId, , , draftId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const decodedDraftId = decodeURIComponent(draftId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
-    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-    if (!dashboard) { endCustomerAccessError(res, 'unauthorized'); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:approve');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    if (!access.principal?.userId) { endCustomerAccessError(res, { status: 'unauthorized' }); return; }
     try {
       const { draft, job } = await store.approveInboxDraftReply({
         customerId: decodedCustomerId,
         draftId: decodedDraftId,
-        approvedByUserId: dashboard.user.id,
+        approvedByUserId: access.principal.userId,
       });
       await store.appendAuditLog({
         id: `audit_${Date.now()}_${draft.id}`,
@@ -1091,7 +1107,7 @@ const server = createServer(async (req, res) => {
         action: 'inbox.draft.approved',
         targetType: 'inbox_draft_reply',
         targetId: draft.id,
-        metadata: { jobId: job.id, conversationId: draft.conversationId, approvedByUserId: dashboard.user.id },
+        metadata: { jobId: job.id, conversationId: draft.conversationId, approvedByUserId: access.principal.userId },
         createdAtIso: new Date().toISOString(),
       });
       res.statusCode = 202;
@@ -1108,12 +1124,11 @@ const server = createServer(async (req, res) => {
     const [, , customerId, , , conversationId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const decodedConversationId = decodeURIComponent(conversationId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:draft');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     const body = await readJsonBody(req);
     const text = stringField(body, 'text');
-    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-    if (!text || !dashboard) {
+    if (!text || !access.principal?.userId) {
       res.statusCode = 400;
       res.end(JSON.stringify({ ok: false, error: 'inbox_draft_text_required' }));
       return;
@@ -1123,7 +1138,7 @@ const server = createServer(async (req, res) => {
         customerId: decodedCustomerId,
         conversationId: decodedConversationId,
         text,
-        createdByUserId: dashboard.user.id,
+        createdByUserId: access.principal.userId,
       });
       res.statusCode = 201;
       res.end(JSON.stringify({ ok: true, mode: 'draft_only', draft }));
@@ -1137,8 +1152,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/inbox/conversations')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     const conversations = await store.listInboxConversations(decodedCustomerId);
     res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, mode: 'draft_only', conversations }));
     return;
@@ -1147,8 +1162,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && /\/inbox\/conversations\/[^/]+\/messages$/.test(req.url)) {
     const [, , customerId, , , conversationId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') { endCustomerAccessError(res, access); return; }
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     const messages = await store.listInboxMessages(decodedCustomerId, decodeURIComponent(conversationId));
     res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, conversationId: decodeURIComponent(conversationId), messages }));
     return;
@@ -1158,7 +1173,7 @@ const server = createServer(async (req, res) => {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
     const access = await requireCustomerAccess(req, decodedCustomerId);
-    if (access !== 'ok') {
+    if (access.status !== 'ok') {
       endCustomerAccessError(res, access);
       return;
     }

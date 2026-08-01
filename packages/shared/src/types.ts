@@ -128,6 +128,16 @@ export interface RasPrincipal {
   tokenId?: string;
 }
 
+/** Persisted fixed-window limiter state. It deliberately never contains a bearer credential. */
+export interface RasApiRateLimitBucket {
+  key: string;
+  customerId: string;
+  tokenId: string;
+  windowStartedAtIso: string;
+  requestCount: number;
+  updatedAtIso: string;
+}
+
 export interface RasCustomer {
   id: string;
   tenantId?: string;

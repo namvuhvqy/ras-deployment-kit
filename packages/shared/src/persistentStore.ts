@@ -18,6 +18,7 @@ import type {
   RasSession,
   RasPersonalAccessToken,
   RasPrincipal,
+  RasApiRateLimitBucket,
   SocialPost,
   RasUser,
 } from './types.js';
@@ -28,6 +29,7 @@ export interface RasPersistentState {
   users: RasUser[];
   sessions: RasSession[];
   personalAccessTokens: RasPersonalAccessToken[];
+  apiRateLimitBuckets: RasApiRateLimitBucket[];
   customers: RasCustomer[];
   sandboxes: RasSandboxEnvironment[];
   agents: RasAgentInstance[];
@@ -229,6 +231,7 @@ export class JsonRasStore {
       users: [],
       sessions: [],
       personalAccessTokens: [],
+      apiRateLimitBuckets: [],
       customers: [],
       sandboxes: [],
       agents: [],
@@ -252,6 +255,7 @@ export class JsonRasStore {
     state.users ??= [];
     state.sessions ??= [];
     state.personalAccessTokens ??= [];
+    state.apiRateLimitBuckets ??= [];
     state.customers ??= [];
     state.sandboxes ??= [];
     state.agents ??= [];
@@ -421,6 +425,27 @@ export class JsonRasStore {
     pat.lastUsedAtIso = nowIso;
     await this.write(state);
     return { authType: 'pat', customerId: pat.customerId, userId: pat.createdByUserId, scopes: pat.scopes, tokenId: pat.id };
+  }
+
+  async consumePatRateLimit(input: { customerId: string; tokenId: string; limit: number; windowMs: number; nowIso?: string }): Promise<{ allowed: boolean; remaining: number; retryAfterSeconds: number }> {
+    const state = await this.load();
+    const nowMs = Date.parse(input.nowIso ?? new Date().toISOString());
+    const windowStartedAtMs = Math.floor(nowMs / input.windowMs) * input.windowMs;
+    const key = `${input.customerId}:${input.tokenId}:${windowStartedAtMs}`;
+    state.apiRateLimitBuckets = state.apiRateLimitBuckets.filter((row) => Date.parse(row.windowStartedAtIso) >= windowStartedAtMs - input.windowMs);
+    let bucket = state.apiRateLimitBuckets.find((row) => row.key === key);
+    if (!bucket) {
+      bucket = { key, customerId: input.customerId, tokenId: input.tokenId, windowStartedAtIso: new Date(windowStartedAtMs).toISOString(), requestCount: 0, updatedAtIso: new Date(nowMs).toISOString() };
+      state.apiRateLimitBuckets.push(bucket);
+    }
+    if (bucket.requestCount >= input.limit) {
+      await this.write(state);
+      return { allowed: false, remaining: 0, retryAfterSeconds: Math.max(1, Math.ceil((windowStartedAtMs + input.windowMs - nowMs) / 1000)) };
+    }
+    bucket.requestCount += 1;
+    bucket.updatedAtIso = new Date(nowMs).toISOString();
+    await this.write(state);
+    return { allowed: true, remaining: input.limit - bucket.requestCount, retryAfterSeconds: 0 };
   }
 
   async createPersonalAccessToken(input: { customerId: string; createdByUserId: string; name: string; scopes: string[]; expiresAtIso?: string }): Promise<{ token: RasPersonalAccessToken; plaintext: string }> {

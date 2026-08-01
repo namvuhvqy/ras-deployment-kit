@@ -172,9 +172,10 @@ Dashboard shows real status and next action
 
 - Dual-auth resolves a tenant-bound `Principal`: Dashboard sessions retain `scopes=['*']`; external bearer PATs carry explicit scopes.
 - PAT lifecycle endpoints are session-only: `POST|GET /api/v1/personal-access-tokens`, `DELETE /api/v1/personal-access-tokens/:id`. The plaintext token is returned only by create; persistence contains a SHA-256 hash, prefix, scope, expiry/revocation and last-use metadata.
-- API discovery is `GET /api/v1/me`. Cross-tenant access remains `403`; a scoped PAT cannot use an ungranted capability. The first protected integrations are `accounts:read` for customer mapping and `accounts:connect` for channel connect.
-- MVP allow-list remains intentionally small: `accounts:read`, `accounts:connect`, then Inbox draft/read and approved send only after dedicated scope tests. Raw Zernio MCP/API credentials, ads, deletes, broadcasts, global webhooks and direct provider pass-through are excluded.
-- Before production: add durable per-PAT token-bucket rate limiting, expiry/rotation UX, API-only entitlement enforcement, and a RAS MCP server that allow-lists tenant-safe tools. Do not expose Zernio's broad MCP surface directly.
+- API discovery is `GET /api/v1/me`. Cross-tenant access remains `403`; a scoped PAT cannot use an ungranted capability. Protected capabilities: `accounts:read`, `accounts:connect`, `inbox:read`, `inbox:draft`, and `inbox:approve` (approval only queues the existing approved-delivery job; it never directly sends).
+- Fixed-window rate limiting is durable and partitioned by PAT + tenant. Default is `120` requests/minute and may be tuned through `RAS_PAT_RATE_LIMIT_PER_MINUTE`; throttled requests return `429` with `retry-after` and emit `pat.rate_limited` audit metadata without recording bearer data.
+- MVP allow-list remains intentionally small. Raw Zernio MCP/API credentials, ads, deletes, broadcasts, global webhooks and direct provider pass-through are excluded.
+- Before production: replace the JSON-backed fixed window with a shared token-bucket backend, add expiry/rotation UX, API-only entitlement enforcement, and a RAS MCP server that allow-lists tenant-safe tools. Do not expose Zernio's broad MCP surface directly.
 
 ## 4. Non-goals for MVP
 

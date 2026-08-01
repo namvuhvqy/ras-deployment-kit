@@ -96,6 +96,12 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       },
     ],
     connectedAccounts: [],
+    inboxConversations: [
+      { id: 'conv_1', customerId: 'cust_1', accountId: 'acct_1', platform: 'facebook', providerConversationId: 'conv_1', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now },
+    ],
+    inboxMessages: [
+      { id: 'msg_1', customerId: 'cust_1', accountId: 'acct_1', platform: 'facebook', conversationId: 'conv_1', providerMessageId: 'provider_msg_1', direction: 'inbound', text: 'Xin chào', receivedAtIso: now, createdAtIso: now },
+    ],
     jobs: [],
     webhookEvents: [],
     auditLogs: [
@@ -132,7 +138,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_PAT_RATE_LIMIT_PER_MINUTE: '3' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -199,8 +205,39 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 
     const patMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
     assert.equal(patMapping.status, 200);
+    const secondPatMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    assert.equal(secondPatMapping.status, 200);
+    const thirdPatMapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    assert.equal(thirdPatMapping.status, 200);
+    const rateLimited = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    assert.equal(rateLimited.status, 429);
+    assert.ok(Number(rateLimited.headers.get('retry-after')) > 0);
     const insufficientScope = await fetch(`http://127.0.0.1:${port}/customers/cust_1/connect/facebook`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
     assert.equal(insufficientScope.status, 403);
+
+    const createInboxPat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'inbox-review', scopes: ['inbox:read', 'inbox:draft', 'inbox:approve'] }),
+    });
+    assert.equal(createInboxPat.status, 201);
+    const inboxPat = (await createInboxPat.json()) as { plaintextToken: string };
+    const inboxRead = await fetch(`http://127.0.0.1:${port}/customers/cust_1/inbox/conversations`, { headers: { authorization: `Bearer ${inboxPat.plaintextToken}` } });
+    assert.equal(inboxRead.status, 200);
+    const createDraft = await fetch(`http://127.0.0.1:${port}/customers/cust_1/inbox/conversations/conv_1/drafts`, {
+      method: 'POST', headers: { authorization: `Bearer ${inboxPat.plaintextToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Em đã nhận được tin nhắn ạ.' }),
+    });
+    assert.equal(createDraft.status, 201);
+    const draftPayload = (await createDraft.json()) as { draft: { id: string; createdByUserId: string } };
+    assert.equal(draftPayload.draft.createdByUserId, 'user_1');
+    const approved = await fetch(`http://127.0.0.1:${port}/customers/cust_1/inbox/drafts/${draftPayload.draft.id}/approve`, { method: 'POST', headers: { authorization: `Bearer ${inboxPat.plaintextToken}` } });
+    assert.equal(approved.status, 202);
+    const readOnlyInboxPat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'inbox-read-only', scopes: ['inbox:read'] }),
+    });
+    const readOnlyInboxPayload = (await readOnlyInboxPat.json()) as { plaintextToken: string };
+    const deniedDraft = await fetch(`http://127.0.0.1:${port}/customers/cust_1/inbox/conversations/conv_1/drafts`, { method: 'POST', headers: { authorization: `Bearer ${readOnlyInboxPayload.plaintextToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Không được phép' }) });
+    assert.equal(deniedDraft.status, 403);
 
     const revokePat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens/${patPayload.token.id}`, { method: 'DELETE', headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(revokePat.status, 204);
@@ -221,9 +258,10 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 
     const auditLogs = await fetch(`http://127.0.0.1:${port}/customers/cust_1/audit-logs`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(auditLogs.status, 200);
-    const auditLogsPayload = (await auditLogs.json()) as { auditLogs: Array<{ id: string; customerId: string }> };
+    const auditLogsPayload = (await auditLogs.json()) as { auditLogs: Array<{ id: string; customerId: string; action: string; targetType: string }> };
     assert.ok(auditLogsPayload.auditLogs.some((log) => log.id === 'audit_newer'));
     assert.ok(auditLogsPayload.auditLogs.some((log) => log.id === 'audit_older'));
+    assert.ok(auditLogsPayload.auditLogs.some((log) => log.action === 'pat.rate_limited' && log.targetType === 'personal_access_token'));
     assert.ok(auditLogsPayload.auditLogs.every((log) => log.customerId === 'cust_1'));
 
     const missingAuditLogs = await fetch(`http://127.0.0.1:${port}/customers/missing/audit-logs`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
