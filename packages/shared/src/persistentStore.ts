@@ -95,6 +95,25 @@ export interface RasDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
   state: 'ready' | 'needs_plan';
+  /**
+   * Tenant-scoped aggregate for the dashboard overview. This intentionally
+   * contains counters and a local navigation target only, never provider data.
+   */
+  dashboardSummary: {
+    renewalState: 'active' | 'past_due' | 'unknown';
+    inbox: {
+      unreadConversations: number;
+      pendingReviewDrafts: number;
+    };
+    channels: {
+      totalSlots: number;
+      activeAccounts: number;
+      needsReconnect: number;
+    };
+    api: {
+      patManagementHref: '/personal-access-tokens';
+    };
+  };
   entitlement: RasEntitlement & {
     /** Backward-compatible plan label for older frontend consumers. */
     plan: 'none' | string;
@@ -394,10 +413,30 @@ export class JsonRasStore {
     const hasActivePlan = customer.packageStatus === 'active' || customer.billingStatus === 'active' || maxConnectedAccounts > 0;
     const dashboardState: RasDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
     const entitlement = normalizeEntitlement(customer, activeConnectedAccounts);
+    const renewalState: RasDashboard['dashboardSummary']['renewalState'] =
+      customer.billingStatus === 'past_due' || customer.packageStatus === 'past_due'
+        ? 'past_due'
+        : customer.billingStatus === 'active' || customer.packageStatus === 'active'
+          ? 'active'
+          : 'unknown';
+    const dashboardSummary: RasDashboard['dashboardSummary'] = {
+      renewalState,
+      inbox: {
+        unreadConversations: state.inboxConversations.filter((row) => row.customerId === customer.id && row.unreadCount > 0).length,
+        pendingReviewDrafts: state.inboxDraftReplies.filter((row) => row.customerId === customer.id && row.status === 'pending_review').length,
+      },
+      channels: {
+        totalSlots: entitlement.connectSlots.totalSlots,
+        activeAccounts: activeConnectedAccounts,
+        needsReconnect: connectedAccounts.filter((row) => row.status === 'disconnected' || row.status === 'error').length,
+      },
+      api: { patManagementHref: '/personal-access-tokens' },
+    };
     return {
       user: safeUser,
       customer: { ...customer, entitlement },
       state: dashboardState,
+      dashboardSummary,
       entitlement: {
         ...entitlement,
         plan: entitlement.basePlan.planId,
