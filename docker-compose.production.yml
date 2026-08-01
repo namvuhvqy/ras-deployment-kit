@@ -77,7 +77,7 @@ volumes:
     name: ras-deployment-kit_ras-data
   ras-production-redis-data:
     external: true
-    name: ras-deployment-kit_ras-redis-data
+    name: ras-deployment-kit_ras-production-redis-data
 
 networks:
   ras-internal:
