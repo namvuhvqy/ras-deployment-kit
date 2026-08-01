@@ -168,7 +168,7 @@ Dashboard shows real status and next action
 12. **End-to-end smoke test**: sale creates account → assigns package/slot/VPS → customer logs in → sees dashboard or `needs_plan` Empty State → connect action returns verified status.
 13. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
 
-## 3A. API-Only / PAT foundation (implemented; not production-deployed)
+## Phase 4D — API-Only / PAT Foundation (implemented; not production-deployed)
 
 - Dual-auth resolves a tenant-bound `Principal`: Dashboard sessions retain `scopes=['*']`; external bearer PATs carry explicit scopes.
 - PAT lifecycle endpoints are session-only: `POST|GET /api/v1/personal-access-tokens`, `DELETE /api/v1/personal-access-tokens/:id`. The plaintext token is returned only by create; persistence contains a SHA-256 hash, prefix, scope, expiry/revocation and last-use metadata.
