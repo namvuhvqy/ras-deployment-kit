@@ -1,4 +1,21 @@
 services:
+  ras-redis:
+    image: redis:7-alpine
+    container_name: ras-redis-staging
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--requirepass", "${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.staging}"]
+    environment:
+      RAS_REDIS_PASSWORD: ${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.staging}
+    volumes:
+      - ras-redis-data:/data
+    networks:
+      - ras-internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$RAS_REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   ras-api:
     build:
       context: .
@@ -14,8 +31,15 @@ services:
       RAS_DB_PATH: /data/ras-store.json
       ZERNIO_MODE: ${ZERNIO_MODE:-dry-run}
       ZERNIO_BASE_URL: ${ZERNIO_BASE_URL:-https://zernio.com/api/v1}
+      RAS_REDIS_URL: redis://:${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.staging}@ras-redis:6379/0
     volumes:
       - ras-data:/data
+    networks:
+      - default
+      - ras-internal
+    depends_on:
+      ras-redis:
+        condition: service_healthy
     ports:
       - "${RAS_API_PORT:-8080}:8080"
     healthcheck:
@@ -49,3 +73,8 @@ services:
 
 volumes:
   ras-data:
+  ras-redis-data:
+
+networks:
+  ras-internal:
+    internal: true

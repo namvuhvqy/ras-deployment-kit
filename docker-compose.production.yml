@@ -1,4 +1,21 @@
 services:
+  ras-redis:
+    image: redis:7-alpine
+    container_name: ras-redis-production
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--requirepass", "${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.production}"]
+    environment:
+      RAS_REDIS_PASSWORD: ${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.production}
+    volumes:
+      - ras-production-redis-data:/data
+    networks:
+      - ras-internal
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$RAS_REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   ras-api:
     build:
       context: .
@@ -14,8 +31,15 @@ services:
       RAS_DB_PATH: /data/ras-store.json
       ZERNIO_MODE: ${ZERNIO_MODE:-dry-run}
       ZERNIO_BASE_URL: ${ZERNIO_BASE_URL:-https://zernio.com/api/v1}
+      RAS_REDIS_URL: redis://:${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.production}@ras-redis:6379/0
     volumes:
       - ras-production-data:/data
+    networks:
+      - default
+      - ras-internal
+    depends_on:
+      ras-redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${RAS_API_PRODUCTION_PORT:-8093}:8080"
     healthcheck:
@@ -51,3 +75,10 @@ volumes:
   ras-production-data:
     external: true
     name: ras-deployment-kit_ras-data
+  ras-production-redis-data:
+    external: true
+    name: ras-deployment-kit_ras-redis-data
+
+networks:
+  ras-internal:
+    internal: true

@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
 import { createZernioWebhookRouter } from './webhookRouter.js';
+import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
 
@@ -170,15 +171,25 @@ function hasScope(scopes: string[], requiredScope?: string): boolean {
   return !requiredScope || scopes.includes('*') || scopes.includes(requiredScope);
 }
 
-type CustomerAccess = 'ok' | 'unauthorized' | 'forbidden' | 'rate_limited';
+type CustomerAccess = 'ok' | 'unauthorized' | 'forbidden' | 'rate_limited' | 'rate_limit_unavailable';
 
 async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<{ status: CustomerAccess; retryAfterSeconds?: number; remaining?: number; principal?: import('../../../packages/shared/src/types.js').RasPrincipal }> {
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   if (!principal) return { status: 'unauthorized' };
   if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden', principal };
   if (principal.authType === 'pat' && principal.tokenId) {
-    const limit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
-    const result = await store.consumePatRateLimit({ customerId, tokenId: principal.tokenId, limit: Number.isFinite(limit) && limit > 0 ? limit : 120, windowMs: 60_000 });
+    const configuredLimit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
+    const limit = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 120;
+    const redisUrl = process.env.RAS_REDIS_URL;
+    let result: { allowed: boolean; remaining: number; retryAfterSeconds: number };
+    try {
+      result = redisUrl
+        ? await consumeRedisPatRateLimit({ redisUrl, customerId, tokenId: principal.tokenId, limit })
+        : await store.consumePatRateLimit({ customerId, tokenId: principal.tokenId, limit, windowMs: 60_000 });
+    } catch {
+      await store.appendAuditLog({ id: `audit_${Date.now()}_${principal.tokenId}`, customerId, action: 'pat.rate_limit_unavailable', targetType: 'personal_access_token', targetId: principal.tokenId, metadata: { requiredScope, backend: 'redis' }, createdAtIso: new Date().toISOString() });
+      return { status: 'rate_limit_unavailable', principal };
+    }
     if (!result.allowed) {
       await store.appendAuditLog({ id: `audit_${Date.now()}_${principal.tokenId}`, customerId, action: 'pat.rate_limited', targetType: 'personal_access_token', targetId: principal.tokenId, metadata: { requiredScope, retryAfterSeconds: result.retryAfterSeconds }, createdAtIso: new Date().toISOString() });
       return { status: 'rate_limited', retryAfterSeconds: result.retryAfterSeconds, remaining: 0, principal };
@@ -198,6 +209,11 @@ function endCustomerAccessError(res: { statusCode: number; setHeader: (name: str
     res.statusCode = 429;
     res.setHeader('retry-after', String(access.retryAfterSeconds ?? 60));
     res.end(JSON.stringify({ ok: false, error: 'rate_limited', retryAfterSeconds: access.retryAfterSeconds ?? 60 }));
+    return;
+  }
+  if (access.status === 'rate_limit_unavailable') {
+    res.statusCode = 503;
+    res.end(JSON.stringify({ ok: false, error: 'rate_limit_unavailable' }));
     return;
   }
   res.statusCode = access.status === 'unauthorized' ? 401 : 403;
