@@ -1,8 +1,24 @@
 # RunAgentSys / RAS — MVP Product Scope & Roadmap
 
-Updated: 2026-07-26
+Updated: 2026-08-01
 Owner: Nam Vũ / RunAgentSys
 Status: LOCKED FOR MVP EXECUTION
+
+## 0.6 Phase 4D closure and next execution — 2026-08-01
+
+- [x] **Phase 4D API-only/PAT foundation is production-deployed and operational:** tenant-bound scoped PATs; hash-only storage; one-time reveal; expiry, atomic rotation and revoke; isolated password-protected Redis token bucket; `429`/`Retry-After`; and fail-closed `503 rate_limit_unavailable` when Redis is unavailable.
+- [x] Staging was deployed and verified before Production. Production PAT lifecycle E2E passed: narrow scoped call `200` → bounded token-bucket probe reaches `429` → rotate → predecessor `401` → replacement `200` → revoke `204` → replacement `401`. Test plaintext/session values were process-local and revoked; no credential was reported.
+- [x] PAT management UI is live on `runagentsys.com/personal-access-tokens`; unauthenticated API access is `401`. A Production watchdog runs every five minutes for API/worker/Redis health/restarts, fatal logs and PAT-expiry metadata.
+- [x] Zernio/RAS readiness: AG account mapping and active RAS master webhook were verified. A provider `webhook.test` was accepted, RAS status was `ok`, and the tenant audit count increased by one. No account reconnect or publishing occurred.
+- [x] 4D closure design record: `docs/DASHBOARD_IA_AND_API_CONTRACT.md`, `docs/UNIFIED_INBOX_INTEGRATION_ASSESSMENT.md`, and `docs/ENTITLEMENT_PACKAGE_MATRIX_DRAFT.md`.
+
+### Next implementation order
+
+1. **Phase 5B Dashboard:** session-derived customer overview, Channels, Inbox entry point, PAT/security link, VPS/agent cards and Billing; remove production customer UI dependence on static demo customer ID.
+2. **Phase 5C Admin management:** backend role-authorized customer/order/package/profile/VPS assignment with safe audit records. Do not rely solely on frontend email allow-lists.
+3. **Phase 6B Inbox UI:** controlled adaptation of the MIT-licensed `zernio-dev/unified-inbox` UI shell, calling only tenant-scoped RAS APIs. Draft → explicit approval → worker send remains mandatory; no raw Zernio key or direct-send route enters the web app.
+4. **Phase 7 Pricing release:** only after entitlement decisions are approved; update authoritative backend plan table, clean `/pay` frontend release, staging checkout/provisioning smoke, then separate Production approval.
+
 
 ## 0. Current integration checkpoint — 2026-07-23
 
