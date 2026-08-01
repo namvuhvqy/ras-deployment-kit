@@ -168,6 +168,14 @@ Dashboard shows real status and next action
 12. **End-to-end smoke test**: sale creates account → assigns package/slot/VPS → customer logs in → sees dashboard or `needs_plan` Empty State → connect action returns verified status.
 13. **Only after MVP works**: auto VPS provisioning, billing automation, advanced RBAC, live publishing scale.
 
+## 3A. API-Only / PAT foundation (implemented; not production-deployed)
+
+- Dual-auth resolves a tenant-bound `Principal`: Dashboard sessions retain `scopes=['*']`; external bearer PATs carry explicit scopes.
+- PAT lifecycle endpoints are session-only: `POST|GET /api/v1/personal-access-tokens`, `DELETE /api/v1/personal-access-tokens/:id`. The plaintext token is returned only by create; persistence contains a SHA-256 hash, prefix, scope, expiry/revocation and last-use metadata.
+- API discovery is `GET /api/v1/me`. Cross-tenant access remains `403`; a scoped PAT cannot use an ungranted capability. The first protected integrations are `accounts:read` for customer mapping and `accounts:connect` for channel connect.
+- MVP allow-list remains intentionally small: `accounts:read`, `accounts:connect`, then Inbox draft/read and approved send only after dedicated scope tests. Raw Zernio MCP/API credentials, ads, deletes, broadcasts, global webhooks and direct provider pass-through are excluded.
+- Before production: add durable per-PAT token-bucket rate limiting, expiry/rotation UX, API-only entitlement enforcement, and a RAS MCP server that allow-lists tenant-safe tools. Do not expose Zernio's broad MCP surface directly.
+
 ## 4. Non-goals for MVP
 
 - Auto-create all VPS resources after payment.

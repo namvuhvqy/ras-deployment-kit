@@ -24,6 +24,25 @@ test('JsonRasStore migrates an empty store with current schema metadata', async 
   }
 });
 
+test('PAT is stored only as a hash and resolves/revokes as a tenant-bound principal', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-pat-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const created = await store.createPersonalAccessToken({ customerId: 'cust_a', createdByUserId: 'user_a', name: 'n8n', scopes: ['accounts:read'] });
+    const state = await store.load();
+    assert.equal(state.personalAccessTokens.length, 1);
+    assert.notEqual(state.personalAccessTokens[0].tokenHash, created.plaintext);
+    assert.equal((await store.resolvePrincipal(created.plaintext))?.customerId, 'cust_a');
+    assert.deepEqual((await store.resolvePrincipal(created.plaintext))?.scopes, ['accounts:read']);
+    assert.equal(await store.revokePersonalAccessToken({ customerId: 'cust_a', tokenId: created.token.id }), true);
+    assert.equal(await store.resolvePrincipal(created.plaintext), undefined);
+    assert.equal('tokenHash' in (await store.listPersonalAccessTokens('cust_a'))[0], false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('JsonRasStore persists customer, account, queue, webhook idempotency, and audit log', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {

@@ -166,11 +166,20 @@ function consumeOAuthState(state: string | undefined): { redirectTo: string } | 
   return { redirectTo: stored.redirectTo };
 }
 
-async function requireCustomerAccess(req: IncomingMessage, customerId: string): Promise<'ok' | 'unauthorized' | 'forbidden'> {
-  const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-  if (!dashboard) return 'unauthorized';
-  if (dashboard.customer.id !== customerId) return 'forbidden';
+function hasScope(scopes: string[], requiredScope?: string): boolean {
+  return !requiredScope || scopes.includes('*') || scopes.includes(requiredScope);
+}
+
+async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<'ok' | 'unauthorized' | 'forbidden'> {
+  const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+  if (!principal) return 'unauthorized';
+  if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return 'forbidden';
   return 'ok';
+}
+
+async function requireSessionPrincipal(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
+  const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+  return principal?.authType === 'session' ? principal : undefined;
 }
 
 function endCustomerAccessError(res: { statusCode: number; end: (chunk: string) => void }, access: 'unauthorized' | 'forbidden') {
@@ -479,6 +488,57 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/api/v1/personal-access-tokens') {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal?.userId) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ ok: false, error: 'session_auth_required' }));
+      return;
+    }
+    const body = await readJsonBody(req);
+    const name = stringField(body, 'name');
+    const scopes = Array.isArray(body.scopes) && body.scopes.every((scope) => typeof scope === 'string' && scope.length > 0)
+      ? body.scopes as string[]
+      : [];
+    const expiresAtIso = stringField(body, 'expiresAtIso');
+    if (!name || scopes.length === 0 || (expiresAtIso && !Number.isFinite(Date.parse(expiresAtIso)))) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_pat_request' }));
+      return;
+    }
+    const created = await store.createPersonalAccessToken({ customerId: principal.customerId, createdByUserId: principal.userId, name, scopes, expiresAtIso });
+    await store.appendAuditLog({ id: `audit_${Date.now()}_${created.token.id}`, customerId: principal.customerId, action: 'pat.created', targetType: 'personal_access_token', targetId: created.token.id, metadata: { scopes: created.token.scopes, tokenPrefix: created.token.tokenPrefix }, createdAtIso: new Date().toISOString() });
+    res.statusCode = 201;
+    res.end(JSON.stringify({ ok: true, token: { ...created.token, tokenHash: undefined }, plaintextToken: created.plaintext }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/v1/personal-access-tokens') {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
+    res.end(JSON.stringify({ ok: true, tokens: await store.listPersonalAccessTokens(principal.customerId) }));
+    return;
+  }
+
+  if (req.method === 'DELETE' && req.url?.startsWith('/api/v1/personal-access-tokens/')) {
+    const principal = await requireSessionPrincipal(req);
+    if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'session_auth_required' })); return; }
+    const tokenId = decodeURIComponent(req.url.split('/').pop() ?? '');
+    const revoked = await store.revokePersonalAccessToken({ customerId: principal.customerId, tokenId });
+    if (!revoked) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'pat_not_found' })); return; }
+    await store.appendAuditLog({ id: `audit_${Date.now()}_${tokenId}`, customerId: principal.customerId, action: 'pat.revoked', targetType: 'personal_access_token', targetId: tokenId, metadata: {}, createdAtIso: new Date().toISOString() });
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/v1/me') {
+    const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+    if (!principal) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    res.end(JSON.stringify({ ok: true, principal }));
+    return;
+  }
+
   if (req.method === 'GET' && req.url === '/dashboard') {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) {
@@ -697,7 +757,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const access = await requireCustomerAccess(req, customerId);
+    const access = await requireCustomerAccess(req, customerId, 'accounts:connect');
     if (access !== 'ok') {
       endCustomerAccessError(res, access);
       return;
@@ -890,7 +950,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.endsWith('/mapping')) {
     const [, , customerId] = req.url.split('/');
     const decodedCustomerId = decodeURIComponent(customerId);
-    const access = await requireCustomerAccess(req, decodedCustomerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'accounts:read');
     if (access !== 'ok') {
       endCustomerAccessError(res, access);
       return;

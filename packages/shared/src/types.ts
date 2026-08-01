@@ -105,6 +105,29 @@ export interface RasSession {
   createdAtIso: string;
 }
 
+/** External API token. The plaintext credential is never persisted. */
+export interface RasPersonalAccessToken {
+  id: string;
+  customerId: string;
+  createdByUserId: string;
+  name: string;
+  tokenPrefix: string;
+  tokenHash: string;
+  scopes: string[];
+  expiresAtIso?: string;
+  lastUsedAtIso?: string;
+  revokedAtIso?: string;
+  createdAtIso: string;
+}
+
+export interface RasPrincipal {
+  authType: 'session' | 'pat';
+  customerId: string;
+  userId?: string;
+  scopes: string[];
+  tokenId?: string;
+}
+
 export interface RasCustomer {
   id: string;
   tenantId?: string;
