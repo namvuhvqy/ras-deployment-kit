@@ -198,6 +198,20 @@ test('JsonRasStore persists PayPal capture before provisioning and keeps pending
   }
 });
 
+test('JsonRasStore dedupes a payment provisioning outbox job by payment id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const job = { id: 'provision_payment_paypal:ORDER-1', customerId: 'cust_1', profileId: '', type: 'provision_entitlement' as const, priority: 'P0' as const, status: 'queued' as const, payload: { paymentId: 'paypal:ORDER-1' }, retryCount: 0, createdAtIso: '2026-08-02T00:00:00.000Z' };
+    assert.equal((await store.enqueueJobIfAbsent(job)).inserted, true);
+    assert.equal((await store.enqueueJobIfAbsent(job)).inserted, false);
+    assert.equal((await store.load()).jobs.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('JsonRasStore summarizes sandbox and required RAS agent lifecycle blockers', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {

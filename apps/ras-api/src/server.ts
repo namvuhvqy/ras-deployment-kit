@@ -670,58 +670,20 @@ const server = createServer(async (req, res) => {
       updatedAtIso: new Date().toISOString(),
     });
 
-    try {
-      const customer = dashboard.customer;
-      const maxConnectedAccounts = 1 + extraConnectSlots;
-      let zernioProfileId = customer.zernioProfileId;
-      if (!zernioProfileId && maxConnectedAccounts > 0) {
-        const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
-        zernioProfileId = profile.zernioProfileId;
-      }
-
-      const entitlement: RasEntitlement = {
-        basePlan: {
-          planId: plan,
-          status: 'active' as const,
-          billingCycle,
-          monthlyPriceUsd: billingCycle === 'yearly' ? planPrice.yearlyMonthly : planPrice.monthly,
-          totalAmountUsd: expectedTotal,
-          vps: { type: 'dedicated' as const, size: planPrice.vpsSize },
-          agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] },
-          aiTokens: { monthlyLimit: planPrice.aiTokenLimit },
-          activatedAtIso: new Date().toISOString(),
-        },
-        connectSlots: {
-          status: 'active' as const,
-          includedSlots: 1,
-          purchasedSlots: extraConnectSlots,
-          trialSlots: 0,
-          totalSlots: maxConnectedAccounts,
-          activeConnectedAccounts: dashboard.customer.activeConnectedAccounts ?? 0,
-        },
-        addOns: [
-          { id: 'zernio-connect', name: 'Zernio Connect', status: 'active' as const, slots: maxConnectedAccounts, priceUsd: expectedConnect },
-        ],
-      };
-      const mapping = await store.upsertCustomerEntitlement({
-        customerId,
-        maxConnectedAccounts,
-        packageStatus: 'active',
-        addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: maxConnectedAccounts > 0 ? 'active' : 'inactive' },
-        zernioProfileId,
-        entitlement,
-      });
-      await store.markBillingPaymentProvisioned(payment.id);
-      res.statusCode = 200;
-      res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: 'provisioned', transactionId }, entitlement: { ...mapping, entitlement } }));
-      return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'provision_failed';
-      const pendingPayment = await store.markBillingPaymentProvisionFailed(payment.id, message);
-      res.statusCode = 202;
-      res.end(JSON.stringify({ ok: false, error: 'provision_pending_retry', payment: pendingPayment }));
-      return;
-    }
+    const queued = await store.enqueueJobIfAbsent({
+      id: `provision_payment_${payment.id}`,
+      customerId,
+      profileId: dashboard.customer.zernioProfileId ?? '',
+      type: 'provision_entitlement',
+      priority: 'P0',
+      status: 'queued',
+      retryCount: 0,
+      payload: { paymentId: payment.id },
+      createdAtIso: new Date().toISOString(),
+    });
+    res.statusCode = 202;
+    res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } }));
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {

@@ -64,6 +64,29 @@ test('RasJobWorker drains due queued jobs fairly and persists completion metadat
   }
 });
 
+test('RasJobWorker provisions a captured payment from a durable outbox job exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_paid', name: 'Paid tenant', email: 'paid@example.test', maxConnectedAccounts: 2, packageStatus: 'active', addOnStatus: { zernio: 'active' }, entitlement: { basePlan: { planId: 'lite', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: '2026-08-01T00:00:00.000Z' }, connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 1, trialSlots: 0, totalSlots: 2, activeConnectedAccounts: 1 }, addOns: [] } });
+    const timestamp = new Date().toISOString();
+    await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: 'cust_paid', paypalOrderId: 'ORDER-OUTBOX-1', transactionId: 'CAPTURE-OUTBOX-1', status: 'captured', amount: '6', currency: 'USD', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, createdAtIso: timestamp, updatedAtIso: timestamp });
+    await store.enqueueJob({ id: 'provision_payment_paypal:ORDER-OUTBOX-1', customerId: 'cust_paid', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: 'paypal:ORDER-OUTBOX-1' }, createdAtIso: timestamp });
+    const adapter = { ...noopAdapter, async createProfile(input) { return { id: input.customerId, name: input.name, email: input.email, zernioProfileId: 'profile_paid' }; } } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const state = await store.load();
+    assert.equal(state.billingPayments[0]?.provisionStatus, 'provisioned');
+    assert.equal(state.customers[0]?.maxConnectedAccounts, 3);
+    assert.equal(state.customers[0]?.zernioProfileId, 'profile_paid');
+    assert.equal(state.jobs[0]?.status, 'completed');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('RasJobWorker forwards safe draft flag into publish payload', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

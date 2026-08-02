@@ -112,6 +112,8 @@ export class RasJobWorker {
       return { dryRun: false, ...result };
     }
 
+    if (job.type === 'provision_entitlement') return this.provisionEntitlement(job);
+
     if (job.type === 'webhook_process' || job.type === 'inbox_process') return this.processZernioWebhook(job);
 
     if (job.type === 'inbox_reply') return this.processInboxReply(job);
@@ -121,6 +123,43 @@ export class RasJobWorker {
     }
 
     throw new Error(`Unsupported live job type: ${job.type}`);
+  }
+
+  private async provisionEntitlement(job: RasJob): Promise<Record<string, unknown>> {
+    const paymentId = requiredString(asRecord(job.payload), 'paymentId');
+    const payment = await this.store.getBillingPayment(paymentId);
+    if (!payment) throw new Error(`Billing payment not found: ${paymentId}`);
+    if (payment.customerId !== job.customerId) throw new Error('Billing payment customer mismatch');
+    if (payment.status !== 'captured') throw new Error('Billing payment is not captured');
+    if (payment.provisionStatus === 'provisioned') return { paymentId: payment.id, provisionStatus: 'provisioned', idempotent: true };
+
+    const state = await this.store.load();
+    const customer = state.customers.find((row) => row.id === job.customerId);
+    if (!customer) throw new Error(`Customer not found: ${job.customerId}`);
+    let zernioProfileId = customer.zernioProfileId;
+    if (!zernioProfileId) {
+      const profile = await this.adapter.createProfile({ customerId: customer.id, name: customer.name, email: customer.email });
+      zernioProfileId = profile.zernioProfileId;
+    }
+    const includedSlots = customer.entitlement?.connectSlots.includedSlots ?? 1;
+    const previouslyPurchasedSlots = customer.entitlement?.connectSlots.purchasedSlots ?? Math.max(0, (customer.maxConnectedAccounts ?? includedSlots) - includedSlots);
+    const purchasedSlots = previouslyPurchasedSlots + payment.extraConnectSlots;
+    const totalSlots = includedSlots + purchasedSlots;
+    const activeConnectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id && row.status === 'connected').length;
+    await this.store.upsertCustomerEntitlement({
+      customerId: customer.id,
+      maxConnectedAccounts: totalSlots,
+      packageStatus: 'active',
+      addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: 'active' },
+      zernioProfileId,
+      entitlement: {
+        basePlan: { planId: payment.plan, status: 'active', billingCycle: payment.billingCycle, vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: new Date().toISOString() },
+        connectSlots: { status: 'active', includedSlots, purchasedSlots, trialSlots: 0, totalSlots, activeConnectedAccounts },
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'active', slots: totalSlots }],
+      },
+    });
+    await this.store.markBillingPaymentProvisioned(payment.id);
+    return { paymentId: payment.id, provisionStatus: 'provisioned', totalSlots, idempotent: false };
   }
 
   private async processZernioWebhook(job: RasJob): Promise<Record<string, unknown>> {

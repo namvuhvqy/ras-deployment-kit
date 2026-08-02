@@ -532,6 +532,11 @@ export class JsonRasStore {
     return payment;
   }
 
+  async getBillingPayment(id: string): Promise<RasBillingPayment | undefined> {
+    const state = await this.load();
+    return state.billingPayments.find((row) => row.id === id || row.paypalOrderId === id || row.transactionId === id);
+  }
+
   async markBillingPaymentProvisionFailed(id: string, error: string, nowIso: string = new Date().toISOString()): Promise<RasBillingPayment | undefined> {
     const state = await this.load();
     const payment = state.billingPayments.find((row) => row.id === id || row.paypalOrderId === id || row.transactionId === id);
@@ -910,25 +915,26 @@ export class JsonRasStore {
     return updated;
   }
 
-  async enqueueJob(job: RasJob): Promise<RasJob> {
+  async enqueueJobIfAbsent(job: RasJob): Promise<{ inserted: boolean; job: RasJob }> {
     const state = await this.load();
-    if (state.jobs.some((row) => row.id === job.id)) throw new Error(`Duplicate job id: ${job.id}`);
+    const existing = state.jobs.find((row) => row.id === job.id);
+    if (existing) return { inserted: false, job: existing };
     if (job.type === 'publish_post' && !state.socialPosts.some((post) => post.jobId === job.id)) {
       const platform = typeof job.payload.platform === 'string' ? job.payload.platform : job.platform;
       if (!platform) throw new Error(`Publish job missing platform: ${job.id}`);
-      state.socialPosts.push({
-        id: job.id,
-        jobId: job.id,
-        customerId: job.customerId,
-        platform: platform as SocialPost['platform'],
-        status: 'queued',
-        updatedAtIso: new Date().toISOString(),
-      });
+      state.socialPosts.push({ id: job.id, jobId: job.id, customerId: job.customerId, platform: platform as SocialPost['platform'], status: 'queued', updatedAtIso: new Date().toISOString() });
     }
     state.jobs.push(job);
     await this.write(state);
-    return job;
+    return { inserted: true, job };
   }
+
+  async enqueueJob(job: RasJob): Promise<RasJob> {
+    const inserted = await this.enqueueJobIfAbsent(job);
+    if (!inserted.inserted) throw new Error(`Duplicate job id: ${job.id}`);
+    return inserted.job;
+  }
+
 
   async getQueuedJobs(): Promise<RasJob[]> {
     const state = await this.load();

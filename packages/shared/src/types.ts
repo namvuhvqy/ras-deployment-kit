@@ -283,7 +283,7 @@ export interface RasJob {
   profileId: string;
   accountId?: string;
   platform?: SocialPlatform;
-  type: 'publish_post' | 'create_profile' | 'webhook_process' | 'inbox_process' | 'smoke_test' | 'inbox_reply' | 'analytics_sync';
+  type: 'publish_post' | 'create_profile' | 'provision_entitlement' | 'webhook_process' | 'inbox_process' | 'smoke_test' | 'inbox_reply' | 'analytics_sync';
   priority: number | 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
   status: RasJobStatus;
   payload: Record<string, unknown>;
