@@ -368,6 +368,7 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
       GOOGLE_OAUTH_CLIENT_ID: 'client_test',
       GOOGLE_OAUTH_CLIENT_SECRET: 'secret_test',
       GOOGLE_OAUTH_CALLBACK_URL: 'http://127.0.0.1/callback',
+      FRONTEND_APP_URL: 'https://runagentsys.com',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -411,7 +412,7 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     assert.equal(dashboardPayload.dashboard.customer.id, callbackPayload.customerId);
     assert.equal(dashboardPayload.dashboard.customer.email, 'owner@example.com');
 
-    const authStartForBrowser = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
+    const authStartForBrowser = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/pay&frontendOrigin=${encodeURIComponent('https://landingpage-ban-hang-preview-namvuhvqys-projects.vercel.app')}`);
     const browserAuthPayload = (await authStartForBrowser.json()) as { authUrl: string };
     const browserAuthUrl = new URL(browserAuthPayload.authUrl);
     const browserCallback = await fetch(`http://127.0.0.1:${port}/auth/google/callback?code=google_code_test&state=${encodeURIComponent(browserAuthUrl.searchParams.get('state') ?? '')}`, {
@@ -421,10 +422,10 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     const location = browserCallback.headers.get('location');
     assert.ok(location);
     const handoffUrl = new URL(location);
-    assert.equal(handoffUrl.origin, 'https://runagentsys.com');
+    assert.equal(handoffUrl.origin, 'https://landingpage-ban-hang-preview-namvuhvqys-projects.vercel.app');
     assert.equal(handoffUrl.pathname, '/api/auth/google/callback');
     assert.ok(handoffUrl.searchParams.get('token')?.startsWith('sess_'));
-    assert.equal(handoffUrl.searchParams.get('redirectTo'), '/dashboard');
+    assert.equal(handoffUrl.searchParams.get('redirectTo'), '/pay');
   } finally {
     child.kill();
     await rm(dir, { recursive: true, force: true });

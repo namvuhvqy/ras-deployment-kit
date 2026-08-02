@@ -125,7 +125,8 @@ function firstNumberField(body: Record<string, unknown>, fields: string[]): numb
 }
 
 const GOOGLE_OAUTH_SCOPE = 'openid email profile';
-const googleOAuthStates = new Map<string, { redirectTo: string; createdAtMs: number }>();
+type GoogleOAuthState = { redirectTo: string; frontendOrigin: string; createdAtMs: number };
+const googleOAuthStates = new Map<string, GoogleOAuthState>();
 
 function publicBaseUrl(req: IncomingMessage): string {
   const proto = firstHeader(req, 'x-forwarded-proto') ?? 'http';
@@ -145,26 +146,41 @@ function safeRedirectPath(value: string | undefined): string {
   return value && value.startsWith('/') && !value.startsWith('//') ? value : '/dashboard';
 }
 
-function frontendOAuthCallbackUrl(token: string, redirectTo: string): string {
-  const callback = new URL('/api/auth/google/callback', frontendBaseUrl());
+function allowedFrontendOrigin(value: string | undefined): string {
+  const canonical = new URL(frontendBaseUrl()).origin;
+  if (!value) return canonical;
+  try {
+    const candidate = new URL(value);
+    if (candidate.protocol !== 'https:' || candidate.pathname !== '/' || candidate.search || candidate.hash) return canonical;
+    if (candidate.origin === canonical) return canonical;
+    return /^https:\/\/landingpage-ban-hang-[a-z0-9-]+-namvuhvqys-projects\.vercel\.app$/.test(candidate.origin)
+      ? candidate.origin
+      : canonical;
+  } catch {
+    return canonical;
+  }
+}
+
+function frontendOAuthCallbackUrl(token: string, redirectTo: string, frontendOrigin: string): string {
+  const callback = new URL('/api/auth/google/callback', frontendOrigin);
   callback.searchParams.set('token', token);
   callback.searchParams.set('redirectTo', safeRedirectPath(redirectTo));
   return callback.toString();
 }
 
-function createOAuthState(redirectTo: string): string {
+function createOAuthState(redirectTo: string, frontendOrigin: string): string {
   const state = `oauth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-  googleOAuthStates.set(state, { redirectTo, createdAtMs: Date.now() });
+  googleOAuthStates.set(state, { redirectTo, frontendOrigin, createdAtMs: Date.now() });
   return state;
 }
 
-function consumeOAuthState(state: string | undefined): { redirectTo: string } | undefined {
+function consumeOAuthState(state: string | undefined): GoogleOAuthState | undefined {
   if (!state) return undefined;
   const stored = googleOAuthStates.get(state);
   if (!stored) return undefined;
   googleOAuthStates.delete(state);
   if (Date.now() - stored.createdAtMs > 10 * 60 * 1000) return undefined;
-  return { redirectTo: stored.redirectTo };
+  return stored;
 }
 
 function hasScope(scopes: string[], requiredScope?: string): boolean {
@@ -451,7 +467,7 @@ const server = createServer(async (req, res) => {
       const dashboard = await store.getDashboardForSession(session.token);
       if (!dashboard) throw new Error('google_session_dashboard_missing');
       res.statusCode = 302;
-      res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo));
+      res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo, state.frontendOrigin));
       res.end();
     } catch (error) {
       const failed = new URL('/login', frontendBaseUrl());
@@ -477,7 +493,8 @@ const server = createServer(async (req, res) => {
       return;
     }
     const redirectTo = safeRedirectPath(url.searchParams.get('redirectTo') ?? undefined);
-    const state = createOAuthState(redirectTo);
+    const frontendOrigin = allowedFrontendOrigin(url.searchParams.get('frontendOrigin') ?? undefined);
+    const state = createOAuthState(redirectTo, frontendOrigin);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', clientId);
     authUrl.searchParams.set('redirect_uri', googleCallbackUrl(req));
