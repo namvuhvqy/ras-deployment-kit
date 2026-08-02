@@ -291,6 +291,31 @@ test('RasJobWorker maps a published webhook by platformPostId when Zernio post i
   }
 });
 
+test('RasJobWorker verifies an account-connected webhook from the profile list when getAccount returns 405', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_1', name: 'Tenant', zernioProfileId: 'profile_1' });
+    await store.enqueueJob({
+      id: 'webhook_account_405', customerId: 'cust_1', profileId: 'profile_1', accountId: 'acct_1', platform: 'facebook',
+      type: 'webhook_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+      payload: { eventType: 'account.connected', account: { accountId: 'acct_1', profileId: 'profile_1', platform: 'facebook' } },
+    });
+    const adapter = {
+      ...noopAdapter,
+      async getAccount() { throw new ZernioApiError('Zernio API 405 for /accounts/acct_1', 405, { error: 'method not allowed' }); },
+      async listAccounts(profileId) { return [{ id: 'external_1', customerId: '', zernioAccountId: 'acct_1', profileId, zernioProfileId: profileId, platform: 'facebook', username: 'page', status: 'connected', capabilities: [] }]; },
+    } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const state = await store.load();
+    assert.equal(state.connectedAccounts[0]?.status, 'connected');
+    assert.equal(state.jobs[0]?.result?.verificationSource, 'profile_list_fallback');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 function makePublishJob(id: string, profileId: string, priority: RasJob['priority']): RasJob {
   return {
     id,

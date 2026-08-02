@@ -191,7 +191,17 @@ export class RasJobWorker {
     const accountId = job.accountId ?? requiredString(account, 'accountId');
     if (this.options.dryRun) return { dryRun: true, eventType, accountId, skippedLiveSideEffect: 'account_refresh' };
 
-    const detail = await this.adapter.getAccount(accountId);
+    let detail;
+    let verificationSource: 'get_account' | 'profile_list_fallback' = 'get_account';
+    try {
+      detail = await this.adapter.getAccount(accountId);
+    } catch (error) {
+      if (!(error instanceof ZernioApiError) || error.status !== 405) throw error;
+      const accounts = await this.adapter.listAccounts(job.profileId);
+      detail = accounts.find((candidate) => candidate.zernioAccountId === accountId);
+      if (!detail) throw new Error(`Zernio account verification unavailable: ${accountId} was not found in profile list after GET returned 405`);
+      verificationSource = 'profile_list_fallback';
+    }
     const nowIso = new Date().toISOString();
     const status = eventType === 'account.disconnected' ? 'disconnected' : detail.status;
     const saved = await this.store.upsertAccountMapping({
@@ -210,6 +220,7 @@ export class RasJobWorker {
       synced: true,
       accountId: saved.zernioAccountId,
       status: saved.status,
+      verificationSource,
       capabilities: detail.capabilities ?? [],
       lastVerifiedAtIso: saved.lastVerifiedAtIso,
     };
