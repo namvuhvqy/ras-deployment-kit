@@ -621,13 +621,21 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/billing/payments/captured') {
-    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-    if (!dashboard) {
+    // Payment capture is accepted only from the trusted RunAgentSys server relay.
+    // Browser session callers must never be able to self-report COMPLETED.
+    if (!requireInternalAccess(req)) {
       res.statusCode = 401;
-      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+      res.end(JSON.stringify({ ok: false, error: 'internal_payment_relay_required' }));
       return;
     }
     const body = await readJsonBody(req);
+    const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
+    const customer = customerId ? (await store.load()).customers.find((row) => row.id === customerId) : undefined;
+    if (!customer) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' }));
+      return;
+    }
     const plan = basePlanField(body);
     const billingCycle = billingCycleField(body);
     const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
@@ -653,10 +661,9 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const customerId = dashboard.customer.id;
     const payment = await store.recordBillingPaymentCapture({
       provider: 'paypal',
-      customerId,
+      customerId: customer.id,
       paypalOrderId,
       transactionId,
       status: 'captured',
@@ -672,8 +679,8 @@ const server = createServer(async (req, res) => {
 
     const queued = await store.enqueueJobIfAbsent({
       id: `provision_payment_${payment.id}`,
-      customerId,
-      profileId: dashboard.customer.zernioProfileId ?? '',
+      customerId: customer.id,
+      profileId: customer.zernioProfileId ?? '',
       type: 'provision_entitlement',
       priority: 'P0',
       status: 'queued',

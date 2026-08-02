@@ -54,6 +54,20 @@ function emptyState(): Record<string, unknown> {
   };
 }
 
+test('captured payment endpoint rejects session callers without the trusted server relay token', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_payment', name: 'Payment tenant', status: 'active', maxConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } }];
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/billing/payments/captured`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ customerId: 'cust_payment', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, totalAmount: 25, paypalOrderId: 'order_1', transactionId: 'capture_1', captureStatus: 'COMPLETED' }),
+    });
+    assert.equal(response.status, 401);
+    assert.equal((await response.json() as { error: string }).error, 'internal_payment_relay_required');
+  });
+});
+
 test('internal user provisioning creates a tenant-bound login identity', async () => {
   const state = emptyState();
   state.customers = [{ id: 'ras-smoke', name: 'RAS Smoke', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 1, activeConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } }];
