@@ -285,7 +285,7 @@ test('mapping endpoints create tenant/customer/profile/account links without roo
   });
 });
 
-test('billing entitlement provisioning accepts canonical payload fields and creates the first profile lazily', async () => {
+test('billing entitlement provisioning rejects direct session activation', async () => {
   const state = emptyState();
   state.customers = [
     {
@@ -331,40 +331,12 @@ test('billing entitlement provisioning accepts canonical payload fields and crea
       }),
     });
 
-    assert.equal(response.status, 200);
-    const payload = (await response.json()) as {
-      entitlement: {
-        customerId: string;
-        maxConnectedAccounts: number;
-        activeConnectedAccounts: number;
-        packageStatus: string;
-        addOnStatus: Record<string, string>;
-        zernioProfileId: string;
-        zernioProfileIds: string[];
-        entitlement?: {
-          basePlan?: { planId?: string; billingCycle?: string; totalAmountUsd?: number };
-          connectSlots?: { includedSlots?: number; purchasedSlots?: number; totalSlots?: number };
-        };
-      };
-    };
-
-    assert.equal(payload.entitlement.customerId, 'cust_entitled');
-    assert.equal(payload.entitlement.maxConnectedAccounts, 3);
-    assert.equal(payload.entitlement.activeConnectedAccounts, 0);
-    assert.equal(payload.entitlement.packageStatus, 'active');
-    assert.equal(payload.entitlement.addOnStatus.zernio, 'active');
-    assert.equal(payload.entitlement.zernioProfileId, 'zernio_cust_entitled');
-    assert.deepEqual(payload.entitlement.zernioProfileIds, ['zernio_cust_entitled']);
-    assert.equal(payload.entitlement.entitlement?.basePlan?.planId, 'pro');
-    assert.equal(payload.entitlement.entitlement?.basePlan?.billingCycle, 'monthly');
-    assert.equal(payload.entitlement.entitlement?.basePlan?.totalAmountUsd, 51);
-    assert.equal(payload.entitlement.entitlement?.connectSlots?.includedSlots, 1);
-    assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 2);
-    assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 3);
+    assert.equal(response.status, 410);
+    assert.equal((await response.json() as { error: string }).error, 'payment_capture_required');
   });
 });
 
-test('billing entitlement provisioning accepts backward-compatible payload aliases', async () => {
+test('billing entitlement provisioning rejects alias payloads from direct session activation', async () => {
   const state = emptyState();
   state.customers = [
     {
@@ -410,23 +382,8 @@ test('billing entitlement provisioning accepts backward-compatible payload alias
       }),
     });
 
-    assert.equal(response.status, 200);
-    const payload = (await response.json()) as {
-      entitlement: {
-        maxConnectedAccounts: number;
-        entitlement?: {
-          basePlan?: { planId?: string; billingCycle?: string; totalAmountUsd?: number };
-          connectSlots?: { purchasedSlots?: number; totalSlots?: number };
-        };
-      };
-    };
-
-    assert.equal(payload.entitlement.maxConnectedAccounts, 5);
-    assert.equal(payload.entitlement.entitlement?.basePlan?.planId, 'lite');
-    assert.equal(payload.entitlement.entitlement?.basePlan?.billingCycle, 'yearly');
-    assert.equal(payload.entitlement.entitlement?.basePlan?.totalAmountUsd, 480);
-    assert.equal(payload.entitlement.entitlement?.connectSlots?.purchasedSlots, 4);
-    assert.equal(payload.entitlement.entitlement?.connectSlots?.totalSlots, 5);
+    assert.equal(response.status, 410);
+    assert.equal((await response.json() as { error: string }).error, 'payment_capture_required');
   });
 });
 

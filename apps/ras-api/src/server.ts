@@ -673,6 +673,12 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
+    // Retired direct provision endpoint. Paid entitlements are activated only
+    // by a consumed, PayPal-bound checkout intent through the durable outbox.
+    res.statusCode = 410;
+    res.end(JSON.stringify({ ok: false, error: 'payment_capture_required' }));
+    return;
+    /* legacy implementation retained below temporarily for source migration:
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) {
       res.statusCode = 401;
@@ -744,6 +750,7 @@ const server = createServer(async (req, res) => {
     res.statusCode = 200;
     res.end(JSON.stringify({ ok: true, entitlement: { ...mapping, entitlement } }));
     return;
+    */
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.includes('/connect/')) {
