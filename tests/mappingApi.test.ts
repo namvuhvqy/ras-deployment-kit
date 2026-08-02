@@ -636,3 +636,25 @@ test('account mapping rejects unknown customer and mismatched zernio profile', a
     assert.equal(payload.error, 'zernio_profile_mismatch');
   });
 });
+
+
+test('checkout capture uses an owned bound intent rather than relay supplied price fields', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [{ id: 'user_a', email: 'a@example.test', role: 'owner', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() }],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const created = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers: { authorization: 'Bearer token_a', 'content-type': 'application/json' }, body: JSON.stringify({ plan: 'lite', billing_cycle: 'monthly', extra_connect_slots: 1 }) });
+    assert.equal(created.status, 201);
+    const intent = ((await created.json()) as { intent: { id: string; amount: string } }).intent;
+    assert.equal(intent.amount, '25');
+    const bind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, customer_id: 'cust_a', paypal_order_id: 'ORDER-INTENT-1' }) });
+    assert.equal(bind.status, 200);
+    const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-INTENT-1', capture_status: 'COMPLETED', total_amount: 1, plan: 'max' }) });
+    assert.equal(captured.status, 202);
+    const repeated = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-OTHER', capture_status: 'COMPLETED' }) });
+    assert.equal(repeated.status, 409);
+  });
+});

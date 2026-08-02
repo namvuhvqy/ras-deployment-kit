@@ -13,7 +13,26 @@ export type RasBasePlanId = 'none' | 'lite' | 'pro' | 'max';
 export type RasBillingCycle = 'monthly' | 'yearly';
 
 export type RasBillingPaymentStatus = 'captured' | 'refunded' | 'failed';
+export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'expired';
 export type RasProvisionStatus = 'pending' | 'pending_retry' | 'provisioned' | 'failed';
+
+export interface RasCheckoutIntent {
+  id: string;
+  customerId: string;
+  plan: Exclude<RasBasePlanId, 'none'>;
+  billingCycle: RasBillingCycle;
+  extraConnectSlots: number;
+  amount: string;
+  currency: 'USD';
+  status: RasCheckoutIntentStatus;
+  paypalOrderId?: string;
+  boundAtIso?: string;
+  consumedAtIso?: string;
+  transactionId?: string;
+  expiresAtIso: string;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
 
 export interface RasBillingPayment {
   id: string;

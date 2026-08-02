@@ -620,77 +620,56 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/billing/payments/captured') {
-    // Payment capture is accepted only from the trusted RunAgentSys server relay.
-    // Browser session callers must never be able to self-report COMPLETED.
-    if (!requireInternalAccess(req)) {
-      res.statusCode = 401;
-      res.end(JSON.stringify({ ok: false, error: 'internal_payment_relay_required' }));
-      return;
-    }
+  if (req.method === 'POST' && req.url === '/billing/checkout-intents') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
     const body = await readJsonBody(req);
-    const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
-    const customer = customerId ? (await store.load()).customers.find((row) => row.id === customerId) : undefined;
-    if (!customer) {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' }));
-      return;
-    }
-    const plan = basePlanField(body);
-    const billingCycle = billingCycleField(body);
+    const plan = basePlanField(body); const billingCycle = billingCycleField(body);
     const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
-    const totalAmount = firstNumberField(body, ['total_amount', 'amount', 'totalAmount']);
+    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots)) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); return;
+    }
+    const pricing = RAS_PLAN_PRICES[plan];
+    const amount = (billingCycle === 'yearly' ? pricing.yearlyMonthly * 12 : pricing.monthly) + (billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6);
+    const ttlMinutes = Number.parseInt(process.env.RAS_CHECKOUT_INTENT_TTL_MINUTES ?? '30', 10);
+    const expiresAtIso = new Date(Date.now() + (Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : 30) * 60_000).toISOString();
+    const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
+    res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/checkout-intents/bind-paypal-order') {
+    if (!requireInternalAccess(req)) { endInternalAccessError(res); return; }
+    const body = await readJsonBody(req);
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
+    const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
+    const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
+    if (!intentId || !customerId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_binding' })); return; }
+    const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
+    if (!bound.intent) { res.statusCode = bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${bound.error}` })); return; }
+    res.end(JSON.stringify({ ok: true, intent: bound.intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/payments/captured') {
+    // Only the trusted server relay may report a provider capture. Pricing and tenant
+    // identity are read from an already-bound, durable intent, never browser input.
+    if (!requireInternalAccess(req)) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'internal_payment_relay_required' })); return; }
+    const body = await readJsonBody(req);
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
     const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');
     const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'status');
-    const currency = (stringField(body, 'currency') ?? 'USD').toUpperCase();
-
-    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots) || totalAmount === undefined || totalAmount < 0 || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' }));
-      return;
-    }
-
-    const planPrice = RAS_PLAN_PRICES[plan];
-    const expectedBase = billingCycle === 'yearly' ? planPrice.yearlyMonthly * 12 : planPrice.monthly;
-    const expectedConnect = billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6;
-    const expectedTotal = expectedBase + expectedConnect;
-    if (totalAmount !== expectedTotal || currency !== 'USD') {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_payment_amount', expectedTotal }));
-      return;
-    }
-
-    const payment = await store.recordBillingPaymentCapture({
-      provider: 'paypal',
-      customerId: customer.id,
-      paypalOrderId,
-      transactionId,
-      status: 'captured',
-      amount: String(totalAmount),
-      currency,
-      plan,
-      billingCycle,
-      extraConnectSlots,
-      rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body,
-      createdAtIso: new Date().toISOString(),
-      updatedAtIso: new Date().toISOString(),
-    });
-
-    const queued = await store.enqueueJobIfAbsent({
-      id: `provision_payment_${payment.id}`,
-      customerId: customer.id,
-      profileId: customer.zernioProfileId ?? '',
-      type: 'provision_entitlement',
-      priority: 'P0',
-      status: 'queued',
-      retryCount: 0,
-      payload: { paymentId: payment.id },
-      createdAtIso: new Date().toISOString(),
-    });
-    res.statusCode = 202;
-    res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } }));
-    return;
+    if (!intentId || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' })); return; }
+    const intentBefore = await store.getCheckoutIntent(intentId);
+    if (!intentBefore) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+    const consumed = await store.consumeCheckoutIntentAfterCapture({ intentId, customerId: intentBefore.customerId, paypalOrderId, transactionId });
+    if (!consumed.intent) { res.statusCode = consumed.error === 'expired' ? 410 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${consumed.error}` })); return; }
+    const intent = consumed.intent;
+    const customer = (await store.load()).customers.find((row) => row.id === intent.customerId);
+    if (!customer) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' })); return; }
+    const now = new Date().toISOString();
+    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body, createdAtIso: now, updatedAtIso: now });
+    const queued = await store.enqueueJobIfAbsent({ id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now });
+    res.statusCode = 202; res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } })); return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {

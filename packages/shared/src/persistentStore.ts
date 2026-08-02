@@ -7,6 +7,7 @@ import type {
   ConnectedAccount,
   RasAgentInstance,
   RasBillingPayment,
+  RasCheckoutIntent,
   RasCustomer,
   RasEntitlement,
   RasJob,
@@ -45,6 +46,7 @@ export interface RasPersistentState {
   webhookStatus: StoredWebhookStatus;
   auditLogs: StoredAuditLog[];
   billingPayments: RasBillingPayment[];
+  checkoutIntents: RasCheckoutIntent[];
 }
 
 export interface StoredWebhookEvent {
@@ -247,6 +249,7 @@ export class JsonRasStore {
       webhookStatus: { enabled: true, consecutiveFailures: 0 },
       auditLogs: [],
       billingPayments: [],
+      checkoutIntents: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -271,6 +274,7 @@ export class JsonRasStore {
     state.webhookStatus ??= { enabled: true, consecutiveFailures: 0 };
     state.auditLogs ??= [];
     state.billingPayments ??= [];
+    state.checkoutIntents ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -511,6 +515,43 @@ export class JsonRasStore {
     else state.customers.push(customer);
     await this.write(state);
     return customer;
+  }
+
+  async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
+    const state = await this.load();
+    const now = new Date().toISOString();
+    const intent: RasCheckoutIntent = { ...input, id: input.id ?? `checkout_${randomBytes(16).toString('hex')}`, status: 'created', createdAtIso: input.createdAtIso ?? now, updatedAtIso: input.updatedAtIso ?? now };
+    state.checkoutIntents.push(intent);
+    await this.write(state);
+    return intent;
+  }
+
+  async getCheckoutIntent(id: string): Promise<RasCheckoutIntent | undefined> {
+    const state = await this.load();
+    return state.checkoutIntents.find((row) => row.id === id);
+  }
+
+  async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
+    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    if (!intent) return { error: 'not_found' };
+    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (intent.status === 'consumed') return { error: 'consumed' };
+    if (intent.paypalOrderId && intent.paypalOrderId !== input.paypalOrderId) return { error: 'already_bound' };
+    if (state.checkoutIntents.some((row) => row.id !== intent.id && row.paypalOrderId === input.paypalOrderId)) return { error: 'paypal_order_bound' };
+    intent.paypalOrderId = input.paypalOrderId; intent.status = 'bound'; intent.boundAtIso ??= now; intent.updatedAtIso = now;
+    await this.write(state); return { intent };
+  }
+
+  async consumeCheckoutIntentAfterCapture(input: { intentId: string; customerId: string; paypalOrderId: string; transactionId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'not_bound' | 'already_consumed' }> {
+    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    if (!intent) return { error: 'not_found' };
+    if (intent.status === 'consumed') return intent.transactionId === input.transactionId ? { intent } : { error: 'already_consumed' };
+    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
+    intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
+    await this.write(state); return { intent };
   }
 
   async recordBillingPaymentCapture(input: Omit<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'> & Partial<Pick<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'>>): Promise<RasBillingPayment> {
