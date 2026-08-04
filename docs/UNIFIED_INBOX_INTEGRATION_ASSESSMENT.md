@@ -73,6 +73,10 @@ The UI must not implement or expose direct equivalents of upstream Zernio `/v1/i
 
 Discovery is complete. The next implementation decision is a clean RAS frontend worktree for the limited Phase 6B shell. No fork deployment or provider configuration was created during this assessment.
 
-## 7. Attribution
+## 7. Phase 6B implementation contract
+
+Implemented locally on 2026-08-04: `GET /customers/:customerId/inbox/drafts` (optional `conversationId`) is protected by `inbox:read` and filters persistence by customer before conversation. Approval remains `inbox:approve`, queues the idempotent worker job, and is exposed to browsers only through the frontend same-origin proxy. UI writes pause on `429` using `Retry-After`; no provider call, external send, deployment, or production smoke is part of this slice.
+
+## 8. Attribution
 
 If components are copied/adapted, retain the upstream MIT license text and document source attribution in the frontend repository.

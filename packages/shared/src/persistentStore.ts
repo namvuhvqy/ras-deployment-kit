@@ -7,6 +7,7 @@ import type {
   ConnectedAccount,
   RasAgentInstance,
   RasBillingPayment,
+  RasCheckoutIntent,
   RasCustomer,
   RasEntitlement,
   RasJob,
@@ -45,6 +46,7 @@ export interface RasPersistentState {
   webhookStatus: StoredWebhookStatus;
   auditLogs: StoredAuditLog[];
   billingPayments: RasBillingPayment[];
+  checkoutIntents: RasCheckoutIntent[];
 }
 
 export interface StoredWebhookEvent {
@@ -95,24 +97,11 @@ export interface RasDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
   state: 'ready' | 'needs_plan';
-  /**
-   * Tenant-scoped aggregate for the dashboard overview. This intentionally
-   * contains counters and a local navigation target only, never provider data.
-   */
   dashboardSummary: {
     renewalState: 'active' | 'past_due' | 'unknown';
-    inbox: {
-      unreadConversations: number;
-      pendingReviewDrafts: number;
-    };
-    channels: {
-      totalSlots: number;
-      activeAccounts: number;
-      needsReconnect: number;
-    };
-    api: {
-      patManagementHref: '/personal-access-tokens';
-    };
+    inbox: { unreadConversations: number; pendingReviewDrafts: number };
+    channels: { totalSlots: number; activeAccounts: number; needsReconnect: number };
+    api: { patManagementHref: '/personal-access-tokens' };
   };
   entitlement: RasEntitlement & {
     /** Backward-compatible plan label for older frontend consumers. */
@@ -266,6 +255,7 @@ export class JsonRasStore {
       webhookStatus: { enabled: true, consecutiveFailures: 0 },
       auditLogs: [],
       billingPayments: [],
+      checkoutIntents: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -290,6 +280,7 @@ export class JsonRasStore {
     state.webhookStatus ??= { enabled: true, consecutiveFailures: 0 };
     state.auditLogs ??= [];
     state.billingPayments ??= [];
+    state.checkoutIntents ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -552,6 +543,43 @@ export class JsonRasStore {
     return customer;
   }
 
+  async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
+    const state = await this.load();
+    const now = new Date().toISOString();
+    const intent: RasCheckoutIntent = { ...input, id: input.id ?? `checkout_${randomBytes(16).toString('hex')}`, status: 'created', createdAtIso: input.createdAtIso ?? now, updatedAtIso: input.updatedAtIso ?? now };
+    state.checkoutIntents.push(intent);
+    await this.write(state);
+    return intent;
+  }
+
+  async getCheckoutIntent(id: string): Promise<RasCheckoutIntent | undefined> {
+    const state = await this.load();
+    return state.checkoutIntents.find((row) => row.id === id);
+  }
+
+  async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
+    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    if (!intent) return { error: 'not_found' };
+    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (intent.status === 'consumed') return { error: 'consumed' };
+    if (intent.paypalOrderId && intent.paypalOrderId !== input.paypalOrderId) return { error: 'already_bound' };
+    if (state.checkoutIntents.some((row) => row.id !== intent.id && row.paypalOrderId === input.paypalOrderId)) return { error: 'paypal_order_bound' };
+    intent.paypalOrderId = input.paypalOrderId; intent.status = 'bound'; intent.boundAtIso ??= now; intent.updatedAtIso = now;
+    await this.write(state); return { intent };
+  }
+
+  async consumeCheckoutIntentAfterCapture(input: { intentId: string; customerId: string; paypalOrderId: string; transactionId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'not_bound' | 'already_consumed' }> {
+    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    if (!intent) return { error: 'not_found' };
+    if (intent.status === 'consumed') return intent.transactionId === input.transactionId ? { intent } : { error: 'already_consumed' };
+    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
+    intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
+    await this.write(state); return { intent };
+  }
+
   async recordBillingPaymentCapture(input: Omit<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'> & Partial<Pick<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'>>): Promise<RasBillingPayment> {
     const state = await this.load();
     const id = input.id ?? `${input.provider}:${input.paypalOrderId}`;
@@ -569,6 +597,11 @@ export class JsonRasStore {
     else state.billingPayments.push(payment);
     await this.write(state);
     return payment;
+  }
+
+  async getBillingPayment(id: string): Promise<RasBillingPayment | undefined> {
+    const state = await this.load();
+    return state.billingPayments.find((row) => row.id === id || row.paypalOrderId === id || row.transactionId === id);
   }
 
   async markBillingPaymentProvisionFailed(id: string, error: string, nowIso: string = new Date().toISOString()): Promise<RasBillingPayment | undefined> {
@@ -823,6 +856,13 @@ export class JsonRasStore {
       .sort((left, right) => Date.parse(left.receivedAtIso) - Date.parse(right.receivedAtIso));
   }
 
+  async listInboxDraftReplies(customerId: string, conversationId?: string): Promise<InboxDraftReply[]> {
+    const state = await this.load();
+    return state.inboxDraftReplies
+      .filter((row) => row.customerId === customerId && (!conversationId || row.conversationId === conversationId))
+      .sort((left, right) => Date.parse(right.createdAtIso) - Date.parse(left.createdAtIso));
+  }
+
   async createInboxDraftReply(input: Omit<InboxDraftReply, 'id' | 'status' | 'sendAttempted' | 'createdAtIso'>): Promise<InboxDraftReply> {
     const state = await this.load();
     const conversation = state.inboxConversations.find((row) => row.customerId === input.customerId && row.id === input.conversationId);
@@ -949,25 +989,26 @@ export class JsonRasStore {
     return updated;
   }
 
-  async enqueueJob(job: RasJob): Promise<RasJob> {
+  async enqueueJobIfAbsent(job: RasJob): Promise<{ inserted: boolean; job: RasJob }> {
     const state = await this.load();
-    if (state.jobs.some((row) => row.id === job.id)) throw new Error(`Duplicate job id: ${job.id}`);
+    const existing = state.jobs.find((row) => row.id === job.id);
+    if (existing) return { inserted: false, job: existing };
     if (job.type === 'publish_post' && !state.socialPosts.some((post) => post.jobId === job.id)) {
       const platform = typeof job.payload.platform === 'string' ? job.payload.platform : job.platform;
       if (!platform) throw new Error(`Publish job missing platform: ${job.id}`);
-      state.socialPosts.push({
-        id: job.id,
-        jobId: job.id,
-        customerId: job.customerId,
-        platform: platform as SocialPost['platform'],
-        status: 'queued',
-        updatedAtIso: new Date().toISOString(),
-      });
+      state.socialPosts.push({ id: job.id, jobId: job.id, customerId: job.customerId, platform: platform as SocialPost['platform'], status: 'queued', updatedAtIso: new Date().toISOString() });
     }
     state.jobs.push(job);
     await this.write(state);
-    return job;
+    return { inserted: true, job };
   }
+
+  async enqueueJob(job: RasJob): Promise<RasJob> {
+    const inserted = await this.enqueueJobIfAbsent(job);
+    if (!inserted.inserted) throw new Error(`Duplicate job id: ${job.id}`);
+    return inserted.job;
+  }
+
 
   async getQueuedJobs(): Promise<RasJob[]> {
     const state = await this.load();

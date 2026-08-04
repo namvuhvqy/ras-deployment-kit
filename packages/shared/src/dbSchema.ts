@@ -1,4 +1,4 @@
-export const RAS_SCHEMA_VERSION = 1;
+export const RAS_SCHEMA_VERSION = 2;
 
 export const createTableStatements = [
   `CREATE TABLE IF NOT EXISTS customers (
@@ -94,6 +94,20 @@ export const createTableStatements = [
     created_at TEXT NOT NULL,
     UNIQUE(source, id)
   )`,
+  `CREATE TABLE IF NOT EXISTS checkout_intents (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    plan TEXT NOT NULL,
+    billing_cycle TEXT NOT NULL,
+    extra_connect_slots INTEGER NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL,
+    paypal_order_id TEXT UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     customer_id TEXT,
@@ -113,6 +127,7 @@ export const createIndexStatements = [
   `CREATE INDEX IF NOT EXISTS idx_job_queue_profile_status ON job_queue(profile_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_webhook_events_profile_created ON webhook_events(profile_id, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_logs_customer_created ON audit_logs(customer_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_checkout_intents_customer_status ON checkout_intents(customer_id, status)`,
 ];
 
 export function renderSqlMigration(): string {
