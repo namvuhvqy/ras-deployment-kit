@@ -125,7 +125,8 @@ function firstNumberField(body: Record<string, unknown>, fields: string[]): numb
 }
 
 const GOOGLE_OAUTH_SCOPE = 'openid email profile';
-const googleOAuthStates = new Map<string, { redirectTo: string; createdAtMs: number }>();
+type GoogleOAuthState = { redirectTo: string; frontendOrigin: string; createdAtMs: number };
+const googleOAuthStates = new Map<string, GoogleOAuthState>();
 
 function publicBaseUrl(req: IncomingMessage): string {
   const proto = firstHeader(req, 'x-forwarded-proto') ?? 'http';
@@ -145,26 +146,41 @@ function safeRedirectPath(value: string | undefined): string {
   return value && value.startsWith('/') && !value.startsWith('//') ? value : '/dashboard';
 }
 
-function frontendOAuthCallbackUrl(token: string, redirectTo: string): string {
-  const callback = new URL('/api/auth/google/callback', frontendBaseUrl());
+function allowedFrontendOrigin(value: string | undefined): string {
+  const canonical = new URL(frontendBaseUrl()).origin;
+  if (!value) return canonical;
+  try {
+    const candidate = new URL(value);
+    if (candidate.protocol !== 'https:' || candidate.pathname !== '/' || candidate.search || candidate.hash) return canonical;
+    if (candidate.origin === canonical) return canonical;
+    return /^https:\/\/landingpage-ban-hang-[a-z0-9-]+-namvuhvqys-projects\.vercel\.app$/.test(candidate.origin)
+      ? candidate.origin
+      : canonical;
+  } catch {
+    return canonical;
+  }
+}
+
+function frontendOAuthCallbackUrl(token: string, redirectTo: string, frontendOrigin: string): string {
+  const callback = new URL('/api/auth/google/callback', frontendOrigin);
   callback.searchParams.set('token', token);
   callback.searchParams.set('redirectTo', safeRedirectPath(redirectTo));
   return callback.toString();
 }
 
-function createOAuthState(redirectTo: string): string {
+function createOAuthState(redirectTo: string, frontendOrigin: string): string {
   const state = `oauth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-  googleOAuthStates.set(state, { redirectTo, createdAtMs: Date.now() });
+  googleOAuthStates.set(state, { redirectTo, frontendOrigin, createdAtMs: Date.now() });
   return state;
 }
 
-function consumeOAuthState(state: string | undefined): { redirectTo: string } | undefined {
+function consumeOAuthState(state: string | undefined): GoogleOAuthState | undefined {
   if (!state) return undefined;
   const stored = googleOAuthStates.get(state);
   if (!stored) return undefined;
   googleOAuthStates.delete(state);
   if (Date.now() - stored.createdAtMs > 10 * 60 * 1000) return undefined;
-  return { redirectTo: stored.redirectTo };
+  return stored;
 }
 
 function hasScope(scopes: string[], requiredScope?: string): boolean {
@@ -451,7 +467,7 @@ const server = createServer(async (req, res) => {
       const dashboard = await store.getDashboardForSession(session.token);
       if (!dashboard) throw new Error('google_session_dashboard_missing');
       res.statusCode = 302;
-      res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo));
+      res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo, state.frontendOrigin));
       res.end();
     } catch (error) {
       const failed = new URL('/login', frontendBaseUrl());
@@ -477,7 +493,8 @@ const server = createServer(async (req, res) => {
       return;
     }
     const redirectTo = safeRedirectPath(url.searchParams.get('redirectTo') ?? undefined);
-    const state = createOAuthState(redirectTo);
+    const frontendOrigin = allowedFrontendOrigin(url.searchParams.get('frontendOrigin') ?? undefined);
+    const state = createOAuthState(redirectTo, frontendOrigin);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', clientId);
     authUrl.searchParams.set('redirect_uri', googleCallbackUrl(req));
@@ -620,111 +637,65 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/billing/payments/captured') {
+  if (req.method === 'POST' && req.url === '/billing/checkout-intents') {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
-    if (!dashboard) {
-      res.statusCode = 401;
-      res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
-      return;
-    }
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
     const body = await readJsonBody(req);
-    const plan = basePlanField(body);
-    const billingCycle = billingCycleField(body);
+    const plan = basePlanField(body); const billingCycle = billingCycleField(body);
     const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
-    const totalAmount = firstNumberField(body, ['total_amount', 'amount', 'totalAmount']);
+    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots)) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); return;
+    }
+    const pricing = RAS_PLAN_PRICES[plan];
+    const amount = (billingCycle === 'yearly' ? pricing.yearlyMonthly * 12 : pricing.monthly) + (billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6);
+    const ttlMinutes = Number.parseInt(process.env.RAS_CHECKOUT_INTENT_TTL_MINUTES ?? '30', 10);
+    const expiresAtIso = new Date(Date.now() + (Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : 30) * 60_000).toISOString();
+    const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
+    res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/checkout-intents/bind-paypal-order') {
+    if (!requireInternalAccess(req)) { endInternalAccessError(res); return; }
+    const body = await readJsonBody(req);
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
+    const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
+    const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
+    if (!intentId || !customerId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_binding' })); return; }
+    const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
+    if (!bound.intent) { res.statusCode = bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${bound.error}` })); return; }
+    res.end(JSON.stringify({ ok: true, intent: bound.intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/payments/captured') {
+    // Only the trusted server relay may report a provider capture. Pricing and tenant
+    // identity are read from an already-bound, durable intent, never browser input.
+    if (!requireInternalAccess(req)) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'internal_payment_relay_required' })); return; }
+    const body = await readJsonBody(req);
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
     const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');
-    const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'status');
-    const currency = (stringField(body, 'currency') ?? 'USD').toUpperCase();
-
-    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots) || totalAmount === undefined || totalAmount < 0 || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' }));
-      return;
-    }
-
-    const planPrice = RAS_PLAN_PRICES[plan];
-    const expectedBase = billingCycle === 'yearly' ? planPrice.yearlyMonthly * 12 : planPrice.monthly;
-    const expectedConnect = billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6;
-    const expectedTotal = expectedBase + expectedConnect;
-    if (totalAmount !== expectedTotal || currency !== 'USD') {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_payment_amount', expectedTotal }));
-      return;
-    }
-
-    const customerId = dashboard.customer.id;
-    const payment = await store.recordBillingPaymentCapture({
-      provider: 'paypal',
-      customerId,
-      paypalOrderId,
-      transactionId,
-      status: 'captured',
-      amount: String(totalAmount),
-      currency,
-      plan,
-      billingCycle,
-      extraConnectSlots,
-      rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body,
-      createdAtIso: new Date().toISOString(),
-      updatedAtIso: new Date().toISOString(),
-    });
-
-    try {
-      const customer = dashboard.customer;
-      const maxConnectedAccounts = 1 + extraConnectSlots;
-      let zernioProfileId = customer.zernioProfileId;
-      if (!zernioProfileId && maxConnectedAccounts > 0) {
-        const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
-        zernioProfileId = profile.zernioProfileId;
-      }
-
-      const entitlement: RasEntitlement = {
-        basePlan: {
-          planId: plan,
-          status: 'active' as const,
-          billingCycle,
-          monthlyPriceUsd: billingCycle === 'yearly' ? planPrice.yearlyMonthly : planPrice.monthly,
-          totalAmountUsd: expectedTotal,
-          vps: { type: 'dedicated' as const, size: planPrice.vpsSize },
-          agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] },
-          aiTokens: { monthlyLimit: planPrice.aiTokenLimit },
-          activatedAtIso: new Date().toISOString(),
-        },
-        connectSlots: {
-          status: 'active' as const,
-          includedSlots: 1,
-          purchasedSlots: extraConnectSlots,
-          trialSlots: 0,
-          totalSlots: maxConnectedAccounts,
-          activeConnectedAccounts: dashboard.customer.activeConnectedAccounts ?? 0,
-        },
-        addOns: [
-          { id: 'zernio-connect', name: 'Zernio Connect', status: 'active' as const, slots: maxConnectedAccounts, priceUsd: expectedConnect },
-        ],
-      };
-      const mapping = await store.upsertCustomerEntitlement({
-        customerId,
-        maxConnectedAccounts,
-        packageStatus: 'active',
-        addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: maxConnectedAccounts > 0 ? 'active' : 'inactive' },
-        zernioProfileId,
-        entitlement,
-      });
-      await store.markBillingPaymentProvisioned(payment.id);
-      res.statusCode = 200;
-      res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: 'provisioned', transactionId }, entitlement: { ...mapping, entitlement } }));
-      return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'provision_failed';
-      const pendingPayment = await store.markBillingPaymentProvisionFailed(payment.id, message);
-      res.statusCode = 202;
-      res.end(JSON.stringify({ ok: false, error: 'provision_pending_retry', payment: pendingPayment }));
-      return;
-    }
+    const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'captureStatus') ?? stringField(body, 'status');
+    if (!intentId || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' })); return; }
+    const intentBefore = await store.getCheckoutIntent(intentId);
+    if (!intentBefore) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+    const consumed = await store.consumeCheckoutIntentAfterCapture({ intentId, customerId: intentBefore.customerId, paypalOrderId, transactionId });
+    if (!consumed.intent) { res.statusCode = consumed.error === 'expired' ? 410 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${consumed.error}` })); return; }
+    const intent = consumed.intent;
+    const customer = (await store.load()).customers.find((row) => row.id === intent.customerId);
+    if (!customer) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' })); return; }
+    const now = new Date().toISOString();
+    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body, createdAtIso: now, updatedAtIso: now });
+    const queued = await store.enqueueJobIfAbsent({ id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now });
+    res.statusCode = 202; res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } })); return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
+    // Retired direct provision endpoint. Paid entitlements are activated only
+    // by a consumed, PayPal-bound checkout intent through the durable outbox.
+    res.statusCode = 410;
+    res.end(JSON.stringify({ ok: false, error: 'payment_capture_required' }));
+    return;
+    /* legacy implementation retained below temporarily for source migration:
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) {
       res.statusCode = 401;
@@ -796,6 +767,85 @@ const server = createServer(async (req, res) => {
     res.statusCode = 200;
     res.end(JSON.stringify({ ok: true, entitlement: { ...mapping, entitlement } }));
     return;
+    */
+  }
+
+  if (req.url?.startsWith('/customers/') && req.url.includes('/connect/facebook/pages')) {
+    const url = new URL(req.url, 'http://localhost');
+    const parts = url.pathname.split('/');
+    const customerId = decodeURIComponent(parts[2] ?? '');
+    const access = await requireCustomerAccess(req, customerId, 'accounts:connect');
+    if (access.status !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
+
+    await refreshZernioAccountsForCustomer(customerId);
+    const mapping = await store.getCustomerMapping(customerId);
+    if (!mapping) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
+      return;
+    }
+    if (mapping.packageStatus !== 'active' || (mapping.addOnStatus.zernio && mapping.addOnStatus.zernio !== 'active')) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ ok: false, error: 'zernio_addon_inactive', entitlement: mapping }));
+      return;
+    }
+    if (mapping.activeConnectedAccounts >= mapping.maxConnectedAccounts) {
+      res.statusCode = 409;
+      res.end(JSON.stringify({ ok: false, error: 'connection_quota_exceeded', entitlement: mapping }));
+      return;
+    }
+    const profileId = mapping.zernioProfileId ?? mapping.zernioProfileIds[0];
+    if (!profileId) {
+      res.statusCode = 409;
+      res.end(JSON.stringify({ ok: false, error: 'zernio_profile_missing' }));
+      return;
+    }
+
+    if (req.method === 'GET') {
+      const tempToken = url.searchParams.get('tempToken');
+      const connectToken = url.searchParams.get('connectToken');
+      if (!tempToken || !connectToken) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ ok: false, error: 'missing_facebook_oauth_tokens' }));
+        return;
+      }
+      const pages = await adapter.listFacebookPages({ profileId, tempToken, connectToken });
+      res.end(JSON.stringify({ ok: true, pages }));
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname.endsWith('/select')) {
+      const body = await readJsonBody(req);
+      const pageId = stringField(body, 'pageId');
+      const tempToken = stringField(body, 'tempToken');
+      const connectToken = stringField(body, 'connectToken');
+      const rawUserProfile = body.userProfile;
+      const userProfile = rawUserProfile && typeof rawUserProfile === 'object' && !Array.isArray(rawUserProfile)
+        ? rawUserProfile as Record<string, unknown>
+        : undefined;
+      if (!pageId || !tempToken || !connectToken || !userProfile) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ ok: false, error: 'missing_facebook_page_selection_fields' }));
+        return;
+      }
+      const result = await adapter.selectFacebookPage({
+        profileId,
+        pageId,
+        tempToken,
+        connectToken,
+        userProfile,
+      });
+      await refreshZernioAccountsForCustomer(customerId);
+      res.end(JSON.stringify({ ok: true, account: result, entitlement: await store.getCustomerMapping(customerId) }));
+      return;
+    }
+
+    res.statusCode = 405;
+    res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' }));
+    return;
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.includes('/connect/')) {
@@ -852,6 +902,30 @@ const server = createServer(async (req, res) => {
     const redirectUrl = url.searchParams.get('redirectUrl') ?? `${firstHeader(req, 'origin') ?? 'https://runagentsys.com'}/dashboard`;
     const authUrl = await adapter.getConnectUrl({ profileId, platform, redirectUrl });
     res.end(JSON.stringify({ ok: true, authUrl, profileId, platform, entitlement: await store.getCustomerMapping(customerId) }));
+    return;
+  }
+
+  if (req.method === 'DELETE' && req.url?.startsWith('/customers/') && req.url.includes('/connections/')) {
+    const url = new URL(req.url, 'http://localhost');
+    const parts = url.pathname.split('/');
+    const customerId = decodeURIComponent(parts[2] ?? '');
+    const accountId = decodeURIComponent(parts[4] ?? '');
+    const access = await requireCustomerAccess(req, customerId, 'accounts:connect');
+    if (access.status !== 'ok') {
+      endCustomerAccessError(res, access);
+      return;
+    }
+    const account = await store.getConnectedAccount(accountId);
+    if (!account || account.customerId !== customerId) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'connected_account_not_found' }));
+      return;
+    }
+    if (account.status !== 'disconnected') {
+      await adapter.disconnectAccount(account.zernioAccountId);
+      await store.upsertConnectedAccount({ ...account, status: 'disconnected', lastVerifiedAtIso: new Date().toISOString() });
+    }
+    res.end(JSON.stringify({ ok: true, account: { id: account.id, platform: account.platform, status: 'disconnected' } }));
     return;
   }
 
@@ -1120,6 +1194,18 @@ const server = createServer(async (req, res) => {
         },
       }),
     );
+    return;
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.split('?')[0].endsWith('/inbox/drafts')) {
+    const [, , customerId] = req.url.split('?')[0].split('/');
+    const decodedCustomerId = decodeURIComponent(customerId);
+    const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    const url = new URL(req.url, 'http://ras.local');
+    const conversationId = url.searchParams.get('conversationId') || undefined;
+    const drafts = await store.listInboxDraftReplies(decodedCustomerId, conversationId);
+    res.end(JSON.stringify({ ok: true, customerId: decodedCustomerId, mode: 'draft_only', drafts }));
     return;
   }
 

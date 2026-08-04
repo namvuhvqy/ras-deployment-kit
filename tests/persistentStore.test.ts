@@ -14,8 +14,8 @@ test('JsonRasStore migrates an empty store with current schema metadata', async 
     const state = JSON.parse(await readFile(path, 'utf8'));
 
     assert.equal(result.created, true);
-    assert.equal(result.previousVersion, 1);
-    assert.equal(result.currentVersion, 1);
+    assert.equal(result.previousVersion, 2);
+    assert.equal(result.currentVersion, 2);
     assert.match(result.sql, /CREATE TABLE IF NOT EXISTS customers/);
     assert.deepEqual(state.customers, []);
     assert.deepEqual(state.jobs, []);
@@ -198,6 +198,20 @@ test('JsonRasStore persists PayPal capture before provisioning and keeps pending
   }
 });
 
+test('JsonRasStore dedupes a payment provisioning outbox job by payment id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const job = { id: 'provision_payment_paypal:ORDER-1', customerId: 'cust_1', profileId: '', type: 'provision_entitlement' as const, priority: 'P0' as const, status: 'queued' as const, payload: { paymentId: 'paypal:ORDER-1' }, retryCount: 0, createdAtIso: '2026-08-02T00:00:00.000Z' };
+    assert.equal((await store.enqueueJobIfAbsent(job)).inserted, true);
+    assert.equal((await store.enqueueJobIfAbsent(job)).inserted, false);
+    assert.equal((await store.load()).jobs.length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('JsonRasStore summarizes sandbox and required RAS agent lifecycle blockers', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {
@@ -247,4 +261,19 @@ test('JsonRasStore summarizes sandbox and required RAS agent lifecycle blockers'
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+
+test('JsonRasStore checkout intents bind one PayPal order and consume exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const intent = await store.createCheckoutIntent({ customerId: 'cust_a', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, amount: '25', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_b', paypalOrderId: 'ORDER-1' })).error, 'not_found');
+    assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1' })).intent?.status, 'bound');
+    assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-2' })).error, 'already_bound');
+    assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-1' })).intent?.status, 'consumed');
+    assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-2' })).error, 'already_consumed');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

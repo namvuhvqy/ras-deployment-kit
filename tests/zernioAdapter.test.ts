@@ -50,6 +50,68 @@ test('createProfilePayload does not include undocumented mapping fields', () => 
   assert.deepEqual(Object.keys(createProfilePayload({ customerId: 'cust_1', name: 'Shop A', email: 'owner@example.test' })).sort(), ['description', 'name']);
 });
 
+test('LiveZernioAdapter requests Facebook headless mode for branded page selection', async () => {
+  let requestedUrl = '';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return new Response(JSON.stringify({ authUrl: 'https://www.facebook.com/dialog/oauth' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const adapter = new LiveZernioAdapter({ apiKey: 'test', baseUrl: 'https://zernio.test/api/v1' });
+    await adapter.getConnectUrl({ profileId: 'profile_1', platform: 'facebook', redirectUrl: 'https://app.test/callback' });
+    const url = new URL(requestedUrl);
+    assert.equal(url.searchParams.get('profileId'), 'profile_1');
+    assert.equal(url.searchParams.get('redirect_url'), 'https://app.test/callback');
+    assert.equal(url.searchParams.get('headless'), 'true');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('LiveZernioAdapter lists Facebook pages without exposing page access tokens', async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify({ pages: [{ id: 'page_1', name: 'Page One', username: 'page.one', picture: { data: { url: 'https://images.example.test/page-one.jpg' } }, access_token: 'secret-page-token', category: 'Brand', tasks: ['MANAGE'] }] }), { status: 200 });
+  };
+  try {
+    const adapter = new LiveZernioAdapter({ apiKey: 'test-key', baseUrl: 'https://example.test/api/v1' });
+    const pages = await adapter.listFacebookPages({ profileId: 'profile_1', tempToken: 'temporary-user-token', connectToken: 'short-lived-connect-token' });
+    assert.deepEqual(pages, [{ id: 'page_1', name: 'Page One', username: 'page.one', category: 'Brand', avatarUrl: 'https://images.example.test/page-one.jpg', tasks: ['MANAGE'] }]);
+    assert.equal(calls[0].url, 'https://example.test/api/v1/connect/facebook/select-page?profileId=profile_1&tempToken=temporary-user-token');
+    assert.equal((calls[0].init.headers as Record<string, string>)['x-connect-token'], 'short-lived-connect-token');
+    assert.doesNotMatch(JSON.stringify(pages), /secret-page-token/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('LiveZernioAdapter selects exactly one Facebook page using the documented payload', async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    return new Response(JSON.stringify({ account: { accountId: 'account_1', platform: 'facebook', username: 'page.one', displayName: 'Page One', isActive: true, selectedPageName: 'Page One' } }), { status: 200 });
+  };
+  try {
+    const adapter = new LiveZernioAdapter({ apiKey: 'test-key', baseUrl: 'https://example.test/api/v1' });
+    const result = await adapter.selectFacebookPage({
+      profileId: 'profile_1', pageId: 'page_1', tempToken: 'temporary-user-token', connectToken: 'short-lived-connect-token',
+      userProfile: { id: 'user_1', name: 'Ngoc Hoang' },
+      redirectUrl: 'https://ras.test/connect/callback?platform=facebook',
+    });
+    assert.deepEqual(result, { accountId: 'account_1', platform: 'facebook', username: 'page.one', displayName: 'Page One', isActive: true, selectedPageName: 'Page One' });
+    assert.equal(calls[0].url, 'https://example.test/api/v1/connect/facebook/select-page');
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal((calls[0].init.headers as Record<string, string>)['x-connect-token'], 'short-lived-connect-token');
+    assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
+      profileId: 'profile_1', pageId: 'page_1', tempToken: 'temporary-user-token',
+      userProfile: { id: 'user_1', name: 'Ngoc Hoang' },
+      redirect_url: 'https://ras.test/connect/callback?platform=facebook',
+    });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('LiveZernioAdapter createPost sends Zernio payload and maps response', async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const originalFetch = globalThis.fetch;

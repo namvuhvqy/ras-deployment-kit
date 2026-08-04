@@ -12,6 +12,33 @@ export interface ConnectUrlInput {
   redirectUrl: string;
 }
 
+export interface FacebookPageOption {
+  id: string;
+  name: string;
+  username?: string;
+  category?: string;
+  avatarUrl?: string;
+  tasks: string[];
+}
+
+export interface FacebookPageSelectionInput {
+  profileId: string;
+  pageId: string;
+  tempToken: string;
+  connectToken: string;
+  userProfile: Record<string, unknown>;
+  redirectUrl?: string;
+}
+
+export interface FacebookPageSelectionResult {
+  accountId: string;
+  platform: 'facebook';
+  username?: string;
+  displayName?: string;
+  isActive?: boolean;
+  selectedPageName?: string;
+}
+
 export interface CreatePostInput {
   accountId: string;
   platform: Platform;
@@ -65,8 +92,11 @@ export interface SendInboxMessageResult {
 export interface ZernioAdapter {
   createProfile(input: CreateProfileInput): Promise<RasCustomer>;
   getConnectUrl(input: ConnectUrlInput): Promise<string>;
+  listFacebookPages(input: { profileId: string; tempToken: string; connectToken: string }): Promise<FacebookPageOption[]>;
+  selectFacebookPage(input: FacebookPageSelectionInput): Promise<FacebookPageSelectionResult>;
   listAccounts(profileId: string): Promise<ConnectedAccount[]>;
   getAccount(accountId: string): Promise<ConnectedAccount>;
+  disconnectAccount(accountId: string): Promise<void>;
   createPost(input: CreatePostInput): Promise<CreatePostResult>;
   sendInboxMessage(input: SendInboxMessageInput): Promise<SendInboxMessageResult>;
 }
@@ -97,6 +127,14 @@ export class DryRunZernioAdapter implements ZernioAdapter {
     return `https://zernio.local/connect/${input.platform}?${params.toString()}`;
   }
 
+  async listFacebookPages(): Promise<FacebookPageOption[]> {
+    return [];
+  }
+
+  async selectFacebookPage(): Promise<FacebookPageSelectionResult> {
+    throw new Error('Facebook page selection is unavailable in dry-run mode');
+  }
+
   async listAccounts(profileId: string): Promise<ConnectedAccount[]> {
     return this.accountsByProfile.get(profileId) ?? [];
   }
@@ -107,6 +145,12 @@ export class DryRunZernioAdapter implements ZernioAdapter {
       if (account) return account;
     }
     throw new Error(`Dry-run Zernio account not found: ${accountId}`);
+  }
+
+  async disconnectAccount(accountId: string): Promise<void> {
+    for (const [profileId, accounts] of this.accountsByProfile) {
+      this.accountsByProfile.set(profileId, accounts.map((account) => account.zernioAccountId === accountId ? { ...account, status: 'disconnected' } : account));
+    }
   }
 
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
@@ -176,6 +220,45 @@ export class LiveZernioAdapter implements ZernioAdapter {
     return stringFrom(response, ['authUrl', 'url', 'connectUrl']);
   }
 
+  async listFacebookPages(input: { profileId: string; tempToken: string; connectToken: string }): Promise<FacebookPageOption[]> {
+    const params = new URLSearchParams({ profileId: input.profileId, tempToken: input.tempToken });
+    const response = await this.request<Record<string, unknown>>(`/connect/facebook/select-page?${params.toString()}`, { connectToken: input.connectToken });
+    return arrayFrom(response, ['pages', 'data', 'items']).map((row) => {
+      const page = asRecord(row);
+      return {
+        id: stringFrom(page, ['id']),
+        name: stringFrom(page, ['name']),
+        username: optionalStringFrom(page, ['username']),
+        category: optionalStringFrom(page, ['category']),
+        avatarUrl: facebookPageAvatarUrl(page),
+        tasks: arrayFrom(page, ['tasks']).map(String),
+      };
+    });
+  }
+
+  async selectFacebookPage(input: FacebookPageSelectionInput): Promise<FacebookPageSelectionResult> {
+    const response = await this.request<Record<string, unknown>>('/connect/facebook/select-page', {
+      method: 'POST',
+      body: {
+        profileId: input.profileId,
+        pageId: input.pageId,
+        tempToken: input.tempToken,
+        userProfile: input.userProfile,
+        ...(input.redirectUrl ? { redirect_url: input.redirectUrl } : {}),
+      },
+      connectToken: input.connectToken,
+    });
+    const account = unwrapRecord(response, ['account', 'data']);
+    return {
+      accountId: stringFrom(account, ['accountId', '_id', 'id']),
+      platform: 'facebook',
+      username: optionalStringFrom(account, ['username']),
+      displayName: optionalStringFrom(account, ['displayName']),
+      isActive: typeof account.isActive === 'boolean' ? account.isActive : undefined,
+      selectedPageName: optionalStringFrom(account, ['selectedPageName']),
+    };
+  }
+
   async listAccounts(profileId: string): Promise<ConnectedAccount[]> {
     const params = new URLSearchParams({ profileId });
     const response = await this.request<unknown>(`/accounts?${params.toString()}`);
@@ -203,6 +286,10 @@ export class LiveZernioAdapter implements ZernioAdapter {
     return connectedAccountFromRecord(unwrapRecord(response, ['account', 'data']), accountId);
   }
 
+  async disconnectAccount(accountId: string): Promise<void> {
+    await this.request(`/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
+  }
+
   async createPost(input: CreatePostInput): Promise<CreatePostResult> {
     const response = await this.request<Record<string, unknown>>('/posts', {
       method: 'POST',
@@ -227,7 +314,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
     return { providerMessageId: stringFrom(message, ['platformMessageId', '_id', 'id', 'messageId']) };
   }
 
-  private async request<T>(path: string, init: { method?: string; body?: unknown; requestId?: string } = {}): Promise<T> {
+  private async request<T>(path: string, init: { method?: string; body?: unknown; requestId?: string; connectToken?: string } = {}): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -238,6 +325,7 @@ export class LiveZernioAdapter implements ZernioAdapter {
           'content-type': 'application/json',
           accept: 'application/json',
           ...(init.requestId ? { 'x-request-id': init.requestId } : {}),
+          ...(init.connectToken ? { 'x-connect-token': init.connectToken } : {}),
         },
         body: init.body === undefined ? undefined : JSON.stringify(init.body),
         signal: controller.signal,
@@ -301,6 +389,14 @@ function optionalStringFrom(record: Record<string, unknown>, keys: string[]): st
     if (typeof value === 'number') return String(value);
   }
   return undefined;
+}
+
+function facebookPageAvatarUrl(page: Record<string, unknown>): string | undefined {
+  const direct = optionalStringFrom(page, ['picture', 'profilePicture', 'avatarUrl', 'avatar']);
+  if (direct) return direct;
+  const picture = asRecord(page.picture);
+  const data = asRecord(picture.data);
+  return optionalStringFrom(data, ['url']) ?? optionalStringFrom(picture, ['url']);
 }
 
 function arrayFrom(value: unknown, keys?: string[]): unknown[] {
