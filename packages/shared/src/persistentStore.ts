@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
 import type {
   AddOnEntitlement,
@@ -228,7 +229,17 @@ function normalizeEntitlement(customer: RasCustomer, activeConnectedAccounts: nu
 }
 
 export class JsonRasStore {
-  constructor(private readonly path: string) {}
+  private static readonly lockContext = new AsyncLocalStorage<Set<string>>();
+
+  constructor(private readonly path: string) {
+    return new Proxy(this, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== 'function' || property === 'acquireLock' || property === 'withLock') return value;
+        return (...args: unknown[]) => target.withLock(() => Reflect.apply(value, receiver, args));
+      },
+    });
+  }
 
   async migrate(): Promise<MigrationResult> {
     const existing = await this.readIfExists();
@@ -769,19 +780,12 @@ export class JsonRasStore {
     publishedAtIso?: string;
     errorMessage?: string;
   }): Promise<SocialPost> {
-    const state = await this.load();
-    const index = state.socialPosts.findIndex((post) => post.zernioPostId === input.postId || post.platformPostId === input.postId || post.id === input.postId);
-    if (index < 0) throw new Error(`Social post not found: ${input.postId}`);
-    const updated: SocialPost = {
-      ...state.socialPosts[index],
-      status: input.status,
-      ...(input.publishedAtIso ? { publishedAtIso: input.publishedAtIso } : {}),
-      ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
-      updatedAtIso: new Date().toISOString(),
-    };
-    state.socialPosts[index] = updated;
-    await this.write(state);
-    return updated;
+    return this.mutate((state) => {
+      const index = state.socialPosts.findIndex((post) => post.zernioPostId === input.postId || post.platformPostId === input.postId || post.id === input.postId);
+      if (index < 0) throw new Error(`Social post not found: ${input.postId}`);
+      const updated: SocialPost = { ...state.socialPosts[index], status: input.status, ...(input.publishedAtIso ? { publishedAtIso: input.publishedAtIso } : {}), ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}), updatedAtIso: new Date().toISOString() };
+      state.socialPosts[index] = updated; return updated;
+    });
   }
 
   async upsertSocialPost(input: SocialPost): Promise<SocialPost> {
@@ -793,14 +797,32 @@ export class JsonRasStore {
     return index < 0 ? input : state.socialPosts[index];
   }
 
-  async attachZernioPostId(jobId: string, zernioPostId: string): Promise<SocialPost> {
+  async createPostAndJobIdempotently(input: { post: SocialPost; job: RasJob }): Promise<{ created: boolean; conflict: boolean; post: SocialPost; job: RasJob }> {
+    return this.mutate((state) => {
+      const existing = state.socialPosts.find((row) => row.customerId === input.post.customerId && row.idempotencyKey === input.post.idempotencyKey);
+      if (existing) {
+        const job = state.jobs.find((row) => row.id === existing.jobId);
+        if (!job) throw new Error(`Social post job missing: ${existing.jobId}`);
+        return { created: false, conflict: existing.idempotencyPayloadHash !== input.post.idempotencyPayloadHash, post: existing, job };
+      }
+      state.socialPosts.push(input.post); state.jobs.push(input.job);
+      return { created: true, conflict: false, post: input.post, job: input.job };
+    });
+  }
+
+  async listSocialPosts(customerId: string): Promise<SocialPost[]> {
     const state = await this.load();
-    const index = state.socialPosts.findIndex((post) => post.jobId === jobId);
-    if (index < 0) throw new Error(`Social post not found for job: ${jobId}`);
-    const updated = { ...state.socialPosts[index], zernioPostId, updatedAtIso: new Date().toISOString() };
-    state.socialPosts[index] = updated;
-    await this.write(state);
-    return updated;
+    return state.socialPosts.filter((row) => row.customerId === customerId)
+      .sort((left, right) => Date.parse(right.createdAtIso ?? right.updatedAtIso) - Date.parse(left.createdAtIso ?? left.updatedAtIso));
+  }
+
+  async attachZernioPostId(jobId: string, zernioPostId: string): Promise<SocialPost> {
+    return this.mutate((state) => {
+      const index = state.socialPosts.findIndex((post) => post.jobId === jobId);
+      if (index < 0) throw new Error(`Social post not found for job: ${jobId}`);
+      const updated = { ...state.socialPosts[index], zernioPostId, updatedAtIso: new Date().toISOString() };
+      state.socialPosts[index] = updated; return updated;
+    });
   }
 
   async recordInboxMessage(input: Omit<InboxMessage, 'createdAtIso'> & {
@@ -1010,12 +1032,27 @@ export class JsonRasStore {
   }
 
 
-  async getQueuedJobs(): Promise<RasJob[]> {
+  async getQueuedJobs(claimLeaseMs: number = 60_000): Promise<RasJob[]> {
     const state = await this.load();
     const now = Date.now();
     return state.jobs.filter(
-      (job) => job.status === 'queued' && (!job.runAfterIso || Date.parse(job.runAfterIso) <= now),
+      (job) => (job.status === 'queued' && (!job.runAfterIso || Date.parse(job.runAfterIso) <= now)) ||
+        (job.status === 'processing' && processingLeaseExpired(job, now, claimLeaseMs)),
     );
+  }
+
+  async claimQueuedJob(jobId: string, claimToken: string = randomBytes(24).toString('hex'), claimLeaseMs: number = 60_000, nowIso: string = new Date().toISOString()): Promise<RasJob | undefined> {
+    return this.mutate((state) => {
+      const index = state.jobs.findIndex((job) => job.id === jobId);
+      if (index < 0) return undefined;
+      const job = state.jobs[index]; const now = Date.parse(nowIso);
+      const queuedDue = job.status === 'queued' && (!job.runAfterIso || Date.parse(job.runAfterIso) <= now);
+      const processingExpired = job.status === 'processing' && processingLeaseExpired(job, now, claimLeaseMs);
+      if (!queuedDue && !processingExpired) return undefined;
+      const claimed = { ...job, status: 'processing' as const, processingStartedAtIso: nowIso, claimToken, claimLeaseExpiresAtIso: new Date(now + claimLeaseMs).toISOString(), lastError: undefined };
+      state.jobs[index] = claimed;
+      return claimed;
+    });
   }
 
   async markJobProcessing(jobId: string): Promise<RasJob> {
@@ -1027,34 +1064,19 @@ export class JsonRasStore {
     }));
   }
 
-  async completeJob(jobId: string, result: Record<string, unknown>): Promise<RasJob> {
-    return this.updateJob(jobId, (job) => ({
-      ...job,
-      status: 'completed',
-      completedAtIso: new Date().toISOString(),
-      result,
-      lastError: undefined,
-    }));
+  async completeJob(jobId: string, result: Record<string, unknown>, claimToken?: string): Promise<RasJob | undefined> {
+    const updater = (job: RasJob): RasJob => ({ ...job, status: 'completed', completedAtIso: new Date().toISOString(), result, lastError: undefined });
+    return claimToken ? this.updateClaimedJob(jobId, claimToken, updater) : this.updateJob(jobId, updater);
   }
 
-  async requeueJob(jobId: string, lastError: string, runAfterIso: string): Promise<RasJob> {
-    return this.updateJob(jobId, (job) => ({
-      ...job,
-      status: 'queued',
-      retryCount: job.retryCount + 1,
-      runAfterIso,
-      lastError,
-    }));
+  async requeueJob(jobId: string, lastError: string, runAfterIso: string, claimToken?: string): Promise<RasJob | undefined> {
+    const updater = (job: RasJob): RasJob => ({ ...job, status: 'queued', retryCount: job.retryCount + 1, runAfterIso, lastError, claimToken: undefined, claimLeaseExpiresAtIso: undefined });
+    return claimToken ? this.updateClaimedJob(jobId, claimToken, updater) : this.updateJob(jobId, updater);
   }
 
-  async failJob(jobId: string, lastError: string): Promise<RasJob> {
-    return this.updateJob(jobId, (job) => ({
-      ...job,
-      status: 'failed',
-      retryCount: job.retryCount + 1,
-      failedAtIso: new Date().toISOString(),
-      lastError,
-    }));
+  async failJob(jobId: string, lastError: string, claimToken?: string): Promise<RasJob | undefined> {
+    const updater = (job: RasJob): RasJob => ({ ...job, status: 'failed', retryCount: job.retryCount + 1, failedAtIso: new Date().toISOString(), lastError });
+    return claimToken ? this.updateClaimedJob(jobId, claimToken, updater) : this.updateJob(jobId, updater);
   }
 
   async recordWebhookEvent(event: StoredWebhookEvent): Promise<{ inserted: boolean; event: StoredWebhookEvent }> {
@@ -1105,10 +1127,7 @@ export class JsonRasStore {
   }
 
   async appendAuditLog(log: StoredAuditLog): Promise<StoredAuditLog> {
-    const state = await this.load();
-    state.auditLogs.push(log);
-    await this.write(state);
-    return log;
+    return this.mutate((state) => { state.auditLogs.push(log); return log; });
   }
 
   private async createEmpty(): Promise<RasPersistentState> {
@@ -1117,13 +1136,73 @@ export class JsonRasStore {
   }
 
   private async updateJob(jobId: string, updater: (job: RasJob) => RasJob): Promise<RasJob> {
-    const state = await this.load();
-    const index = state.jobs.findIndex((job) => job.id === jobId);
-    if (index < 0) throw new Error(`Job not found: ${jobId}`);
-    const updated = updater(state.jobs[index]);
-    state.jobs[index] = updated;
-    await this.write(state);
-    return updated;
+    return this.mutate((state) => {
+      const index = state.jobs.findIndex((job) => job.id === jobId);
+      if (index < 0) throw new Error(`Job not found: ${jobId}`);
+      const updated = updater(state.jobs[index]); state.jobs[index] = updated; return updated;
+    });
+  }
+
+  private async updateClaimedJob(jobId: string, claimToken: string, updater: (job: RasJob) => RasJob): Promise<RasJob | undefined> {
+    return this.mutate((state) => {
+      const index = state.jobs.findIndex((job) => job.id === jobId);
+      if (index < 0 || state.jobs[index].status !== 'processing' || state.jobs[index].claimToken !== claimToken) return undefined;
+      const updated = updater(state.jobs[index]); state.jobs[index] = updated; return updated;
+    });
+  }
+
+  private async mutate<T>(mutation: (state: RasPersistentState) => T | Promise<T>): Promise<T> {
+    return this.withLock(async () => {
+      const state = (await this.readIfExists()) ?? await this.emptyState();
+      const result = await mutation(state); await this.write(state); return result;
+    });
+  }
+
+  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    const active = JsonRasStore.lockContext.getStore();
+    if (active?.has(this.path)) return operation();
+    const release = await this.acquireLock();
+    const locks = new Set(active); locks.add(this.path);
+    try { return await JsonRasStore.lockContext.run(locks, operation); }
+    finally { await release(); }
+  }
+
+  private async acquireLock(): Promise<() => Promise<void>> {
+    const lockPath = `${this.path}.lock`; const ownerPath = join(lockPath, 'owner.json'); await mkdir(dirname(this.path), { recursive: true }); const started = Date.now();
+    const token = randomBytes(24).toString('hex');
+    while (true) {
+      try {
+        await mkdir(lockPath); await writeFile(ownerPath, JSON.stringify({ token, pid: process.pid, acquiredAt: Date.now(), heartbeat: Date.now() }), { flag: 'wx' });
+        return async () => {
+          try { const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { token?: string }; if (owner.token === token) await rm(lockPath, { recursive: true }); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        try {
+          const raw = await readFile(ownerPath, 'utf8'); const owner = JSON.parse(raw) as { pid?: number; heartbeat?: number; acquiredAt?: number };
+          const stale = Date.now() - (owner.heartbeat ?? owner.acquiredAt ?? Date.now()) > 60_000;
+          let localAlive = false;
+          if (owner.pid) { try { process.kill(owner.pid, 0); localAlive = true; } catch (pidError) { if ((pidError as NodeJS.ErrnoException).code === 'EPERM') localAlive = true; } }
+          if (stale && !localAlive && raw === await readFile(ownerPath, 'utf8')) { await rm(lockPath, { recursive: true }); continue; }
+        } catch {
+          try {
+            const identity = await stat(lockPath);
+            if (Date.now() - identity.mtimeMs > 1_000) {
+              const current = await stat(lockPath);
+              if (current.dev === identity.dev && current.ino === identity.ino && current.mtimeMs === identity.mtimeMs) { await rm(lockPath, { recursive: true }); continue; }
+            }
+          } catch { /* A concurrent owner changed or removed it; retry normally. */ }
+        }
+        if (Date.now() - started >= 10_000) throw new Error(`Timed out acquiring store lock: ${lockPath}`);
+        await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
+      }
+    }
+  }
+
+  private async emptyState(): Promise<RasPersistentState> {
+    const now = new Date().toISOString();
+    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [] };
   }
 
   private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {
@@ -1144,8 +1223,17 @@ export class JsonRasStore {
 
   private async write(state: RasPersistentState): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
-    await writeFile(this.path, `${JSON.stringify(state, null, 2)}\n`);
+    const temporary = join(dirname(this.path), `.${basename(this.path)}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
+    try { await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`); await rename(temporary, this.path); }
+    finally { await rm(temporary, { force: true }); }
   }
+}
+
+function processingLeaseExpired(job: RasJob, nowMs: number, leaseMs: number): boolean {
+  const explicit = job.claimLeaseExpiresAtIso ? Date.parse(job.claimLeaseExpiresAtIso) : Number.NaN;
+  if (Number.isFinite(explicit)) return explicit <= nowMs;
+  const baseline = Date.parse(job.processingStartedAtIso ?? job.createdAtIso);
+  return Number.isFinite(baseline) && baseline + leaseMs <= nowMs;
 }
 
 function hashPat(token: string): string {
