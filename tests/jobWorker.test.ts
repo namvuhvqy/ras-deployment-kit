@@ -127,9 +127,21 @@ test('RasJobWorker forwards safe draft flag into publish payload', async () => {
     assert.equal(seenRequestId, 'job_draft');
     assert.equal(job.result?.status, 'draft');
     assert.equal((await store.load()).socialPosts[0]?.zernioPostId, 'draft_1');
+    assert.equal((await store.load()).socialPosts[0]?.status, 'draft');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('dry-run publish preserves post status, completes job, and attaches no fake provider id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-dry-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json')); await store.migrate(); const job = makePublishJob('job_dry', 'profile_a', 'P1');
+    job.payload = { ...job.payload, postId: 'job_dry', scheduleAtIso: '2026-09-01T00:00:00.000Z' }; await store.enqueueJob(job);
+    const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: true });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 }); const state = await store.load();
+    assert.equal(state.jobs[0]?.status, 'completed'); assert.equal(state.socialPosts[0]?.status, 'queued'); assert.equal(state.socialPosts[0]?.zernioPostId, undefined); assert.equal(state.jobs[0]?.result?.status, undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('RasJobWorker requeues transient failures before failing permanently', async () => {
@@ -157,6 +169,7 @@ test('RasJobWorker requeues transient failures before failing permanently', asyn
     assert.equal(job.retryCount, 1);
     assert.equal(job.lastError, 'zernio 429');
     assert.ok(job.runAfterIso);
+    assert.equal((await store.load()).socialPosts[0]?.status, 'queued');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -186,6 +199,8 @@ test('RasJobWorker fails fast for permanent Zernio 400 validation errors', async
     assert.equal(job.retryCount, 1);
     assert.equal(job.lastError, 'Zernio API 400 for /posts');
     assert.equal(job.runAfterIso, undefined);
+    assert.equal((await store.load()).socialPosts[0]?.status, 'failed');
+    assert.equal((await store.load()).socialPosts[0]?.errorMessage, 'Zernio API 400 for /posts');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -332,6 +347,33 @@ test('RasJobWorker verifies an account-connected webhook from the profile list w
     const state = await store.load();
     assert.equal(state.connectedAccounts[0]?.status, 'connected');
     assert.equal(state.jobs[0]?.result?.verificationSource, 'profile_list_fallback');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('two workers sharing a store atomically claim a queued job exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-claim-'));
+  try {
+    const path = join(dir, 'ras-store.json');
+    const firstStore = new JsonRasStore(path); const secondStore = new JsonRasStore(path);
+    await firstStore.migrate(); await firstStore.enqueueJob(makePublishJob('job_once', 'profile_a', 'P1'));
+    let calls = 0;
+    const adapter = { ...noopAdapter, async createPost() { calls += 1; await new Promise((resolve) => setTimeout(resolve, 25)); return { zernioPostId: 'once', status: 'queued' as const }; } } satisfies ZernioAdapter;
+    const options = { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false };
+    const results = await Promise.all([new RasJobWorker(firstStore, adapter, options).runOnce(), new RasJobWorker(secondStore, adapter, options).runOnce()]);
+    assert.equal(calls, 1);
+    assert.equal(results.reduce((sum, result) => sum + result.processed, 0), 1);
+    assert.equal((await firstStore.load()).jobs[0]?.status, 'completed');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('RasJobWorker reclaims and completes a stale processing job', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-stale-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json')); await store.migrate();
+    await store.enqueueJob({ ...makePublishJob('stale_job', 'profile_a', 'P1'), status: 'processing', processingStartedAtIso: '2020-01-01T00:00:00.000Z', claimToken: 'dead' });
+    let calls = 0; const adapter = { ...noopAdapter, async createPost() { calls += 1; return { zernioPostId: 'reclaimed', status: 'queued' as const }; } } satisfies ZernioAdapter;
+    const result = await new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false, claimLeaseMs: 1_000 }).runOnce();
+    assert.deepEqual(result, { processed: 1, completed: 1, failed: 0, requeued: 0 }); assert.equal(calls, 1); assert.equal((await store.load()).jobs[0]?.status, 'completed');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

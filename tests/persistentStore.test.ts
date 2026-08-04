@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 
 test('JsonRasStore migrates an empty store with current schema metadata', async () => {
@@ -22,6 +23,74 @@ test('JsonRasStore migrates an empty store with current schema metadata', async 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('two store instances preserve concurrent schedule and audit mutations', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-lock-'));
+  try {
+    const path = join(dir, 'ras-store.json'); const api = new JsonRasStore(path); const worker = new JsonRasStore(path);
+    await api.migrate(); const now = new Date().toISOString();
+    const post = { id: 'post_1', jobId: 'job_1', customerId: 'cust_1', platform: 'facebook' as const, status: 'scheduled' as const, idempotencyKey: 'same', idempotencyPayloadHash: 'hash', createdAtIso: now, updatedAtIso: now };
+    const job = { id: 'job_1', customerId: 'cust_1', profileId: 'profile_1', type: 'publish_post' as const, priority: 'P2' as const, status: 'queued' as const, retryCount: 0, payload: { postId: 'post_1' }, createdAtIso: now };
+    await Promise.all([api.createPostAndJobIdempotently({ post, job }), worker.appendAuditLog({ id: 'audit_1', action: 'schedule.observed', targetType: 'post', metadata: {}, createdAtIso: now })]);
+    await Promise.all([worker.markJobProcessing('job_1'), api.attachZernioPostId('job_1', 'zernio_1')]);
+    await Promise.all([worker.completeJob('job_1', { status: 'scheduled' }), api.updateSocialPostStatus({ postId: 'post_1', status: 'scheduled' })]);
+    const state = await api.load();
+    assert.equal(state.socialPosts[0]?.zernioPostId, 'zernio_1'); assert.equal(state.jobs[0]?.status, 'completed'); assert.equal(state.auditLogs.length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('same key concurrent creates across store instances yield one post and job', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-lock-'));
+  try {
+    const path = join(dir, 'ras-store.json'); const a = new JsonRasStore(path); const b = new JsonRasStore(path); await a.migrate(); const now = new Date().toISOString();
+    const make = (suffix: string) => ({ post: { id: `post_${suffix}`, jobId: `job_${suffix}`, customerId: 'cust_1', platform: 'facebook' as const, status: 'scheduled' as const, idempotencyKey: 'same', idempotencyPayloadHash: 'hash', createdAtIso: now, updatedAtIso: now }, job: { id: `job_${suffix}`, customerId: 'cust_1', profileId: 'profile_1', type: 'publish_post' as const, priority: 'P2' as const, status: 'queued' as const, retryCount: 0, payload: {}, createdAtIso: now } });
+    const results = await Promise.all([a.createPostAndJobIdempotently(make('a')), b.createPostAndJobIdempotently(make('b'))]); const state = await a.load();
+    assert.equal(results.filter((result) => result.created).length, 1); assert.equal(state.socialPosts.length, 1); assert.equal(state.jobs.length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+for (const owner of [undefined, '{malformed']) {
+  test(`store recovers an aged orphan lock with ${owner === undefined ? 'no' : 'malformed'} owner`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ras-store-orphan-lock-'));
+    try {
+      const path = join(dir, 'ras-store.json'); const store = new JsonRasStore(path); await store.migrate();
+      const lockPath = `${path}.lock`; await mkdir(lockPath);
+      if (owner !== undefined) await writeFile(join(lockPath, 'owner.json'), owner);
+      const old = new Date(Date.now() - 2_000); await utimes(lockPath, old, old);
+      await store.appendAuditLog({ id: 'after_orphan', action: 'recovered', targetType: 'test', metadata: {}, createdAtIso: new Date().toISOString() });
+      const state = JSON.parse(await readFile(path, 'utf8'));
+      assert.equal(state.auditLogs[0]?.id, 'after_orphan'); assert.equal(state.schemaVersion, 2);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+}
+
+test('claim lease reclaims only expired processing jobs and fences an old claimant', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-lease-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json')); await store.migrate();
+    const stale = { id: 'stale', customerId: 'c', profileId: 'p', type: 'smoke_test' as const, priority: 'P1' as const, status: 'processing' as const, retryCount: 0, payload: {}, createdAtIso: '2020-01-01T00:00:00.000Z', processingStartedAtIso: '2020-01-01T00:00:00.000Z', claimToken: 'old' };
+    const active = { ...stale, id: 'active', processingStartedAtIso: '2030-01-01T00:00:00.000Z', claimToken: 'active' };
+    await store.enqueueJob(stale); await store.enqueueJob(active);
+    const reclaimed = await store.claimQueuedJob('stale', 'new', 60_000, '2026-01-01T00:00:00.000Z');
+    assert.equal(reclaimed?.claimToken, 'new');
+    assert.equal(await store.claimQueuedJob('active', 'other', 60_000, '2026-01-01T00:00:00.000Z'), undefined);
+    assert.equal(await store.completeJob('stale', {}, 'old'), undefined);
+    assert.equal(await store.failJob('stale', 'old failure', 'old'), undefined);
+    assert.equal((await store.completeJob('stale', { ok: true }, 'new'))?.status, 'completed');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('independent node processes preserve all concurrent audit mutations', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-process-lock-'));
+  try {
+    const path = join(dir, 'ras-store.json'); await new JsonRasStore(path).migrate();
+    const script = `import { JsonRasStore } from './dist/packages/shared/src/persistentStore.js'; const [path,prefix,count] = process.argv.slice(1); const store = new JsonRasStore(path); await Promise.all(Array.from({length:Number(count)},(_,i)=>store.appendAuditLog({id:prefix+i,action:'child',targetType:'test',metadata:{},createdAtIso:new Date().toISOString()})));`;
+    const run = (prefix: string) => new Promise<void>((resolve, reject) => { const child = spawn(process.execPath, ['--input-type=module', '-e', script, path, prefix, '20'], { cwd: process.cwd(), stdio: 'inherit' }); child.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`child exited ${code}`))); child.once('error', reject); });
+    await Promise.all([run('a'), run('b'), run('c')]);
+    const state = await new JsonRasStore(path).load();
+    assert.equal(state.auditLogs.length, 60); assert.equal(new Set(state.auditLogs.map((row) => row.id)).size, 60);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('PAT is stored only as a hash and resolves/revokes as a tenant-bound principal', async () => {

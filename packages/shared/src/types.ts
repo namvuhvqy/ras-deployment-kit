@@ -229,19 +229,28 @@ export interface ConnectedAccount {
   lastVerifiedAtIso?: string;
 }
 
-export type SocialPostStatus = 'queued' | 'scheduled' | 'published' | 'failed';
+export type SocialPostStatus = 'draft' | 'queued' | 'scheduled' | 'published' | 'failed';
 
 export interface SocialPost {
   id: string;
   customerId: string;
   jobId: string;
+  accountId?: string;
+  profileId?: string;
   platform: SocialPlatform;
+  content?: string;
+  mediaUrls?: string[];
+  isDraft?: boolean;
+  scheduleAtIso?: string;
+  idempotencyKey?: string;
+  idempotencyPayloadHash?: string;
   zernioPostId?: string;
   platformPostId?: string;
   status: SocialPostStatus;
   publishedAtIso?: string;
   errorMessage?: string;
   updatedAtIso: string;
+  createdAtIso?: string;
 }
 
 export type InboxConversationStatus = 'open' | 'closed';
@@ -310,6 +319,8 @@ export interface RasJob {
   maxRetries?: number;
   runAfterIso?: string;
   processingStartedAtIso?: string;
+  claimToken?: string;
+  claimLeaseExpiresAtIso?: string;
   completedAtIso?: string;
   failedAtIso?: string;
   lastError?: string;

@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import { randomBytes } from 'node:crypto';
 import { FairProfileQueue } from '../../queue/src/fairQueue.js';
 import type { RasJob } from '../../shared/src/types.js';
 import type { JsonRasStore } from '../../shared/src/persistentStore.js';
@@ -19,6 +20,7 @@ export interface WorkerOptions {
   singleRun: boolean;
   dryRun: boolean;
   notifier?: TopicNotifier;
+  claimLeaseMs?: number;
 }
 
 export interface TopicNotifier {
@@ -40,7 +42,8 @@ export class RasJobWorker {
   ) {}
 
   async runOnce(): Promise<WorkerRunResult> {
-    const dueJobs = await this.store.getQueuedJobs();
+    const leaseMs = this.options.claimLeaseMs ?? 60_000;
+    const dueJobs = await this.store.getQueuedJobs(leaseMs);
     const queue = new FairProfileQueue();
     for (const job of dueJobs) queue.enqueue(job);
 
@@ -48,8 +51,10 @@ export class RasJobWorker {
     while (queue.size() > 0 && result.processed < this.options.batchSize) {
       const job = queue.dequeue();
       if (!job) break;
+      const claimed = await this.store.claimQueuedJob(job.id, randomBytes(24).toString('hex'), leaseMs);
+      if (!claimed) continue;
       result.processed += 1;
-      const outcome = await this.processJob(job);
+      const outcome = await this.processJob(claimed);
       result.completed += outcome === 'completed' ? 1 : 0;
       result.failed += outcome === 'failed' ? 1 : 0;
       result.requeued += outcome === 'requeued' ? 1 : 0;
@@ -67,10 +72,11 @@ export class RasJobWorker {
   }
 
   private async processJob(job: RasJob): Promise<'completed' | 'failed' | 'requeued'> {
-    await this.store.markJobProcessing(job.id);
     try {
       const metadata = await this.execute(job);
-      await this.store.completeJob(job.id, metadata);
+      if (job.type === 'publish_post' && isSocialPostStatus(metadata.status)) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: metadata.status });
+      const completed = await this.store.completeJob(job.id, metadata, job.claimToken);
+      if (!completed) return 'requeued';
       await this.store.appendAuditLog({
         id: `audit_${Date.now()}_${job.id}`,
         customerId: job.customerId,
@@ -85,20 +91,26 @@ export class RasJobWorker {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isPermanentZernioClientError(error)) {
-        await this.store.failJob(job.id, message);
+        await this.store.failJob(job.id, message, job.claimToken);
+        if (job.type === 'publish_post') await this.failSocialPost(job, message);
         await this.options.notifier?.send(topicForJob(job), `❌ RAS job failed: ${job.type} / ${job.id}\n${message}`);
         return 'failed';
       }
       if (job.retryCount + 1 <= this.options.maxRetries) {
         const runAfterIso = new Date(Date.now() + retryDelayMs(job.retryCount, this.options.baseRetryMs)).toISOString();
-        await this.store.requeueJob(job.id, message, runAfterIso);
+        await this.store.requeueJob(job.id, message, runAfterIso, job.claimToken);
         await this.options.notifier?.send(topicForJob(job), `⚠️ RAS job requeued: ${job.type} / ${job.id}\n${message}`);
         return 'requeued';
       }
-      await this.store.failJob(job.id, message);
+      await this.store.failJob(job.id, message, job.claimToken);
+      if (job.type === 'publish_post') await this.failSocialPost(job, message);
       await this.options.notifier?.send(topicForJob(job), `❌ RAS job failed: ${job.type} / ${job.id}\n${message}`);
       return 'failed';
     }
+  }
+
+  private async failSocialPost(job: RasJob, message: string): Promise<void> {
+    await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: 'failed', errorMessage: message.slice(0, 500) });
   }
 
   private async execute(job: RasJob): Promise<Record<string, unknown>> {
@@ -288,11 +300,15 @@ export function workerOptionsFromEnv(env: NodeJS.ProcessEnv = process.env, notif
   };
 }
 
+function socialPostId(job: RasJob): string {
+  return optionalString(asRecord(job.payload).postId) ?? job.id;
+}
+
 function assertPublishPostPayload(job: RasJob): CreatePostInput {
   const payload = asRecord(job.payload);
   const content = requiredString(payload, 'content');
   const platform = requiredString(payload, 'platform') as CreatePostInput['platform'];
-  const accountId = job.accountId ?? requiredString(payload, 'accountId');
+  const accountId = optionalString(payload.providerAccountId) ?? job.accountId ?? requiredString(payload, 'accountId');
   const mediaUrls = arrayOfStrings(payload.mediaUrls);
   const scheduleAtIso = optionalString(payload.scheduleAtIso);
   const isDraft = optionalBoolean(payload.isDraft);
@@ -315,6 +331,10 @@ function isPermanentZernioClientError(error: unknown): boolean {
 
 function retryDelayMs(retryCount: number, baseRetryMs: number): number {
   return Math.min(baseRetryMs * 2 ** retryCount, 30 * 60_000);
+}
+
+function isSocialPostStatus(value: unknown): value is import('../../shared/src/types.js').SocialPost['status'] {
+  return typeof value === 'string' && ['queued', 'draft', 'scheduled', 'published', 'failed'].includes(value);
 }
 
 function topicForJob(job: RasJob): number {

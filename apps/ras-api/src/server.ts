@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
 import { createZernioWebhookRouter } from './webhookRouter.js';
@@ -283,6 +283,25 @@ function objectField(body: Record<string, unknown>, field: string): Record<strin
   const value = body[field];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, status]) => [key, String(status)]));
+}
+
+function mediaUrlsField(body: Record<string, unknown>): string[] | undefined {
+  if (body.mediaUrls === undefined) return [];
+  return Array.isArray(body.mediaUrls) && body.mediaUrls.length <= 10 && body.mediaUrls.every((value) => typeof value === 'string' && value.length > 0 && value.length <= 2048 && isHttpUrl(value))
+    ? body.mediaUrls as string[] : undefined;
+}
+
+function isHttpUrl(value: string): boolean {
+  try { const protocol = new URL(value).protocol; return protocol === 'http:' || protocol === 'https:'; } catch { return false; }
+}
+
+function canonicalPostHash(value: Record<string, unknown>): string {
+  const canonical = Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
+  return { accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
 }
 
 type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
@@ -768,6 +787,39 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true, entitlement: { ...mapping, entitlement } }));
     return;
     */
+  }
+
+  const postsMatch = req.url ? /^\/customers\/([^/]+)\/posts(?:\/(drafts|schedules))?$/.exec(new URL(req.url, 'http://localhost').pathname) : null;
+  if (postsMatch) {
+    const customerId = decodeURIComponent(postsMatch[1]);
+    const operation = postsMatch[2];
+    const access = await requireCustomerAccess(req, customerId, req.method === 'GET' && !operation ? 'posts:read' : 'posts:write');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    if (req.method === 'GET' && !operation) { res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicSocialPost) })); return; }
+    if (req.method !== 'POST' || !operation) { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    const idempotencyKey = firstHeader(req, 'idempotency-key')?.trim();
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req); } catch { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_json' })); return; }
+    const accountId = stringField(body, 'accountId');
+    const content = stringField(body, 'content')?.trim();
+    const mediaUrls = mediaUrlsField(body);
+    const scheduleInput = operation === 'schedules' ? stringField(body, 'scheduleAtIso') : undefined;
+    const scheduleAtIso = scheduleInput && Number.isFinite(Date.parse(scheduleInput)) ? new Date(scheduleInput).toISOString() : undefined;
+    if (!idempotencyKey || idempotencyKey.length > 256 || !accountId || !content || content.length > 10_000 || mediaUrls === undefined || 'publishNow' in body || (operation === 'schedules' && (!scheduleAtIso || Date.parse(scheduleAtIso) <= Date.now()))) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_post_request' })); return;
+    }
+    const account = await store.getConnectedAccount(accountId);
+    if (!account || account.customerId !== customerId) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connected_account_not_found' })); return; }
+    if (account.status !== 'connected') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_inactive' })); return; }
+    const profileId = account.zernioProfileId ?? account.profileId;
+    if (!profileId) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_profile_missing' })); return; }
+    const payloadHash = canonicalPostHash({ operation, accountId, content, mediaUrls, ...(scheduleAtIso ? { scheduleAtIso } : {}) });
+    const id = `post_${randomUUID()}`; const jobId = `publish_${randomUUID()}`; const createdAtIso = new Date().toISOString();
+    const post: import('../../../packages/shared/src/types.js').SocialPost = { id, jobId, customerId, accountId, profileId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', scheduleAtIso, status: operation === 'drafts' ? 'draft' : 'scheduled', idempotencyKey, idempotencyPayloadHash: payloadHash, createdAtIso, updatedAtIso: createdAtIso };
+    const job: import('../../../packages/shared/src/types.js').RasJob = { id: jobId, customerId, profileId, accountId, platform: account.platform, type: 'publish_post', priority: 'P2', status: 'queued', retryCount: 0, payload: { postId: id, accountId, providerAccountId: account.zernioAccountId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', ...(scheduleAtIso ? { scheduleAtIso } : {}) }, createdAtIso };
+    const result = await store.createPostAndJobIdempotently({ post, job });
+    if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
+    res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicSocialPost(result.post), job: { id: result.job.id, type: result.job.type, status: result.job.status } })); return;
   }
 
   if (req.url?.startsWith('/customers/') && req.url.includes('/connect/facebook/pages')) {
