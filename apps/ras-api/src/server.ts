@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
 import { createZernioWebhookRouter } from './webhookRouter.js';
 import { consumeRedisPatRateLimit } from './patRateLimit.js';
+import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
 
@@ -196,7 +197,7 @@ async function requireCustomerAccess(req: IncomingMessage, customerId: string, r
   if (principal.authType === 'pat' && principal.tokenId) {
     const configuredLimit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
     const limit = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 120;
-    const redisUrl = process.env.RAS_REDIS_URL;
+    const redisUrl = redisUrlFromEnv(process.env);
     let result: { allowed: boolean; remaining: number; retryAfterSeconds: number };
     try {
       result = redisUrl

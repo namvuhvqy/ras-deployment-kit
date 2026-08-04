@@ -31,7 +31,7 @@ services:
       RAS_DB_PATH: /data/ras-store.json
       ZERNIO_MODE: ${ZERNIO_MODE:-dry-run}
       ZERNIO_BASE_URL: ${ZERNIO_BASE_URL:-https://zernio.com/api/v1}
-      RAS_REDIS_URL: redis://:${RAS_REDIS_PASSWORD:?set RAS_REDIS_PASSWORD in .env.production}@ras-redis:6379/0
+      RAS_REDIS_HOST: ras-redis
     volumes:
       - ras-production-data:/data
     networks:
