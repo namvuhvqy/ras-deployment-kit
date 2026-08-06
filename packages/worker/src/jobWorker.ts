@@ -1,8 +1,9 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
 import { FairProfileQueue } from '../../queue/src/fairQueue.js';
-import type { RasJob } from '../../shared/src/types.js';
+import type { RasEntitlement, RasJob } from '../../shared/src/types.js';
 import type { JsonRasStore } from '../../shared/src/persistentStore.js';
+import { addPeriod, parseSubscriptionPolicyIso } from '../../shared/src/subscriptionPolicy.js';
 import { ZernioApiError, type CreatePostInput, type ZernioAdapter } from '../../zernio-adapter/src/index.js';
 
 export interface WorkerTopicMap {
@@ -172,30 +173,52 @@ export class RasJobWorker {
     const state = await this.store.load();
     const customer = state.customers.find((row) => row.id === job.customerId);
     if (!customer) throw new Error(`Customer not found: ${job.customerId}`);
-    let zernioProfileId = customer.zernioProfileId;
+    const priorEntitlement = customer.entitlement;
+    const isRenewal = Boolean(priorEntitlement?.basePlan && (priorEntitlement.basePlan.activatedAtIso || priorEntitlement.basePlan.expiresAtIso));
+    const paymentTimeIso = validPaymentTime(payment.createdAtIso, payment.updatedAtIso);
+    const priorExpiryMs = parseSubscriptionPolicyIso(priorEntitlement?.basePlan.expiresAtIso);
+    const renewalBaseIso = priorExpiryMs !== undefined && priorExpiryMs > Date.parse(paymentTimeIso)
+      ? new Date(priorExpiryMs).toISOString()
+      : paymentTimeIso;
+    const expiresAtIso = addPeriod(renewalBaseIso, payment.billingCycle);
+    if (!expiresAtIso) throw new Error('Billing payment has invalid capture time');
+
+    let zernioProfileId = customer.zernioProfileId ?? customer.zernioProfileIds?.[0];
     if (!zernioProfileId) {
       const profile = await this.adapter.createProfile({ customerId: customer.id, name: customer.name, email: customer.email });
+      if (!profile.zernioProfileId) throw new Error('Zernio profile response missing profile id');
       zernioProfileId = profile.zernioProfileId;
     }
-    const includedSlots = customer.entitlement?.connectSlots.includedSlots ?? 1;
-    const previouslyPurchasedSlots = customer.entitlement?.connectSlots.purchasedSlots ?? Math.max(0, (customer.maxConnectedAccounts ?? includedSlots) - includedSlots);
+    const includedSlots = priorEntitlement?.connectSlots.includedSlots ?? 1;
+    const previouslyPurchasedSlots = priorEntitlement?.connectSlots.purchasedSlots ?? Math.max(0, (customer.maxConnectedAccounts ?? includedSlots) - includedSlots);
     const purchasedSlots = previouslyPurchasedSlots + payment.extraConnectSlots;
-    const totalSlots = includedSlots + purchasedSlots;
+    const trialSlots = priorEntitlement?.connectSlots.trialSlots ?? 0;
+    const totalSlots = includedSlots + purchasedSlots + trialSlots;
     const activeConnectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id && row.status === 'connected').length;
+    const entitlement: RasEntitlement = isRenewal && priorEntitlement
+      ? {
+        ...priorEntitlement,
+        basePlan: { ...priorEntitlement.basePlan, status: 'active' as const, billingCycle: payment.billingCycle, expiresAtIso },
+        connectSlots: { ...priorEntitlement.connectSlots, status: 'active' as const, purchasedSlots, totalSlots, activeConnectedAccounts },
+        addOns: priorEntitlement.addOns.map((addOn) => addOn.id === 'zernio-connect'
+          ? { ...addOn, status: 'active' as const, slots: totalSlots }
+          : { ...addOn, status: 'active' as const }),
+      }
+      : {
+        basePlan: { planId: payment.plan, status: 'active' as const, billingCycle: payment.billingCycle, vps: { type: 'dedicated' as const }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: paymentTimeIso, expiresAtIso },
+        connectSlots: { status: 'active' as const, includedSlots, purchasedSlots, trialSlots: 0, totalSlots: includedSlots + purchasedSlots, activeConnectedAccounts },
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'active' as const, slots: includedSlots + purchasedSlots }],
+      };
     await this.store.upsertCustomerEntitlement({
       customerId: customer.id,
       maxConnectedAccounts: totalSlots,
       packageStatus: 'active',
-      addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: 'active' },
+      addOnStatus: Object.fromEntries(Object.keys(customer.addOnStatus ?? {}).map((id) => [id, 'active' as const]).concat([['zernio', 'active' as const]])),
       zernioProfileId,
-      entitlement: {
-        basePlan: { planId: payment.plan, status: 'active', billingCycle: payment.billingCycle, vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: new Date().toISOString() },
-        connectSlots: { status: 'active', includedSlots, purchasedSlots, trialSlots: 0, totalSlots, activeConnectedAccounts },
-        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'active', slots: totalSlots }],
-      },
+      entitlement,
     });
     await this.store.markBillingPaymentProvisioned(payment.id);
-    return { paymentId: payment.id, provisionStatus: 'provisioned', totalSlots, idempotent: false };
+    return { paymentId: payment.id, provisionStatus: 'provisioned', totalSlots, renewal: isRenewal, idempotent: false };
   }
 
   private async processZernioWebhook(job: RasJob): Promise<Record<string, unknown>> {
@@ -322,6 +345,14 @@ export function workerOptionsFromEnv(env: NodeJS.ProcessEnv = process.env, notif
     dryRun: (env.ZERNIO_MODE ?? env.RAS_ZERNIO_MODE ?? 'dry-run') !== 'live',
     notifier,
   };
+}
+
+function validPaymentTime(createdAtIso: string, updatedAtIso: string): string {
+  const createdAtMs = parseSubscriptionPolicyIso(createdAtIso);
+  if (createdAtMs !== undefined) return new Date(createdAtMs).toISOString();
+  const updatedAtMs = parseSubscriptionPolicyIso(updatedAtIso);
+  if (updatedAtMs !== undefined) return new Date(updatedAtMs).toISOString();
+  throw new Error('Billing payment has invalid capture time');
 }
 
 function socialPostId(job: RasJob): string {

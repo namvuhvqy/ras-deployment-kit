@@ -116,6 +116,7 @@ test('RasJobWorker provisions a captured payment from a durable outbox job exact
     assert.equal(state.customers[0]?.entitlement?.connectSlots.purchasedSlots, 2);
     assert.equal(state.customers[0]?.entitlement?.connectSlots.totalSlots, 3);
     assert.equal(state.customers[0]?.zernioProfileId, 'profile_paid');
+    assert.ok(state.customers[0]?.entitlement?.basePlan.expiresAtIso, 'initial provision records a finite authoritative expiry');
     assert.equal(state.jobs[0]?.status, 'completed');
 
     await store.enqueueJob({ id: 'provision_payment_retry_same_capture', customerId: 'cust_paid', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: 'paypal:ORDER-OUTBOX-1' }, createdAtIso: timestamp });
@@ -128,6 +129,63 @@ test('RasJobWorker provisions a captured payment from a durable outbox job exact
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('RasJobWorker renews a paid tenant without recreating its entitlement resources or Zernio profile', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-renewal-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({
+      id: 'cust_renewal', name: 'Renewal tenant', email: 'renewal@example.test', zernioProfileId: 'profile_existing', zernioProfileIds: ['profile_existing'], maxConnectedAccounts: 5,
+      packageStatus: 'expired', addOnStatus: { zernio: 'expired', archive: 'expired' },
+      entitlement: {
+        basePlan: { planId: 'lite', status: 'expired', billingCycle: 'monthly', vps: { type: 'dedicated', size: 'large' }, agents: { included: 4, kinds: ['ras1-hermes', 'ras2-openclaw'] }, aiTokens: { monthlyLimit: 1000, used: 321 }, activatedAtIso: '2026-01-01T00:00:00.000Z', expiresAtIso: '2026-09-15T00:00:00.000Z' },
+        connectSlots: { status: 'expired', includedSlots: 2, purchasedSlots: 2, trialSlots: 1, totalSlots: 5, activeConnectedAccounts: 1, trialExpiresAtIso: '2026-10-01T00:00:00.000Z', soloApiEnabled: true },
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'expired', slots: 5 }, { id: 'archive', name: 'Archive', status: 'expired', priceUsd: 9 }],
+      },
+    });
+    await store.upsertSandbox({ id: 'sandbox_renewal', customerId: 'cust_renewal', provider: 'vps', status: 'running', createdAtIso: '2026-01-01T00:00:00.000Z', updatedAtIso: '2026-01-01T00:00:00.000Z' });
+    await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: 'cust_renewal', paypalOrderId: 'ORDER-RENEW-1', transactionId: 'CAPTURE-RENEW-1', status: 'captured', amount: '19', currency: 'USD', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, createdAtIso: '2026-09-01T00:00:00.000Z', updatedAtIso: '2026-09-01T00:00:00.000Z' });
+    await store.enqueueJob({ id: 'provision_payment_paypal:ORDER-RENEW-1', customerId: 'cust_renewal', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: 'paypal:ORDER-RENEW-1' }, createdAtIso: '2026-09-01T00:00:00.000Z' });
+    let createProfileCalls = 0;
+    const adapter = { ...noopAdapter, async createProfile() { createProfileCalls += 1; throw new Error('renewal must not create a profile'); } } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    let state = await store.load();
+    const customer = state.customers[0]!;
+    assert.equal(createProfileCalls, 0);
+    assert.equal(customer.entitlement?.basePlan.expiresAtIso, '2026-10-15T00:00:00.000Z');
+    assert.deepEqual(customer.entitlement?.basePlan.vps, { type: 'dedicated', size: 'large' });
+    assert.deepEqual(customer.entitlement?.basePlan.aiTokens, { monthlyLimit: 1000, used: 321 });
+    assert.equal(customer.entitlement?.connectSlots.purchasedSlots, 3);
+    assert.equal(customer.entitlement?.connectSlots.trialSlots, 1);
+    assert.equal(customer.entitlement?.connectSlots.totalSlots, 6);
+    assert.equal(customer.packageStatus, 'active');
+    assert.deepEqual(customer.addOnStatus, { zernio: 'active', archive: 'active' });
+    assert.ok(state.sandboxes.some((sandbox) => sandbox.id === 'sandbox_renewal'));
+    assert.equal(state.billingPayments[0]?.provisionStatus, 'provisioned');
+
+    await store.enqueueJob({ id: 'provision_payment_retry_renewal', customerId: 'cust_renewal', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: 'paypal:ORDER-RENEW-1' }, createdAtIso: '2026-09-01T00:00:00.000Z' });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    state = await store.load();
+    assert.equal(state.customers[0]?.entitlement?.connectSlots.purchasedSlots, 3, 'retry must not apply add-on slots twice');
+    assert.equal(createProfileCalls, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('RasJobWorker renews from payment time when prior expiry is malformed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-renewal-invalid-expiry-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json')); await store.migrate();
+    await store.upsertCustomer({ id: 'cust_bad_expiry', name: 'Bad expiry', email: 'bad-expiry@example.test', zernioProfileId: 'profile_existing', packageStatus: 'expired', addOnStatus: { zernio: 'expired' }, entitlement: { basePlan: { planId: 'lite', status: 'expired', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes'] }, activatedAtIso: '2026-01-01T00:00:00.000Z', expiresAtIso: 'not-an-iso-date' }, connectSlots: { status: 'expired', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 }, addOns: [] } });
+    await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: 'cust_bad_expiry', paypalOrderId: 'ORDER-BAD-EXPIRY', transactionId: 'CAPTURE-BAD-EXPIRY', status: 'captured', amount: '19', currency: 'USD', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, createdAtIso: '2026-09-01T00:00:00.000Z', updatedAtIso: '2026-09-01T00:00:00.000Z' });
+    await store.enqueueJob({ id: 'provision_payment_bad_expiry', customerId: 'cust_bad_expiry', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: 'paypal:ORDER-BAD-EXPIRY' }, createdAtIso: '2026-09-01T00:00:00.000Z' });
+    const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    assert.equal((await store.load()).customers[0]?.entitlement?.basePlan.expiresAtIso, '2026-10-01T00:00:00.000Z');
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('RasJobWorker forwards safe draft flag into publish payload', async () => {
