@@ -640,7 +640,7 @@ test('disconnect endpoint is tenant-scoped and delegates provider deletion befor
   assert.match(adapterSource, /method: 'DELETE'/);
 });
 
-test('connect endpoint creates another Zernio profile for a second account on the same platform', async () => {
+test('connect endpoint queues one worker-only Zernio profile provision for a second same-platform account', async () => {
   const state = emptyState();
   state.customers = [
     {
@@ -676,21 +676,33 @@ test('connect endpoint creates another Zernio profile for a second account on th
     { id: 'sess_same', token: 'token_same', userId: 'user_same', createdAtIso: now, expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString() },
   ];
 
-  await withApi(state, async (baseUrl) => {
+  await withApi(state, async (baseUrl, dbPath) => {
     const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`, { headers: { authorization: 'Bearer token_same' } });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 202);
     const payload = (await response.json()) as {
-      authUrl: string;
-      profileId: string;
+      error: string;
+      provisioning: { queued: boolean; jobId: string; reason: string; platform: string };
       entitlement: { zernioProfileIds: string[]; maxConnectedAccounts: number; activeConnectedAccounts: number };
     };
 
-    assert.equal(payload.profileId, 'zernio_cust_same_platform');
-    assert.match(payload.authUrl, /\/connect\/facebook\?/);
-    assert.match(payload.authUrl, /profileId=zernio_cust_same_platform/);
-    assert.deepEqual(payload.entitlement.zernioProfileIds, ['profile_same_1', 'zernio_cust_same_platform']);
+    assert.equal(payload.error, 'profile_provisioning_pending');
+    assert.deepEqual(payload.provisioning, { queued: true, jobId: 'provision_profile:cust_same_platform:facebook:same_platform_connect', reason: 'same_platform_connect', platform: 'facebook' });
+    assert.deepEqual(payload.entitlement.zernioProfileIds, ['profile_same_1']);
     assert.equal(payload.entitlement.maxConnectedAccounts, 2);
     assert.equal(payload.entitlement.activeConnectedAccounts, 1);
+    const retry = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook`, { headers: { authorization: 'Bearer token_same' } });
+    assert.equal(retry.status, 202);
+    assert.equal((await retry.json() as { provisioning: { queued: boolean } }).provisioning.queued, false);
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { jobs: Array<{ id: string; customerId: string; platform: string; type: string; status: string; payload: Record<string, unknown> }> };
+    assert.equal(persisted.jobs.length, 1, 'duplicate API requests queue at most one durable request');
+    assert.deepEqual(persisted.jobs[0] && { id: persisted.jobs[0].id, customerId: persisted.jobs[0].customerId, platform: persisted.jobs[0].platform, type: persisted.jobs[0].type, status: persisted.jobs[0].status, payload: persisted.jobs[0].payload }, { id: 'provision_profile:cust_same_platform:facebook:same_platform_connect', customerId: 'cust_same_platform', platform: 'facebook', type: 'create_profile', status: 'queued', payload: { reason: 'same_platform_connect', platform: 'facebook' } }, 'API queues a tenant/platform-scoped request and never creates a provider profile');
+    const worker = spawn(process.execPath, ['dist/apps/ras-worker/src/worker.js'], { cwd: process.cwd(), env: { ...process.env, RAS_DB_PATH: dbPath, RAS_WORKER_SINGLE_RUN: 'true' }, stdio: 'ignore' });
+    await new Promise<void>((resolve, reject) => { worker.once('error', reject); worker.once('exit', (code) => code === 0 ? resolve() : reject(new Error(`worker exited ${code}`))); });
+    const ready = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook`, { headers: { authorization: 'Bearer token_same' } });
+    assert.equal(ready.status, 200);
+    const readyPayload = await ready.json() as { authUrl: string; profileId: string };
+    assert.equal(readyPayload.profileId, 'zernio_cust_same_platform');
+    assert.match(readyPayload.authUrl, /profileId=zernio_cust_same_platform/);
   });
 });
 

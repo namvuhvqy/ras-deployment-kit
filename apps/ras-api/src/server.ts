@@ -776,11 +776,8 @@ const server = createServer(async (req, res) => {
     const customerId = dashboard.customer.id;
     const customer = dashboard.customer;
     const maxConnectedAccounts = 1 + extraConnectSlots;
-    let zernioProfileId = customer.zernioProfileId;
-    if (!zernioProfileId && maxConnectedAccounts > 0) {
-      const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
-      zernioProfileId = profile.zernioProfileId;
-    }
+    // Legacy direct provisioning removed: provider profiles are worker-only.
+    const zernioProfileId = customer.zernioProfileId;
 
     const entitlement: RasEntitlement = {
       basePlan: {
@@ -966,20 +963,32 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    let profileId = mapping.zernioProfileId ?? mapping.zernioProfileIds[0];
-    const samePlatformExists = mapping.accounts.some((account) => account.platform === platform && account.status === 'connected');
-    if (!profileId || samePlatformExists) {
-      const state = await store.load();
-      const customer = state.customers.find((row) => row.id === customerId);
-      if (!customer) {
-        res.statusCode = 404;
-        res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
-        return;
-      }
-      const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
-      if (!profile.zernioProfileId) throw new Error('Zernio profile response missing profile id');
-      profileId = profile.zernioProfileId;
-      await store.addCustomerZernioProfile(customerId, profileId);
+    const connectedProfileIdsForPlatform = new Set(
+      mapping.accounts.filter((account) => account.platform === platform && account.status === 'connected')
+        .map((account) => account.zernioProfileId)
+        .filter((profileId): profileId is string => Boolean(profileId)),
+    );
+    const profileId = mapping.zernioProfileIds.find((candidate) => !connectedProfileIdsForPlatform.has(candidate));
+    if (!profileId) {
+      // Provisioning is deliberately worker-only: API requests only record a durable,
+      // tenant/platform-scoped request. The stable ID deduplicates retries and races.
+      const reason = mapping.zernioProfileIds.length === 0 ? 'initial_connect' : 'same_platform_connect';
+      const jobId = `provision_profile:${customerId}:${platform}:${reason}`;
+      const queued = await store.enqueueJobIfAbsent({
+        id: jobId,
+        customerId,
+        profileId: '',
+        platform,
+        type: 'create_profile',
+        priority: 'P0',
+        status: 'queued',
+        retryCount: 0,
+        payload: { reason, platform },
+        createdAtIso: new Date().toISOString(),
+      });
+      res.statusCode = 202;
+      res.end(JSON.stringify({ ok: false, error: 'profile_provisioning_pending', provisioning: { queued: queued.inserted, jobId: queued.job.id, reason, platform }, entitlement: await store.getCustomerMapping(customerId) }));
+      return;
     }
 
     const redirectUrl = url.searchParams.get('redirectUrl') ?? `${firstHeader(req, 'origin') ?? 'https://runagentsys.com'}/dashboard`;

@@ -125,6 +125,7 @@ export class RasJobWorker {
     }
 
     if (job.type === 'provision_entitlement') return this.provisionEntitlement(job);
+    if (job.type === 'create_profile') return this.provisionConnectProfile(job);
 
     if (job.type === 'webhook_process' || job.type === 'inbox_process') return this.processZernioWebhook(job);
 
@@ -135,6 +136,29 @@ export class RasJobWorker {
     }
 
     throw new Error(`Unsupported live job type: ${job.type}`);
+  }
+
+  private async provisionConnectProfile(job: RasJob): Promise<Record<string, unknown>> {
+    const payload = asRecord(job.payload);
+    const reason = requiredString(payload, 'reason');
+    const platform = requiredString(payload, 'platform');
+    if (reason !== 'initial_connect' && reason !== 'same_platform_connect') throw new Error('Invalid profile provisioning reason');
+    if (!job.platform || job.platform !== platform) throw new Error('Profile provisioning platform mismatch');
+    const state = await this.store.load();
+    const customer = state.customers.find((row) => row.id === job.customerId);
+    if (!customer) throw new Error(`Customer not found: ${job.customerId}`);
+    const existingIds = Array.from(new Set([...(customer.zernioProfileIds ?? []), ...(customer.zernioProfileId ? [customer.zernioProfileId] : [])]));
+    const platformAlreadyHasSpareProfile = state.connectedAccounts
+      .filter((account) => account.customerId === customer.id && account.platform === platform && account.status === 'connected')
+      .map((account) => account.zernioProfileId)
+      .filter((profileId): profileId is string => Boolean(profileId));
+    if ((reason === 'initial_connect' && existingIds.length > 0) || (reason === 'same_platform_connect' && existingIds.some((id) => !platformAlreadyHasSpareProfile.includes(id)))) {
+      return { reason, platform, idempotent: true, profileIds: existingIds };
+    }
+    const profile = await this.adapter.createProfile({ customerId: customer.id, name: customer.name, email: customer.email });
+    if (!profile.zernioProfileId) throw new Error('Zernio profile response missing profile id');
+    await this.store.addCustomerZernioProfile(customer.id, profile.zernioProfileId);
+    return { reason, platform, profileId: profile.zernioProfileId, idempotent: false };
   }
 
   private async provisionEntitlement(job: RasJob): Promise<Record<string, unknown>> {
