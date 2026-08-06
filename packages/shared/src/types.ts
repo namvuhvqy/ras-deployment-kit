@@ -7,10 +7,31 @@ export type AgentStatus = 'unknown' | 'starting' | 'running' | 'degraded' | 'sto
 export type ServicePackageStatus = 'draft' | 'active' | 'deprecated';
 export type BillingStatus = 'trial' | 'active' | 'past_due' | 'cancelled';
 export type EntitlementStatus = 'pending' | 'active' | 'inactive' | 'past_due' | 'cancelled';
+/** Base plans alone carry derived subscription lifecycle states; add-ons remain unchanged until the sweep task. */
+export type BasePlanEntitlementStatus = EntitlementStatus | 'expiring_soon' | 'expired';
 export type RasUserRole = 'owner' | 'admin' | 'operator' | 'viewer';
 
 export type RasBasePlanId = 'none' | 'lite' | 'pro' | 'max';
 export type RasBillingCycle = 'monthly' | 'yearly';
+export type SubscriptionLifecycleState = 'active' | 'expiring_soon' | 'past_due' | 'expired' | 'unknown';
+
+/** A date-derived subscription view; provider health is intentionally not part of this record. */
+export interface SubscriptionLifecycleEvaluation {
+  state: SubscriptionLifecycleState;
+  expiresAtIso?: string;
+  reminderAtIso?: string;
+  graceEndsAtIso?: string;
+}
+
+/** Durable identity for a lifecycle transition or reminder, for a later idempotent sweep. */
+export interface SubscriptionLifecycleEvent {
+  id: string;
+  customerId: string;
+  kind: 'reminder' | 'transition';
+  lifecycleState: Exclude<SubscriptionLifecycleState, 'unknown'>;
+  expiresAtIso: string;
+  createdAtIso: string;
+}
 
 export type RasBillingPaymentStatus = 'captured' | 'refunded' | 'failed';
 export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'expired';
@@ -61,7 +82,7 @@ export interface RasBillingPayment {
 
 export interface BasePlanEntitlement {
   planId: RasBasePlanId;
-  status: EntitlementStatus;
+  status: BasePlanEntitlementStatus;
   billingCycle?: RasBillingCycle;
   monthlyPriceUsd?: number;
   totalAmountUsd?: number;

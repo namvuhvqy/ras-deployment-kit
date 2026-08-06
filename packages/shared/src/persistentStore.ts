@@ -21,9 +21,12 @@ import type {
   RasPersonalAccessToken,
   RasPrincipal,
   RasApiRateLimitBucket,
+  SubscriptionLifecycleEvent,
+  SubscriptionLifecycleEvaluation,
   SocialPost,
   RasUser,
 } from './types.js';
+import { evaluateSubscriptionLifecycle } from './subscriptionPolicy.js';
 
 export interface RasPersistentState {
   schemaVersion: number;
@@ -50,6 +53,8 @@ export interface RasPersistentState {
   checkoutIntents: RasCheckoutIntent[];
   /** One-time signed relay assertion nonces. */
   relayAssertionNonces: string[];
+  /** Idempotency identities only; lifecycle evaluation itself remains date-derived. */
+  subscriptionLifecycleEvents: SubscriptionLifecycleEvent[];
 }
 
 export interface StoredWebhookEvent {
@@ -278,6 +283,7 @@ export class JsonRasStore {
       billingPayments: [],
       checkoutIntents: [],
       relayAssertionNonces: [],
+      subscriptionLifecycleEvents: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -304,6 +310,7 @@ export class JsonRasStore {
     state.billingPayments ??= [];
     state.checkoutIntents ??= [];
     state.relayAssertionNonces ??= [];
+    state.subscriptionLifecycleEvents ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -546,6 +553,14 @@ export class JsonRasStore {
     else state.customers.push(customer);
     await this.write(state);
     return customer;
+  }
+
+  /** Date-only subscription lookup. It does not mutate entitlement, package/add-on, or provider records. */
+  async getSubscriptionLifecycle(customerId: string, nowIso: string): Promise<SubscriptionLifecycleEvaluation | undefined> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) return undefined;
+    return evaluateSubscriptionLifecycle(customer.entitlement?.basePlan.expiresAtIso, nowIso);
   }
 
   async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
@@ -1233,7 +1248,7 @@ export class JsonRasStore {
 
   private async emptyState(): Promise<RasPersistentState> {
     const now = new Date().toISOString();
-    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], relayAssertionNonces: [] };
+    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], relayAssertionNonces: [], subscriptionLifecycleEvents: [] };
   }
 
   private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {

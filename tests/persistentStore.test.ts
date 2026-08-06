@@ -5,6 +5,48 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
+import { addPeriod, evaluateSubscriptionLifecycle } from '../packages/shared/src/subscriptionPolicy.js';
+
+test('subscription lifecycle policy derives dates solely from supplied server dates', () => {
+  const expiry = '2026-08-20T00:00:00.000Z';
+
+  assert.equal(evaluateSubscriptionLifecycle(expiry, '2026-08-12T00:00:00.000Z').state, 'active');
+  assert.equal(evaluateSubscriptionLifecycle(expiry, '2026-08-13T00:00:00.000Z').state, 'expiring_soon');
+  assert.equal(evaluateSubscriptionLifecycle(expiry, expiry).state, 'past_due');
+  assert.equal(evaluateSubscriptionLifecycle(expiry, '2026-08-27T00:00:00.000Z').state, 'expired');
+  assert.equal(evaluateSubscriptionLifecycle('not-a-date', '2026-08-20T00:00:00.000Z').state, 'unknown');
+  assert.equal(evaluateSubscriptionLifecycle(undefined, '2026-08-20T00:00:00.000Z').state, 'unknown');
+  assert.deepEqual(
+    evaluateSubscriptionLifecycle(expiry, '2026-08-13T00:00:00.000Z'),
+    evaluateSubscriptionLifecycle(expiry, '2026-08-13T00:00:00.000Z'),
+  );
+});
+
+test('subscription calendar periods clamp monthly and yearly boundary dates', () => {
+  assert.equal(addPeriod('2024-01-31T12:00:00.000Z', 'monthly'), '2024-02-29T12:00:00.000Z');
+  assert.equal(addPeriod('2023-01-31T12:00:00.000Z', 'monthly'), '2023-02-28T12:00:00.000Z');
+  assert.equal(addPeriod('2024-02-29T12:00:00.000Z', 'yearly'), '2025-02-28T12:00:00.000Z');
+});
+
+test('JsonRasStore evaluates base-plan expiry without changing provider health', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-subscription-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({
+      id: 'cust_subscription', name: 'Subscription customer', status: 'active',
+      entitlement: {
+        basePlan: { planId: 'pro', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: '2026-08-20T00:00:00.000Z' },
+        connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 1 }, addOns: [],
+      },
+    });
+    await store.upsertConnectedAccount({ id: 'acct_subscription', customerId: 'cust_subscription', zernioAccountId: 'zacct_subscription', platform: 'facebook', status: 'connected' });
+
+    assert.equal((await store.getSubscriptionLifecycle('cust_subscription', '2026-08-20T00:00:00.000Z'))?.state, 'past_due');
+    assert.equal((await store.load()).connectedAccounts[0]?.status, 'connected');
+    assert.equal((await store.getSubscriptionLifecycle('missing', '2026-08-20T00:00:00.000Z')), undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 test('JsonRasStore migrates an empty store with current schema metadata', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
