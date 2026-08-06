@@ -6,7 +6,7 @@ export type AgentKind = 'ras1-hermes' | 'ras2-openclaw';
 export type AgentStatus = 'unknown' | 'starting' | 'running' | 'degraded' | 'stopped' | 'failed';
 export type ServicePackageStatus = 'draft' | 'active' | 'deprecated';
 export type BillingStatus = 'trial' | 'active' | 'past_due' | 'cancelled';
-export type EntitlementStatus = 'pending' | 'active' | 'inactive' | 'past_due' | 'cancelled';
+export type EntitlementStatus = 'pending' | 'active' | 'inactive' | 'past_due' | 'cancelled' | 'expired';
 /** Base plans alone carry derived subscription lifecycle states; add-ons remain unchanged until the sweep task. */
 export type BasePlanEntitlementStatus = EntitlementStatus | 'expiring_soon' | 'expired';
 export type RasUserRole = 'owner' | 'admin' | 'operator' | 'viewer';
@@ -193,8 +193,8 @@ export interface RasCustomer {
   maxConnectedAccounts?: number;
   activeConnectedAccounts?: number;
   entitlement?: RasEntitlement;
-  packageStatus?: 'pending' | 'active' | 'past_due' | 'cancelled';
-  addOnStatus?: Record<string, 'pending' | 'active' | 'inactive' | 'cancelled'>;
+  packageStatus?: 'pending' | 'active' | 'past_due' | 'cancelled' | 'expired';
+  addOnStatus?: Record<string, 'pending' | 'active' | 'inactive' | 'cancelled' | 'expired'>;
   status?: 'pending' | 'active' | 'disabled' | 'error';
   sandboxId?: string;
   servicePackageId?: string;

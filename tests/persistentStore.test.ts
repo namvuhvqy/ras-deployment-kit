@@ -56,6 +56,85 @@ test('JsonRasStore evaluates base-plan expiry without changing provider health',
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('JsonRasStore sweeps lifecycle reminders and transitions once without changing provider records', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-subscription-sweep-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const expiry = '2026-08-20T00:00:00.000Z';
+    await store.upsertCustomer({
+      id: 'cust_sweep', name: 'Sweep customer', status: 'active', packageStatus: 'active', addOnStatus: { zernio: 'active' },
+      entitlement: {
+        basePlan: { planId: 'pro', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, aiTokens: { monthlyLimit: 100, used: 25 }, expiresAtIso: expiry },
+        connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 2, trialSlots: 0, totalSlots: 3, activeConnectedAccounts: 1 },
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect Slots', status: 'active', slots: 3 }],
+      },
+    });
+    await store.upsertConnectedAccount({ id: 'acct_sweep', customerId: 'cust_sweep', zernioAccountId: 'zacct_sweep', platform: 'facebook', status: 'connected' });
+    const before = await store.load();
+
+    assert.deepEqual((await store.sweepSubscriptionLifecycle('2026-08-13T00:00:00.000Z')).map((event) => event.lifecycleState), ['expiring_soon']);
+    assert.deepEqual(await store.sweepSubscriptionLifecycle('2026-08-13T00:00:00.000Z'), []);
+    assert.deepEqual((await store.sweepSubscriptionLifecycle(expiry)).map((event) => event.lifecycleState), ['past_due']);
+    assert.deepEqual(await store.sweepSubscriptionLifecycle(expiry), []);
+    assert.deepEqual((await store.sweepSubscriptionLifecycle('2026-08-27T00:00:00.000Z')).map((event) => event.lifecycleState), ['expired']);
+    assert.deepEqual(await store.sweepSubscriptionLifecycle('2026-08-28T00:00:00.000Z'), []);
+
+    const after = await store.load();
+    assert.deepEqual(after.subscriptionLifecycleEvents.map((event) => [event.kind, event.lifecycleState, event.expiresAtIso]), [
+      ['reminder', 'expiring_soon', expiry], ['transition', 'past_due', expiry], ['transition', 'expired', expiry],
+    ]);
+    assert.deepEqual(after.auditLogs.map((log) => [log.action, log.targetType, log.targetId]), [
+      ['subscription.lifecycle.reminder', 'subscription', 'cust_sweep'],
+      ['subscription.lifecycle.transition', 'subscription', 'cust_sweep'],
+      ['subscription.lifecycle.transition', 'subscription', 'cust_sweep'],
+    ]);
+    assert.equal(after.customers[0]?.entitlement?.basePlan.status, 'expired');
+    assert.equal(after.customers[0]?.entitlement?.connectSlots.status, 'inactive');
+    assert.equal(after.customers[0]?.entitlement?.addOns[0]?.status, 'inactive');
+    assert.equal(after.customers[0]?.packageStatus, 'expired');
+    assert.equal(after.customers[0]?.addOnStatus?.zernio, 'inactive');
+    assert.deepEqual(after.connectedAccounts, before.connectedAccounts);
+    assert.deepEqual(after.sandboxes, before.sandboxes);
+    assert.deepEqual(after.agents, before.agents);
+    assert.deepEqual(after.billingPayments, before.billingPayments);
+    assert.deepEqual(after.customers[0]?.entitlement?.basePlan.aiTokens, before.customers[0]?.entitlement?.basePlan.aiTokens);
+    assert.equal(after.customers[0]?.entitlement?.connectSlots.totalSlots, before.customers[0]?.entitlement?.connectSlots.totalSlots);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('JsonRasStore sweep skips customers with missing or invalid base-plan expiry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-subscription-invalid-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    for (const [id, expiresAtIso] of [['missing', undefined], ['invalid', '2026-02-30T00:00:00.000Z']] as const) {
+      await store.upsertCustomer({ id, name: id, packageStatus: 'active', entitlement: { basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso }, connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 }, addOns: [] } });
+    }
+    assert.deepEqual(await store.sweepSubscriptionLifecycle('2026-08-27T00:00:00.000Z'), []);
+    const state = await store.load();
+    assert.deepEqual(state.subscriptionLifecycleEvents, []);
+    assert.deepEqual(state.auditLogs, []);
+    assert.equal(state.customers[0]?.packageStatus, 'active');
+    assert.equal(state.customers[1]?.packageStatus, 'active');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('JsonRasStore serializes concurrent lifecycle sweeps to one durable transition', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-subscription-concurrent-'));
+  try {
+    const path = join(dir, 'ras-store.json');
+    const first = new JsonRasStore(path); const second = new JsonRasStore(path);
+    await first.migrate();
+    await first.upsertCustomer({ id: 'cust_concurrent', name: 'Concurrent', entitlement: { basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: '2026-08-20T00:00:00.000Z' }, connectSlots: { status: 'active', includedSlots: 0, purchasedSlots: 0, trialSlots: 0, totalSlots: 0, activeConnectedAccounts: 0 }, addOns: [] } });
+    const results = await Promise.all([first.sweepSubscriptionLifecycle('2026-08-20T00:00:00.000Z'), second.sweepSubscriptionLifecycle('2026-08-20T00:00:00.000Z')]);
+    const state = await first.load();
+    assert.equal(results.flat().length, 1);
+    assert.equal(state.subscriptionLifecycleEvents.length, 1);
+    assert.equal(state.auditLogs.length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('JsonRasStore migrates an empty store with current schema metadata', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {

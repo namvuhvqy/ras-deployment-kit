@@ -563,6 +563,29 @@ export class JsonRasStore {
     return evaluateSubscriptionLifecycle(customer.entitlement?.basePlan.expiresAtIso, nowIso);
   }
 
+  /** Atomically records date-derived lifecycle reminders and transitions exactly once per expiry. */
+  async sweepSubscriptionLifecycle(nowIso: string): Promise<SubscriptionLifecycleEvent[]> {
+    return this.mutate((state) => {
+      const created: SubscriptionLifecycleEvent[] = [];
+      state.subscriptionLifecycleEvents ??= [];
+      for (const customer of state.customers) {
+        const evaluation = evaluateSubscriptionLifecycle(customer.entitlement?.basePlan.expiresAtIso, nowIso);
+        if (evaluation.state === 'unknown' || evaluation.state === 'active' || !evaluation.expiresAtIso) continue;
+
+        const kind = evaluation.state === 'expiring_soon' ? 'reminder' : 'transition';
+        const eventId = subscriptionLifecycleEventId(customer.id, kind, evaluation.state, evaluation.expiresAtIso);
+        if (state.subscriptionLifecycleEvents.some((event) => event.id === eventId)) continue;
+
+        const event: SubscriptionLifecycleEvent = { id: eventId, customerId: customer.id, kind, lifecycleState: evaluation.state, expiresAtIso: evaluation.expiresAtIso, createdAtIso: nowIso };
+        state.subscriptionLifecycleEvents.push(event);
+        state.auditLogs.push({ id: `audit_${eventId}`, customerId: customer.id, action: `subscription.lifecycle.${kind}`, targetType: 'subscription', targetId: customer.id, metadata: { lifecycleState: evaluation.state, expiresAtIso: evaluation.expiresAtIso }, createdAtIso: nowIso });
+        if (evaluation.state === 'expired') this.expireCustomerEntitlements(customer);
+        created.push(event);
+      }
+      return created;
+    });
+  }
+
   async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
     const state = await this.load();
     const now = new Date().toISOString();
@@ -1181,6 +1204,18 @@ export class JsonRasStore {
     return (await this.readIfExists())!;
   }
 
+  private expireCustomerEntitlements(customer: RasCustomer): void {
+    if (customer.entitlement) {
+      customer.entitlement.basePlan.status = 'expired';
+      customer.entitlement.connectSlots.status = 'inactive';
+      for (const addOn of customer.entitlement.addOns) addOn.status = 'inactive';
+    }
+    customer.packageStatus = 'expired';
+    if (customer.addOnStatus) {
+      for (const addOnId of Object.keys(customer.addOnStatus)) customer.addOnStatus[addOnId] = 'inactive';
+    }
+  }
+
   private async updateJob(jobId: string, updater: (job: RasJob) => RasJob): Promise<RasJob> {
     return this.mutate((state) => {
       const index = state.jobs.findIndex((job) => job.id === jobId);
@@ -1284,6 +1319,15 @@ function processingLeaseExpired(job: RasJob, nowMs: number, leaseMs: number): bo
 
 function hashPat(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function subscriptionLifecycleEventId(
+  customerId: string,
+  kind: SubscriptionLifecycleEvent['kind'],
+  lifecycleState: SubscriptionLifecycleEvent['lifecycleState'],
+  expiresAtIso: string,
+): string {
+  return `subscription_lifecycle_${createHash('sha256').update(`${customerId}:${kind}:${lifecycleState}:${expiresAtIso}`).digest('hex')}`;
 }
 
 export function createStoreFromEnv(env: NodeJS.ProcessEnv = process.env): JsonRasStore {
