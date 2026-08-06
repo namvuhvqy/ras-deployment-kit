@@ -203,6 +203,48 @@ test('customer-scoped read endpoints require a matching session bearer token', a
   });
 });
 
+test('dashboard exposes a date-derived subscription without changing provider connection health or durable state', async () => {
+  const state = emptyState();
+  const serverNow = Date.now();
+  const expiry = (offsetDays: number) => new Date(serverNow + offsetDays * 86_400_000).toISOString();
+  const cases = [
+    { id: 'active', expiresAtIso: expiry(30), lifecycleState: 'active', paidCapability: 'allow' },
+    { id: 'past_due', expiresAtIso: expiry(-1), lifecycleState: 'past_due', paidCapability: 'allow' },
+    { id: 'expired', expiresAtIso: expiry(-8), lifecycleState: 'expired', paidCapability: 'entitlement_expired' },
+    { id: 'malformed', expiresAtIso: 'not-an-iso-date', lifecycleState: 'unknown', paidCapability: 'entitlement_unavailable' },
+  ] as const;
+  state.users = cases.map(({ id }) => ({ id: `user_${id}`, email: `${id}@example.test`, role: 'owner', customerId: `cust_${id}`, status: 'active', createdAtIso: now, updatedAtIso: now }));
+  state.sessions = cases.map(({ id }) => ({ id: `session_${id}`, token: `token_${id}`, userId: `user_${id}`, createdAtIso: now, expiresAtIso: expiry(1) }));
+  state.customers = cases.map(({ id, expiresAtIso }) => ({ id: `cust_${id}`, name: id, status: 'active', createdAtIso: now, updatedAtIso: now, entitlement: activeEntitlement(expiresAtIso) }));
+  state.connectedAccounts = [{ id: 'account_expired', customerId: 'cust_expired', zernioAccountId: 'provider_expired', platform: 'facebook', status: 'connected', connectedAtIso: now, lastVerifiedAtIso: now, accessToken: 'must-not-leak' }];
+
+  await withApi(state, async (baseUrl, dbPath) => {
+    // Server startup migrates legacy fixture shape; establish the durable baseline
+    // only after that startup work completes, then exercise read-only dashboard calls.
+    assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+    const before = await readFile(dbPath, 'utf8');
+    for (const expected of cases) {
+      const response = await fetch(`${baseUrl}/dashboard`, { headers: { authorization: `Bearer token_${expected.id}` } });
+      assert.equal(response.status, 200);
+      const payload = (await response.json()) as { dashboard: { subscription: { lifecycleState: string; paidCapability: string; expiresAtIso?: string; reminderAtIso?: string; graceEndsAtIso?: string }; connectedAccounts: Array<{ id: string; status: string; accessToken?: string }> } };
+      assert.equal(payload.dashboard.subscription.lifecycleState, expected.lifecycleState);
+      assert.equal(payload.dashboard.subscription.paidCapability, expected.paidCapability);
+      if (expected.lifecycleState === 'unknown') assert.equal(payload.dashboard.subscription.expiresAtIso, undefined);
+      else {
+        assert.ok(payload.dashboard.subscription.expiresAtIso);
+        assert.ok(payload.dashboard.subscription.reminderAtIso);
+        assert.ok(payload.dashboard.subscription.graceEndsAtIso);
+      }
+      if (expected.id === 'expired') {
+        assert.equal(payload.dashboard.connectedAccounts[0]?.id, 'account_expired');
+        assert.equal(payload.dashboard.connectedAccounts[0]?.status, 'connected');
+        assert.equal(payload.dashboard.connectedAccounts[0]?.accessToken, undefined);
+      }
+    }
+    assert.equal(await readFile(dbPath, 'utf8'), before);
+  });
+});
+
 test('inbox read APIs are tenant-scoped and never expose another customer messages', async () => {
   const state = emptyState();
   Object.assign(state, {

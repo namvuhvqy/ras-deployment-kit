@@ -672,7 +672,27 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
       return;
     }
-    res.end(JSON.stringify({ ok: true, dashboard }));
+    // This is a read-only projection: lifecycle is evaluated from the server clock
+    // and authoritative expiry, never from sweep-mutated status flags.
+    if (dashboard.state === 'lead') {
+      res.end(JSON.stringify({ ok: true, dashboard }));
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const lifecycle = await store.getSubscriptionLifecycle(dashboard.customer.id, nowIso);
+    const subscription = {
+      lifecycleState: lifecycle?.state ?? 'unknown',
+      ...(lifecycle?.expiresAtIso ? { expiresAtIso: lifecycle.expiresAtIso } : {}),
+      ...(lifecycle?.reminderAtIso ? { reminderAtIso: lifecycle.reminderAtIso } : {}),
+      ...(lifecycle?.graceEndsAtIso ? { graceEndsAtIso: lifecycle.graceEndsAtIso } : {}),
+      paidCapability: evaluatePaidCapability(dashboard.entitlement, nowIso),
+    };
+    // Provider health is independent of billing. Deliberately preserve its mapping
+    // and status while excluding any unmodelled persisted secret fields.
+    const connectedAccounts = dashboard.connectedAccounts.map(({ id, customerId, platform, zernioAccountId, zernioProfileId, profileId, handle, username, status, capabilities, connectedAtIso, lastVerifiedAtIso }) => ({
+      id, customerId, platform, zernioAccountId, zernioProfileId, profileId, handle, username, status, capabilities, connectedAtIso, lastVerifiedAtIso,
+    }));
+    res.end(JSON.stringify({ ok: true, dashboard: { ...dashboard, connectedAccounts, subscription } }));
     return;
   }
 

@@ -1,7 +1,7 @@
 # RAS Dashboard IA & API Contract — Phase 5A
 
-Updated: 2026-08-01
-Status: **design locked; implementation next**
+Updated: 2026-08-06
+Status: **local implementation contract; deployment status is not asserted here**
 Owner: Nam Vũ / RunAgentSys
 
 ## 1. Goal and boundaries
@@ -62,6 +62,27 @@ type DashboardV2 = {
 3. Inbox counts are tenant scoped and do not expose conversation text in this summary.
 4. Customer-facing endpoint does not expose `zernioProfileId`, raw provider IDs, host/IP, secret metadata, or other tenant internals.
 5. Preserve legacy `plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus` until all frontend consumers migrate.
+
+### Subscription lifecycle read model (Task 5)
+
+Tenant-bound `GET /dashboard` now adds the following **read-only** projection. Its clock is server-owned (`new Date().toISOString()`); callers cannot supply `now`.
+
+```ts
+type DashboardSubscription = {
+  lifecycleState: 'active' | 'expiring_soon' | 'past_due' | 'expired' | 'unknown';
+  expiresAtIso?: string;
+  reminderAtIso?: string;
+  graceEndsAtIso?: string;
+  paidCapability: 'allow' | 'entitlement_unavailable' | 'entitlement_expired' | 'entitlement_inactive';
+};
+```
+
+- It is derived from `getSubscriptionLifecycle(customerId, serverNow)` and the entitlement policy, not mutable billing/package flags. Invalid or missing expiry is `unknown` plus `entitlement_unavailable`, rather than an error.
+- Boundaries are **T-7** reminder (`expiring_soon`), **T0** `past_due`, and **T+7** `expired`. `active` is before T-7.
+- The endpoint never sweeps lifecycle events or mutates entitlement, connection mappings, provider status, or provider resources. A separate idempotent renewal/capture path may extend the authoritative expiry; repeated capture handling must retain its existing idempotency semantics.
+- `paidCapability` is a mutation gate, not a provider-health label: paid mutations are blocked when it is not `allow`; existing Zernio mapping/status remains visible and its `connected`/error health is reported independently of RAS billing. No automatic disconnect or deletion occurs at expiry, and no tokens are returned.
+- UX mapping: show renewal/reminder/billing follow-up from `subscription`; retain each Channels card and show its provider status separately. For `unknown`, show an entitlement-support state rather than fabricating expiry. For blocked paid mutations, retain read access and explain the renewal requirement.
+- Changing plans is not inferred from this read model and requires a dedicated, audited migration. No public VPS/agent paid-mutation routes currently exist.
 
 ## 4. Admin workspace contract
 
