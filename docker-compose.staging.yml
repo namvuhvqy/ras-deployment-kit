@@ -71,9 +71,13 @@ services:
       ras-api:
         condition: service_healthy
 
+# Explicit environment-qualified volumes prevent Staging from ever sharing the
+# Production JSON store or Redis persistence through a Compose project collision.
 volumes:
   ras-data:
+    name: ras-deployment-kit_ras-data-staging
   ras-redis-data:
+    name: ras-deployment-kit_ras-redis-data-staging
 
 networks:
   ras-internal:
