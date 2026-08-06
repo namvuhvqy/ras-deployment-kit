@@ -111,6 +111,16 @@ npm run check
 
 Expected result: TypeScript build passes and all Node tests pass.
 
+## Persistence and SQL schema reference
+
+Production runtime persistence uses `JsonRasStore` (the JSON file selected by
+`RAS_DB_PATH`); its `migrate()` method performs the executable state upgrade.
+There is no SQL persistence runtime, SQL deployment target, or SQL migration
+runner in this repository. `packages/shared/src/dbSchema.ts`,
+`infra/schema.sql`, and `npm run schema:sql` are therefore **fresh-schema
+SQLite references only**. They must not be represented as an upgrade path for
+an existing SQL database.
+
 ## Google OAuth 2.0 login
 
 RAS login is Google OAuth-only. The backend exposes these auth routes before the final 404 fallback:

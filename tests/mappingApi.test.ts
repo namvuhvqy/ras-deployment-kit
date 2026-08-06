@@ -74,6 +74,20 @@ test('captured payment endpoint rejects session callers without the trusted serv
   });
 });
 
+test('internal access rejects tokens with differing byte lengths without throwing', async () => {
+  const state = emptyState();
+  await withApi(state, async (baseUrl) => {
+    for (const token of ['test', 'test-internal-token-extra']) {
+      const response = await fetch(`${baseUrl}/mappings/users`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-ras-internal-token': token },
+        body: JSON.stringify({ customerId: 'cust', email: 'user@example.test' }),
+      });
+      assert.equal(response.status, 401);
+    }
+  });
+});
+
 test('internal user provisioning creates a tenant-bound login identity', async () => {
   const state = emptyState();
   state.customers = [{ id: 'ras-smoke', name: 'RAS Smoke', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 1, activeConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } }];

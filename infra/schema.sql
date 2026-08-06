@@ -1,4 +1,4 @@
--- RAS schema v1
+-- RAS schema reference v3 (fresh database only; no SQL migration runner is included)
 
 PRAGMA foreign_keys = ON;
 
@@ -39,6 +39,43 @@ CREATE TABLE IF NOT EXISTS social_posts (
     updated_at TEXT NOT NULL
   );
 
+CREATE TABLE IF NOT EXISTS inbox_conversations (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    account_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    provider_conversation_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    unread_count INTEGER NOT NULL DEFAULT 0,
+    last_message_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(customer_id, provider_conversation_id)
+  );
+
+CREATE TABLE IF NOT EXISTS inbox_messages (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    conversation_id TEXT NOT NULL REFERENCES inbox_conversations(id),
+    provider_message_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    text TEXT,
+    received_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(customer_id, provider_message_id)
+  );
+
+CREATE TABLE IF NOT EXISTS inbox_draft_replies (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    conversation_id TEXT NOT NULL REFERENCES inbox_conversations(id),
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_review',
+    send_attempted INTEGER NOT NULL DEFAULT 0,
+    created_by_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
 CREATE TABLE IF NOT EXISTS job_queue (
     id TEXT PRIMARY KEY,
     customer_id TEXT NOT NULL REFERENCES customers(id),
@@ -66,6 +103,23 @@ CREATE TABLE IF NOT EXISTS webhook_events (
     UNIQUE(source, id)
   );
 
+CREATE TABLE IF NOT EXISTS checkout_intents (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT REFERENCES customers(id),
+    purchaser_user_id TEXT,
+    purchaser_email TEXT,
+    plan TEXT NOT NULL,
+    billing_cycle TEXT NOT NULL,
+    extra_connect_slots INTEGER NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL,
+    paypal_order_id TEXT UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
     customer_id TEXT,
@@ -89,3 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_job_queue_profile_status ON job_queue(profile_id,
 CREATE INDEX IF NOT EXISTS idx_webhook_events_profile_created ON webhook_events(profile_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_customer_created ON audit_logs(customer_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_checkout_intents_customer_status ON checkout_intents(customer_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_checkout_intents_purchaser_status ON checkout_intents(purchaser_user_id, status);

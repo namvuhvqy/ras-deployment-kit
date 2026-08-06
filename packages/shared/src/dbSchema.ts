@@ -1,3 +1,10 @@
+/**
+ * JSON-store state version. This is not a SQL database migration version.
+ *
+ * This module renders a fresh SQLite schema reference for operators and
+ * documentation. Production persistence is JsonRasStore; this repository has
+ * no SQL runtime, database deployment target, or SQL migration runner.
+ */
 export const RAS_SCHEMA_VERSION = 3;
 
 export const createTableStatements = [
@@ -134,44 +141,13 @@ export const createIndexStatements = [
 ];
 
 /**
- * SQLite cannot relax a NOT NULL column in place.  v3 rebuilds only the v2
- * checkout_intents table, copying every existing row and preserving its order
- * binding index before creating v3 lookup indexes.
+ * Fresh-schema SQLite reference only. It is not applied by JsonRasStore and
+ * must not be used to upgrade an existing database without a real SQL runtime
+ * and migration mechanism.
  */
-export const checkoutIntentsV3MigrationStatements = [
-  `PRAGMA foreign_keys = OFF`,
-  `CREATE TABLE checkout_intents_v3 (
-    id TEXT PRIMARY KEY,
-    customer_id TEXT REFERENCES customers(id),
-    purchaser_user_id TEXT,
-    purchaser_email TEXT,
-    plan TEXT NOT NULL,
-    billing_cycle TEXT NOT NULL,
-    extra_connect_slots INTEGER NOT NULL,
-    amount TEXT NOT NULL,
-    currency TEXT NOT NULL,
-    status TEXT NOT NULL,
-    paypal_order_id TEXT UNIQUE,
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  )`,
-  `INSERT INTO checkout_intents_v3 (id, customer_id, plan, billing_cycle, extra_connect_slots, amount, currency, status, paypal_order_id, expires_at, created_at, updated_at)
-   SELECT id, customer_id, plan, billing_cycle, extra_connect_slots, amount, currency, status, paypal_order_id, expires_at, created_at, updated_at FROM checkout_intents`,
-  `DROP TABLE checkout_intents`,
-  `ALTER TABLE checkout_intents_v3 RENAME TO checkout_intents`,
-  `PRAGMA foreign_keys = ON`,
-];
-
-/** Run only after the database migrator has identified an existing v2 checkout_intents table. */
-export function renderV2ToV3SqlMigration(): string {
-  return [`-- RAS schema v2 to v3`, ...checkoutIntentsV3MigrationStatements.map((statement) => `${statement};`), ...createIndexStatements.filter((statement) => statement.includes('checkout_intents')).map((statement) => `${statement};`)].join('\n\n');
-}
-
-/** Fresh v3 schema. Existing v2 databases must use renderV2ToV3SqlMigration first. */
 export function renderSqlMigration(): string {
   return [
-    `-- RAS schema v${RAS_SCHEMA_VERSION}`,
+    `-- RAS schema reference v${RAS_SCHEMA_VERSION} (fresh database only; no SQL migration runner is included)`,
     `PRAGMA foreign_keys = ON;`,
     ...createTableStatements.map((statement) => `${statement};`),
     ...createIndexStatements.map((statement) => `${statement};`),

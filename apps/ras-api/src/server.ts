@@ -239,8 +239,11 @@ function endCustomerAccessError(res: { statusCode: number; setHeader: (name: str
 
 function requireInternalAccess(req: IncomingMessage): boolean {
   const token = process.env.RAS_INTERNAL_API_TOKEN;
-  if (!token) return false;
-  return firstHeader(req, 'x-ras-internal-token') === token;
+  const supplied = firstHeader(req, 'x-ras-internal-token');
+  if (!token || !supplied) return false;
+  const expectedBuffer = Buffer.from(token);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
 
 function endInternalAccessError(res: { statusCode: number; end: (chunk: string) => void }) {
