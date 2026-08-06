@@ -749,7 +749,14 @@ const server = createServer(async (req, res) => {
     // Only the trusted server relay may report a provider capture. Pricing and tenant
     // identity are read from an already-bound, durable intent, never browser input.
     if (!requireInternalAccess(req)) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'internal_payment_relay_required' })); return; }
-    const body = await readJsonBody(req);
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+      return;
+    }
     const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
     const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');

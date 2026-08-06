@@ -79,6 +79,25 @@ test('PayPal sandbox capture rejects malformed JSON before relaying or mutating 
   });
 });
 
+test('captured payment endpoint rejects malformed JSON from the trusted relay without mutating state', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_payment', name: 'Payment tenant', status: 'active', maxConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } }];
+  await withApi(state, async (baseUrl, dbPath) => {
+    const response = await fetch(`${baseUrl}/billing/payments/captured`, {
+      method: 'POST',
+      headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' },
+      body: '{"intent_id":',
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { ok: false, error: 'invalid_json' });
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { payments?: unknown[]; checkoutIntents?: unknown[]; jobs: unknown[]; auditLogs: unknown[] };
+    assert.deepEqual(persisted.payments ?? [], []);
+    assert.deepEqual(persisted.checkoutIntents ?? [], []);
+    assert.deepEqual(persisted.jobs, []);
+    assert.deepEqual(persisted.auditLogs, []);
+  });
+});
+
 test('captured payment endpoint rejects session callers without the trusted server relay token', async () => {
   const state = emptyState();
   state.customers = [{ id: 'cust_payment', name: 'Payment tenant', status: 'active', maxConnectedAccounts: 1, packageStatus: 'active', addOnStatus: { zernio: 'active' } }];
