@@ -101,6 +101,40 @@ export interface MigrationResult {
   sql: string;
 }
 
+/** Deep allowlisted product/quota view; never expose persisted entitlement extras. */
+export type DashboardEntitlement = RasEntitlement & {
+  plan: 'none' | string;
+  maxConnectedAccounts: number;
+  activeConnectedAccounts: number;
+  addOnStatus: Record<string, string>;
+};
+
+function projectDashboardEntitlement(entitlement: RasEntitlement, activeConnectedAccounts: number, addOnStatus: Record<string, string>): DashboardEntitlement {
+  const basePlan = entitlement.basePlan;
+  return {
+    basePlan: {
+      planId: basePlan.planId, status: basePlan.status,
+      ...(basePlan.billingCycle !== undefined && { billingCycle: basePlan.billingCycle }),
+      ...(basePlan.monthlyPriceUsd !== undefined && { monthlyPriceUsd: basePlan.monthlyPriceUsd }),
+      ...(basePlan.totalAmountUsd !== undefined && { totalAmountUsd: basePlan.totalAmountUsd }),
+      vps: { type: basePlan.vps.type, ...(basePlan.vps.size !== undefined && { size: basePlan.vps.size }) },
+      agents: { included: basePlan.agents.included, kinds: [...basePlan.agents.kinds] },
+      ...(basePlan.aiTokens !== undefined && { aiTokens: { monthlyLimit: basePlan.aiTokens.monthlyLimit, ...(basePlan.aiTokens.used !== undefined && { used: basePlan.aiTokens.used }) } }),
+      ...(basePlan.activatedAtIso !== undefined && { activatedAtIso: basePlan.activatedAtIso }),
+      ...(basePlan.expiresAtIso !== undefined && { expiresAtIso: basePlan.expiresAtIso }),
+    },
+    connectSlots: {
+      status: entitlement.connectSlots.status, includedSlots: entitlement.connectSlots.includedSlots,
+      purchasedSlots: entitlement.connectSlots.purchasedSlots, trialSlots: entitlement.connectSlots.trialSlots,
+      totalSlots: entitlement.connectSlots.totalSlots, activeConnectedAccounts: entitlement.connectSlots.activeConnectedAccounts,
+      ...(entitlement.connectSlots.trialExpiresAtIso !== undefined && { trialExpiresAtIso: entitlement.connectSlots.trialExpiresAtIso }),
+      ...(entitlement.connectSlots.soloApiEnabled !== undefined && { soloApiEnabled: entitlement.connectSlots.soloApiEnabled }),
+    },
+    addOns: entitlement.addOns.map((addOn) => ({ id: addOn.id, name: addOn.name, status: addOn.status, ...(addOn.slots !== undefined && { slots: addOn.slots }) })),
+    plan: basePlan.planId, maxConnectedAccounts: entitlement.connectSlots.totalSlots, activeConnectedAccounts, addOnStatus: { ...addOnStatus },
+  };
+}
+
 export interface RasTenantDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
@@ -111,16 +145,7 @@ export interface RasTenantDashboard {
     channels: { totalSlots: number; activeAccounts: number; needsReconnect: number };
     api: { patManagementHref: '/personal-access-tokens' };
   };
-  entitlement: RasEntitlement & {
-    /** Backward-compatible plan label for older frontend consumers. */
-    plan: 'none' | string;
-    /** Backward-compatible connect slot quota. Prefer entitlement.connectSlots.totalSlots. */
-    maxConnectedAccounts: number;
-    /** Backward-compatible connected account count. Prefer entitlement.connectSlots.activeConnectedAccounts. */
-    activeConnectedAccounts: number;
-    /** Backward-compatible add-on status map. Prefer entitlement.addOns. */
-    addOnStatus: Record<string, string>;
-  };
+  entitlement: DashboardEntitlement;
   cta?: {
     label: string;
     href: string;
@@ -133,8 +158,9 @@ export interface RasTenantDashboard {
 
 /** An authenticated lead has no tenant resources or control-panel data. */
 export interface RasLeadDashboard {
-  user: Omit<RasUser, 'password'>;
+  user: Pick<RasUser, 'id' | 'email' | 'displayName'>;
   state: 'lead';
+  cta: { label: string; href: string };
 }
 
 export type RasDashboard = RasTenantDashboard | RasLeadDashboard;
@@ -406,7 +432,11 @@ export class JsonRasStore {
     const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
     if (!user) return undefined;
     const { password: _password, ...safeUser } = user;
-    if (!user.customerId) return { user: safeUser, state: 'lead' };
+    if (!user.customerId) return {
+      user: { id: user.id, email: user.email, ...(user.displayName !== undefined ? { displayName: user.displayName } : {}) },
+      state: 'lead',
+      cta: { label: 'Chọn gói để bắt đầu', href: '/pay' },
+    };
     const customer = state.customers.find((row) => row.id === user.customerId);
     if (!customer) return undefined;
     const connectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
@@ -440,13 +470,7 @@ export class JsonRasStore {
       customer: { ...customer, entitlement },
       state: dashboardState,
       dashboardSummary,
-      entitlement: {
-        ...entitlement,
-        plan: entitlement.basePlan.planId,
-        maxConnectedAccounts: entitlement.connectSlots.totalSlots,
-        activeConnectedAccounts,
-        addOnStatus,
-      },
+      entitlement: projectDashboardEntitlement(entitlement, activeConnectedAccounts, addOnStatus),
       cta: dashboardState === 'needs_plan' ? { label: 'Chọn gói để kích hoạt workspace', href: '/pay' } : undefined,
       sandboxes: state.sandboxes.filter((row) => row.customerId === customer.id),
       agents: state.agents.filter((row) => row.customerId === customer.id),

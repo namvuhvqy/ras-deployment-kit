@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 const now = new Date().toISOString();
 
 function assertDashboardHasNoProviderFields(value: unknown): void {
-  const prohibited = new Set(['zernioProfileId', 'zernioProfileIds', 'zernioAccountId', 'profileId', 'accessToken']);
+  const prohibited = new Set(['zernioProfileId', 'zernioProfileIds', 'zernioAccountId', 'profileId', 'accessToken', 'providerId', 'providerToken', 'internalMetadata', 'internalTimestamp']);
   if (Array.isArray(value)) {
     for (const item of value) assertDashboardHasNoProviderFields(item);
     return;
@@ -55,7 +55,17 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         sandboxId: 'sandbox_1',
         servicePackageId: 'pkg_growth',
         billingStatus: 'active',
-        entitlement: { basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: new Date(Date.now() + 86_400_000).toISOString() }, connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 }, addOns: [{ id: 'zernio', name: 'Zernio Connect', status: 'active' }] },
+        entitlement: {
+          basePlan: {
+            planId: 'lite', status: 'active', billingCycle: 'monthly', monthlyPriceUsd: 49, totalAmountUsd: 49,
+            vps: { type: 'dedicated', size: 'standard', providerId: 'vps_provider_1' },
+            agents: { included: 1, kinds: ['ras1-hermes'], internalMetadata: { providerToken: 'agent_token' } },
+            aiTokens: { monthlyLimit: 1_000_000, used: 42, providerToken: 'ai_token' },
+            expiresAtIso: new Date(Date.now() + 86_400_000).toISOString(), internalMetadata: { providerId: 'plan_provider_1' },
+          },
+          connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0, soloApiEnabled: true, internalMetadata: { providerToken: 'connect_token' } },
+          addOns: [{ id: 'zernio', name: 'Zernio Connect', status: 'active', slots: 1, internalMetadata: { providerId: 'addon_provider_1' } }],
+        },
         createdAtIso: now,
       },
       {
@@ -190,12 +200,20 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       headers: { authorization: `Bearer ${loginPayload.token}` },
     });
     assert.equal(dashboard.status, 200);
-    const payload = (await dashboard.json()) as { dashboard: { customer: { id: string; name: string; status?: string }; agents: Array<{ kind: string }> } };
+    const payload = (await dashboard.json()) as { dashboard: { customer: { id: string; name: string; status?: string }; agents: Array<{ kind: string }>; entitlement: any } };
     assert.equal(payload.dashboard.customer.id, 'cust_1');
     assert.equal(payload.dashboard.customer.name, 'Shop Demo');
     assert.equal(payload.dashboard.customer.status, 'active');
     assert.equal(payload.dashboard.agents[0].kind, 'ras1-hermes');
     assertDashboardHasNoProviderFields(payload.dashboard);
+    assert.equal(payload.dashboard.entitlement.basePlan.planId, 'lite');
+    assert.equal(payload.dashboard.entitlement.basePlan.billingCycle, 'monthly');
+    assert.equal(payload.dashboard.entitlement.basePlan.monthlyPriceUsd, 49);
+    assert.deepEqual(payload.dashboard.entitlement.basePlan.vps, { type: 'dedicated', size: 'standard' });
+    assert.deepEqual(payload.dashboard.entitlement.basePlan.agents, { included: 1, kinds: ['ras1-hermes'] });
+    assert.deepEqual(payload.dashboard.entitlement.basePlan.aiTokens, { monthlyLimit: 1_000_000, used: 42 });
+    assert.equal(payload.dashboard.entitlement.connectSlots.soloApiEnabled, true);
+    assert.ok(payload.dashboard.entitlement.addOns.some((addOn: { id: string; slots?: number }) => addOn.id === 'zernio' && addOn.slots === 1));
 
     const mapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(mapping.status, 200);
@@ -435,24 +453,29 @@ test('Google OAuth callback creates only a lead user and session, with no tenant
     assert.equal((persisted.jobs as unknown[]).length, 0);
     assert.equal((persisted.personalAccessTokens as unknown[]).length, 0);
     assert.equal((persisted.checkoutIntents as unknown[]).length, 0);
+    const lead = (persisted.users as Array<Record<string, unknown>>)[0];
+    lead.providerId = 'google_provider_1';
+    lead.accessToken = 'google_access_token';
+    lead.internalMetadata = { providerToken: 'google_provider_token' };
+    lead.internalTimestamp = now;
+    await writeFile(dbPath, `${JSON.stringify(persisted, null, 2)}\n`);
 
     const dashboard = await fetch(`http://127.0.0.1:${port}/dashboard`, {
       headers: { authorization: `Bearer ${callbackPayload.token}` },
     });
     assert.equal(dashboard.status, 200);
-    assert.deepEqual(await dashboard.json(), {
+    const dashboardPayload = await dashboard.json() as { dashboard: unknown };
+    assertDashboardHasNoProviderFields(dashboardPayload.dashboard);
+    assert.deepEqual(dashboardPayload, {
       ok: true,
       dashboard: {
         user: {
           id: (persisted.users as Array<{ id: string }>)[0].id,
           email: 'owner@example.com',
           displayName: 'Owner Google',
-          role: 'owner',
-          status: 'active',
-          createdAtIso: (persisted.users as Array<{ createdAtIso: string }>)[0].createdAtIso,
-          updatedAtIso: (persisted.users as Array<{ updatedAtIso: string }>)[0].updatedAtIso,
         },
         state: 'lead',
+        cta: { label: 'Chọn gói để bắt đầu', href: '/pay' },
       },
     });
 

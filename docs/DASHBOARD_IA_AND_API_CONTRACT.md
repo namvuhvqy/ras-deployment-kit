@@ -42,9 +42,12 @@ type DashboardV2 = {
     state: 'ready' | 'needs_plan';
     // Exact safe projection only; never a persisted RasCustomer record.
     customer: { id: string; name: string; status?: string };
-    // Product/quota value type only: basePlan, connectSlots, and addOns.
-    // It contains no provider/profile/account identity fields.
-    entitlement: RasEntitlement;
+    // Deep allowlisted product/quota view only. `basePlan` permits planId,
+    // status, billingCycle, prices, vps type/size, agents included/kinds,
+    // aiTokens limit/usage, and activation/expiry. `connectSlots` permits
+    // status, counts, trial expiry, and solo API flag. `addOns` permits only
+    // id/name/status/slots. Unknown persisted fields are never returned.
+    entitlement: DashboardEntitlement;
     // Dashboard-safe projection only; never a persisted ConnectedAccount record.
     connectedAccounts: Array<{
       id: string; // local RAS connection ID
@@ -60,6 +63,16 @@ type DashboardV2 = {
       channels: { totalSlots: number; activeAccounts: number; needsReconnect: number };
       api: { patManagementHref: '/personal-access-tokens' };
     };
+  };
+};
+```
+
+```ts
+type LeadDashboard = {
+  dashboard: {
+    state: 'lead';
+    user: { id: string; email: string; displayName?: string };
+    cta: { label: string; href: '/pay' };
   };
 };
 ```
