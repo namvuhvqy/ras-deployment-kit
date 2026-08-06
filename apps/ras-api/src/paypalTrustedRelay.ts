@@ -63,13 +63,15 @@ export async function relayPaypalSandboxCapture(input: { intent: CheckoutIntent;
   let tokenResponse: Awaited<ReturnType<FetchLike>>;
   try { tokenResponse = await fetcher(`${PAYPAL_SANDBOX_API}/v1/oauth2/token`, { method: 'POST', headers: { authorization: `Basic ${basic}`, 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=client_credentials' }); } catch { return { ok: false, status: 502, error: 'paypal_oauth_request_failed' }; }
   if (!tokenResponse.ok) return { ok: false, status: 502, error: 'paypal_oauth_failed' };
-  const accessToken = (await tokenResponse.json() as { access_token?: unknown }).access_token;
+  let accessToken: unknown;
+  try { accessToken = (await tokenResponse.json() as { access_token?: unknown }).access_token; } catch { return { ok: false, status: 502, error: 'paypal_oauth_failed' }; }
   if (typeof accessToken !== 'string' || !accessToken) return { ok: false, status: 502, error: 'paypal_oauth_failed' };
 
   let orderResponse: Awaited<ReturnType<FetchLike>>;
   try { orderResponse = await fetcher(`${PAYPAL_SANDBOX_API}/v2/checkout/orders/${encodeURIComponent(input.paypalOrderId)}`, { headers: { authorization: `Bearer ${accessToken}` } }); } catch { return { ok: false, status: 502, error: 'paypal_order_request_failed' }; }
   if (!orderResponse.ok) return { ok: false, status: 502, error: 'paypal_order_fetch_failed' };
-  const capture = completedCapture(await orderResponse.json(), input.paypalOrderId, input.intent.amount, input.intent.currency);
+  let capture: { id: string } | undefined;
+  try { capture = completedCapture(await orderResponse.json(), input.paypalOrderId, input.intent.amount, input.intent.currency); } catch { return { ok: false, status: 502, error: 'paypal_order_fetch_failed' }; }
   if (!capture) return { ok: false, status: 422, error: 'paypal_order_not_completed_or_mismatched' };
 
   const issuedAtIso = new Date().toISOString();

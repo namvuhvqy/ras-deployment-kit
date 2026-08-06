@@ -41,6 +41,27 @@ test('PayPal relay rejects OAuth failures and never forwards', async () => {
   assert.equal(calls, 1);
 });
 
+test('PayPal relay fails closed when HTTP-OK OAuth JSON decoding rejects', async () => {
+  let calls = 0;
+  const result = await relayPaypalSandboxCapture({ intent, paypalOrderId: 'ORDER-1' }, config, async () => {
+    calls++;
+    return { ok: true, status: 200, json: async () => { throw new Error('invalid OAuth JSON'); } };
+  });
+  assert.deepEqual(result, { ok: false, status: 502, error: 'paypal_oauth_failed' });
+  assert.equal(calls, 1);
+});
+
+test('PayPal relay fails closed when HTTP-OK order JSON decoding rejects', async () => {
+  let calls = 0;
+  const result = await relayPaypalSandboxCapture({ intent, paypalOrderId: 'ORDER-1' }, config, async (url) => {
+    calls++;
+    if (url.endsWith('/token')) return response(true, 200, { access_token: 'access' });
+    return { ok: true, status: 200, json: async () => { throw new Error('invalid order JSON'); } };
+  });
+  assert.deepEqual(result, { ok: false, status: 502, error: 'paypal_order_fetch_failed' });
+  assert.equal(calls, 2);
+});
+
 for (const [name, order] of [
   ['wrong order', paypalOrder({ id: 'OTHER' })],
   ['wrong currency', paypalOrder({ purchase_units: [{ payments: { captures: [{ id: 'CAP-1', status: 'COMPLETED', amount: { value: '19', currency_code: 'EUR' } }] } }] })],
