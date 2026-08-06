@@ -76,7 +76,7 @@ test('scheduling API creates drafts/schedules atomically, idempotently, and tena
     assert.equal(first.post.status, 'draft');
     assert.equal(first.post.platform, 'facebook');
     assert.equal(first.post.content, 'hello');
-    assert.deepEqual(Object.keys(first.post).sort(), ['accountId', 'content', 'createdAtIso', 'isDraft', 'mediaUrls', 'platform', 'status', 'updatedAtIso']);
+    assert.deepEqual(Object.keys(first.post).sort(), ['accountId', 'content', 'createdAtIso', 'isDraft', 'mediaUrls', 'monitorId', 'platform', 'status', 'updatedAtIso']);
     const repeat = await post(baseUrl, '/customers/cust_a/posts/drafts', 'writer-token', 'draft-1', { mediaUrls: ['https://cdn.test/a.png'], content: '  hello  ', accountId: 'acct_a' });
     assert.equal(repeat.status, 200);
     assert.deepEqual((await repeat.json() as { post: unknown }).post, first.post);
@@ -91,6 +91,7 @@ test('scheduling API creates drafts/schedules atomically, idempotently, and tena
     assert.equal(scheduledPayload.post.status, 'scheduled');
     assert.equal(scheduledPayload.post.isDraft, false);
     assert.equal(scheduledPayload.post.scheduleAtIso, future);
+    assert.match(String(scheduledPayload.post.monitorId), /^post_/);
     assert.equal(scheduledPayload.job.runAfterIso, undefined);
     assert.deepEqual(Object.keys(scheduledPayload.job).sort(), ['id', 'status', 'type']);
     assert.equal(scheduledPayload.post.idempotencyKey, undefined);

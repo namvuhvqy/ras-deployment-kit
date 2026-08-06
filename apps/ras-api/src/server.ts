@@ -302,7 +302,7 @@ function canonicalPostHash(value: Record<string, unknown>): string {
 }
 
 function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
-  return { accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
+  return { monitorId: post.id, accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
 }
 
 type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
