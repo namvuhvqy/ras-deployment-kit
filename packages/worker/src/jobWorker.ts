@@ -22,6 +22,8 @@ export interface WorkerOptions {
   dryRun: boolean;
   notifier?: TopicNotifier;
   claimLeaseMs?: number;
+  /** Server-side subscription lifecycle sweep cadence. */
+  lifecycleSweepMs?: number;
 }
 
 export interface TopicNotifier {
@@ -36,6 +38,9 @@ export interface WorkerRunResult {
 }
 
 export class RasJobWorker {
+  private nextLifecycleSweepAtMs = 0;
+  private lifecycleSweepInFlight?: Promise<void>;
+
   constructor(
     private readonly store: JsonRasStore,
     private readonly adapter: ZernioAdapter,
@@ -43,6 +48,7 @@ export class RasJobWorker {
   ) {}
 
   async runOnce(): Promise<WorkerRunResult> {
+    await this.sweepSubscriptionLifecycleIfDue();
     const leaseMs = this.options.claimLeaseMs ?? 60_000;
     const dueJobs = await this.store.getQueuedJobs(leaseMs);
     const queue = new FairProfileQueue();
@@ -70,6 +76,25 @@ export class RasJobWorker {
       if (this.options.singleRun) return;
       if (result.processed === 0) await sleep(this.options.idleMs, undefined, { signal }).catch(() => undefined);
     }
+  }
+
+  private async sweepSubscriptionLifecycleIfDue(): Promise<void> {
+    if (this.lifecycleSweepInFlight) return this.lifecycleSweepInFlight;
+    if (Date.now() < this.nextLifecycleSweepAtMs) return;
+
+    const cadenceMs = this.options.lifecycleSweepMs ?? DEFAULT_LIFECYCLE_SWEEP_MS;
+    this.nextLifecycleSweepAtMs = Date.now() + cadenceMs;
+    this.lifecycleSweepInFlight = (async () => {
+      try {
+        // The worker owns this clock; no HTTP/client-supplied time is accepted.
+        await this.store.sweepSubscriptionLifecycle(new Date().toISOString());
+      } catch (error) {
+        console.error('ras-worker subscription lifecycle sweep failed', error);
+      } finally {
+        this.lifecycleSweepInFlight = undefined;
+      }
+    })();
+    return this.lifecycleSweepInFlight;
   }
 
   private async processJob(job: RasJob): Promise<'completed' | 'failed' | 'requeued'> {
@@ -339,6 +364,18 @@ export class RasJobWorker {
   }
 }
 
+export const DEFAULT_LIFECYCLE_SWEEP_MS = 15 * 60_000;
+const MIN_LIFECYCLE_SWEEP_MS = 60_000;
+const MAX_LIFECYCLE_SWEEP_MS = 24 * 60 * 60_000;
+
+export function lifecycleSweepMsFromEnv(value: string | undefined): number {
+  if (!value || !/^[0-9]+$/.test(value)) return DEFAULT_LIFECYCLE_SWEEP_MS;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= MIN_LIFECYCLE_SWEEP_MS && parsed <= MAX_LIFECYCLE_SWEEP_MS
+    ? parsed
+    : DEFAULT_LIFECYCLE_SWEEP_MS;
+}
+
 export function workerOptionsFromEnv(env: NodeJS.ProcessEnv = process.env, notifier?: TopicNotifier): WorkerOptions {
   return {
     batchSize: numberFromEnv(env.RAS_WORKER_BATCH_SIZE, 20),
@@ -347,6 +384,7 @@ export function workerOptionsFromEnv(env: NodeJS.ProcessEnv = process.env, notif
     baseRetryMs: numberFromEnv(env.RAS_WORKER_BASE_RETRY_MS, 60_000),
     singleRun: env.RAS_WORKER_SINGLE_RUN === 'true',
     dryRun: (env.ZERNIO_MODE ?? env.RAS_ZERNIO_MODE ?? 'dry-run') !== 'live',
+    lifecycleSweepMs: lifecycleSweepMsFromEnv(env.SUBSCRIPTION_LIFECYCLE_SWEEP_MS),
     notifier,
   };
 }
