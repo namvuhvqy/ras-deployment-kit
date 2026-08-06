@@ -47,9 +47,10 @@ test('dashboard requires a valid session token and returns tenant control panel 
 
     const dashboard = await store.getDashboardForSession(session.token, now);
     assert.equal(dashboard?.user.email, 'owner@example.com');
-    assert.equal(dashboard?.customer.id, 'cust_1');
-    assert.equal(dashboard?.sandboxes[0].status, 'running');
-    assert.equal(dashboard?.agents[0].kind, 'ras1-hermes');
+    if (!dashboard || dashboard.state === 'lead') throw new Error('expected tenant dashboard');
+    assert.equal(dashboard.customer.id, 'cust_1');
+    assert.equal(dashboard.sandboxes[0].status, 'running');
+    assert.equal(dashboard.agents[0].kind, 'ras1-hermes');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -83,16 +84,15 @@ test('dashboard summary is tenant-scoped and preserves needs-plan defaults', asy
       api: { patManagementHref: '/personal-access-tokens' },
     });
 
-    const newCustomer = await store.upsertGoogleUser({ email: 'new@example.test', nowIso: now });
-    const newSession = await store.createSession({ userId: newCustomer.id, ttlMs: 60_000, nowIso: now });
-    const needsPlan = await store.getDashboardForSession(newSession.token, now);
-    assert.equal(needsPlan?.state, 'needs_plan');
-    assert.deepEqual(needsPlan?.dashboardSummary, {
-      renewalState: 'unknown',
-      inbox: { unreadConversations: 0, pendingReviewDrafts: 0 },
-      channels: { totalSlots: 0, activeAccounts: 0, needsReconnect: 0 },
-      api: { patManagementHref: '/personal-access-tokens' },
-    });
+    const lead = await store.upsertGoogleUser({ email: 'new@example.test', nowIso: now });
+    const leadSession = await store.createSession({ userId: lead.id, ttlMs: 60_000, nowIso: now });
+    const leadDashboard = await store.getDashboardForSession(leadSession.token, now);
+    assert.equal(leadDashboard?.state, 'lead');
+    assert.equal(leadDashboard?.user.id, lead.id);
+    assert.equal(leadDashboard?.user.email, lead.email);
+    assert.equal('customer' in (leadDashboard ?? {}), false);
+    const state = await store.load();
+    assert.equal(state.customers.length, 2);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

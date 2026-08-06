@@ -14,5 +14,3 @@ for _ in $(seq 1 20); do
 done
 curl -fsS http://127.0.0.1:18080/health
 printf '\n'
-curl -fsS http://127.0.0.1:18080/dry-run/customer
-printf '\n'

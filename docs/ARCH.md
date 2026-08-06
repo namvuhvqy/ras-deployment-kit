@@ -22,7 +22,7 @@ The existing demo route must remain untouched during Step 1 and early Step 2.
 |---|---|---|
 | `/customer-portal` | Keep | Public/demo smoke path for `demo_khach_2` while protected dashboard is built. |
 | `/dashboard` | New protected route | Authenticated customer dashboard driven by session token. |
-| `/auth/google` + `/auth/google/callback` | New Google OAuth-only login | Creates/loads the user and customer from the Google profile, then issues a session token/cookie and redirects to `/dashboard`. |
+| `/auth/google` + `/auth/google/callback` | Public end-user Google OAuth login | Creates or loads a lead user and issues a session token/cookie. It does not create a customer/tenant, profile, entitlement, or quota; `/dashboard` returns lead-safe state until tenant binding. |
 
 The demo route can only be hidden or cleaned up after `/dashboard` passes production smoke end-to-end.
 
@@ -123,16 +123,17 @@ Cookie-based session is also allowed:
 Cookie: ras_session=<session_token>
 ```
 
-### Auth behavior
+### Auth behavior and lead-first state
 
 | Condition | Response |
 |---|---|
 | Missing token | `401 Unauthorized` |
 | Expired/invalid token | `401 Unauthorized` |
 | Valid token but disabled user/customer | `403 Forbidden` |
-| Valid token | `200 OK` with dashboard data for the session customer only |
+| Valid lead token | `200 OK` with lead-safe dashboard state only |
+| Valid tenant-bound token | `200 OK` with dashboard data for the session customer only |
 
-The backend must derive `customerId` from the session token. The frontend must not pass or trust `customerId` from query/env for protected dashboard data.
+The backend must derive `customerId` from the session token when the session is tenant-bound. A valid Google session without a bound customer returns `state: 'lead'` and lead-safe data only; it must not fabricate a customer, entitlement, profile, or quota. The frontend must not pass or trust `customerId` from query/env for protected dashboard data.
 
 ### Response shape
 
@@ -233,9 +234,9 @@ Missing optional fields must render as safe empty/unknown states, not crash.
 6. Smoke `/dashboard` production.
 7. Only then hide or clean up the old demo route.
 
-## 8. Login scope — Google OAuth only
+## 8. Login scope — public end-user Google OAuth only
 
-RunAgentSys login is intentionally **not** an email/password product flow.
+RunAgentSys's public end-user login is intentionally **not** an email/password product flow.
 
 Approved scope:
 
@@ -243,10 +244,12 @@ Approved scope:
 - Do not build Email, Password, Forgot Password, password reset, or local-password fallback flows in a later phase.
 - User clicks Google login.
 - Backend validates Google OAuth profile.
-- Backend creates or loads a local `User` by Google subject/email.
-- Backend creates or loads the customer mapping for that user.
+- Backend creates or loads a local lead `User` by Google identity/email.
+- Backend does not create a customer mapping, entitlement, profile, or quota during login.
 - Backend issues the RunAgentSys session cookie/token.
-- Backend redirects to `/dashboard`.
+- Backend redirects to `/dashboard`, which returns lead-safe state until captured payment or controlled provisioning binds the tenant.
+
+Runtime boundary: legacy `POST /auth/login` still exists for controlled internal/test provisioning and is reachable if called; it must not be offered by the frontend as public end-user login. `POST /mappings/users` requires internal access and is a controlled mapping/provisioning path. This RFC does not remove either route.
 
 Required local mapping fields:
 
@@ -310,7 +313,7 @@ Resolved Zernio quota/provisioning decision:
 - Zernio account limits/billing are enforced at the billing-owner/team level, based on the total number of active social accounts across the team.
 - Customer package quota such as “5 connected accounts” is RAS-owned business logic, not Zernio configuration.
 - RAS must enforce package limits locally with `ProfileSlot.allowedPlatforms`, `maxConnectedAccounts`, billing status, queue limits, and UI gating.
-- On payment webhook success, RAS can create profile containers with `POST /v1/profiles` and persist the profile/API-key mapping before the customer connects any social account.
+- A signed trusted relay capture of an already-bound checkout intent persists a payment and durable outbox job. The worker, not the capture request, provisions the entitlement and can create profile containers with `POST /v1/profiles` before the customer connects any social account. RAS authenticates the relay assertion; it does not directly verify PayPal with a PayPal network call.
 - Idle profiles are acceptable: a profile/API key can remain pending in RAS DB until the customer later connects social accounts.
 - Connect flow: when the customer clicks `Connect account`, RAS calls Zernio `GET /v1/connect/{platform}?profileId=...` to obtain the OAuth `authUrl`.
 - Important platform rule: one account per platform per Zernio profile. If a customer needs multiple accounts on the same platform, RAS must allocate multiple Zernio profiles; if they need different platforms, one profile can be enough.

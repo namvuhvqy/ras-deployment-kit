@@ -1,4 +1,11 @@
-export const RAS_SCHEMA_VERSION = 2;
+/**
+ * JSON-store state version. This is not a SQL database migration version.
+ *
+ * This module renders a fresh SQLite schema reference for operators and
+ * documentation. Production persistence is JsonRasStore; this repository has
+ * no SQL runtime, database deployment target, or SQL migration runner.
+ */
+export const RAS_SCHEMA_VERSION = 3;
 
 export const createTableStatements = [
   `CREATE TABLE IF NOT EXISTS customers (
@@ -96,7 +103,9 @@ export const createTableStatements = [
   )`,
   `CREATE TABLE IF NOT EXISTS checkout_intents (
     id TEXT PRIMARY KEY,
-    customer_id TEXT NOT NULL REFERENCES customers(id),
+    customer_id TEXT REFERENCES customers(id),
+    purchaser_user_id TEXT,
+    purchaser_email TEXT,
     plan TEXT NOT NULL,
     billing_cycle TEXT NOT NULL,
     extra_connect_slots INTEGER NOT NULL,
@@ -128,11 +137,17 @@ export const createIndexStatements = [
   `CREATE INDEX IF NOT EXISTS idx_webhook_events_profile_created ON webhook_events(profile_id, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_logs_customer_created ON audit_logs(customer_id, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_checkout_intents_customer_status ON checkout_intents(customer_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_checkout_intents_purchaser_status ON checkout_intents(purchaser_user_id, status)`,
 ];
 
+/**
+ * Fresh-schema SQLite reference only. It is not applied by JsonRasStore and
+ * must not be used to upgrade an existing database without a real SQL runtime
+ * and migration mechanism.
+ */
 export function renderSqlMigration(): string {
   return [
-    `-- RAS schema v${RAS_SCHEMA_VERSION}`,
+    `-- RAS schema reference v${RAS_SCHEMA_VERSION} (fresh database only; no SQL migration runner is included)`,
     `PRAGMA foreign_keys = ON;`,
     ...createTableStatements.map((statement) => `${statement};`),
     ...createIndexStatements.map((statement) => `${statement};`),

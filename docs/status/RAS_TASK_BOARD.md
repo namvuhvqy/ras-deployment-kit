@@ -14,10 +14,10 @@ Primary MVP flow:
 
 ```text
 web lead or sale lead
-→ sale/admin creates customer account
-→ admin assigns package
-→ admin assigns prepared profile slot and/or VPS
-→ customer logs in to runagentsys.com
+→ Google OAuth creates/loads a lead user + session only
+→ dashboard returns lead-safe state; login creates no customer/tenant, profile, or quota
+→ signed trusted relay capture or controlled provisioning binds tenant and queues durable work
+→ worker provisions entitlement and applicable profile slot/VPS
 → customer connects platforms
 → backend/Zernio verifies status
 ```
@@ -44,27 +44,27 @@ web lead or sale lead
 - [x] Add Vercel/runagentsys.com project visibility check.
 - [x] Lock MVP decision: 2 service lines, 1 shared backend/control panel.
 - [x] Lock split-repo API boundary: frontend summary route must proxy RAS backend connection summary before any Zernio fallback.
-- [x] Note active 2026-07-24 slice: new Google OAuth users need dashboard `needs_plan` Empty State instead of `customer_portal_unavailable`.
+- [x] Note active 2026-07-24 slice: new Google OAuth users receive lead-safe dashboard state (`state: 'lead'`), not a tenant `needs_plan` dashboard, and must not see `customer_portal_unavailable`.
 
-## Active slice — Dashboard `needs_plan` + Zernio webhook
+## Active slice — Lead-safe dashboard + Zernio webhook
 
 1. [x] Backend28/Frontend30: rà soát repo/backend/frontend and identify insertion points.
    - Backend: `packages/shared/src/persistentStore.ts#getDashboardForSession()`.
    - Frontend: `landingpage-ban-hang/app/customer-portal/page.tsx` and `app/api/customer-portal/summary/route.ts`.
    - Webhook store primitives exist: `webhookEvents`, `webhookFailures`, `recordWebhookEvent`, `recordWebhookFailure`.
-2. [x] Backend28: dashboard state for new customers implemented.
-   - `state: 'ready' | 'needs_plan'`.
-   - Entitlement payload: plan, max connected accounts, active connected accounts, add-on status.
-   - CTA `/pricing` when user has no active plan/quota.
+2. [x] Backend28: lead-first dashboard state implemented.
+   - New Google users receive `state: 'lead'` only, with no customer/tenant, entitlement, profile, or quota.
+   - Tenant-bound users receive `state: 'ready' | 'needs_plan'` with entitlement payload: plan, max connected accounts, active connected accounts, add-on status.
+   - CTA `/pricing` is safe for lead state and tenant users without an active plan/quota.
 3. [x] Zernio29: team-level webhook route/store/routing verified in backend slice.
    - Store raw event metadata.
    - Deduplicate by event id if available.
    - Route internally by `profileId`, `accountId`, or nested `account.id`.
    - Record failures through `recordWebhookFailure`.
-4. [x] Frontend30: render `needs_plan` Empty State.
-   - Welcome screen for new Google login users.
+4. [x] Frontend30: render lead-safe and tenant `needs_plan` Empty States.
+   - New Google login users receive a lead-safe welcome screen; login does not create tenant resources.
    - CTA to `/pricing` / upgrade flow.
-   - Do not show `customer_portal_unavailable` when backend returns a valid `needs_plan` dashboard.
+   - Do not show `customer_portal_unavailable` when backend returns valid `state: 'lead'` or a tenant `needs_plan` dashboard.
 5. [x] Ops33: verification gate passed locally on 2026-07-25.
    - Backend: `npm run check`.
    - Frontend: `npm run lint && npm run build`.

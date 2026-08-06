@@ -33,18 +33,15 @@ The two services are sold separately, but they share the same backend records:
 ## Customer onboarding flow
 
 ```text
-Lead arrives from web or sale conversation
+Lead arrives from web or sale conversation, then signs in with Google OAuth
   ↓
-Sale/Admin creates customer account
+Google login creates or loads a lead user and session only
   ↓
-Admin assigns package:
-  - zernio_webapp
-  - ras_vps_2_agent
-  - hybrid
+Dashboard returns lead-safe state until a captured payment or controlled provisioning binds a tenant
   ↓
-RAS provisions entitlement and creates/assigns the first Zernio/API profile and/or VPS
+Signed trusted relay capture records the payment and durable outbox job
   ↓
-Customer logs in to runagentsys.com with Google OAuth
+Worker provisions the entitlement and, when applicable, Zernio profile/VPS resources
   ↓
 Customers connect allowed platforms until their RAS-owned purchased quota is reached
   ↓
@@ -85,7 +82,7 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 - RAS is the source of truth for purchased connection quota. Do not try to set “5 slots” or any `N` on a Zernio profile; Zernio profiles are containers for connected accounts only.
 - Prepared profile/API slots are acceptable for MVP, but payment/webhook provisioning should create or assign profiles lazily when the customer actually has entitlement.
 - If a customer connects multiple accounts on the same platform, RAS creates/assigns another Zernio profile because Zernio supports one account per platform per profile.
-- Login is Google OAuth-only: `/login` has exactly one `Continue with Google` CTA. Do not build Email/Password, Forgot Password, password reset, or local-password fallback flows.
+- Public end-user production login is Google OAuth-only: `/login` has exactly one `Continue with Google` CTA. Do not offer local/password login, password reset, or a password fallback in the frontend. The runtime still retains legacy `POST /auth/login` for controlled internal/test provisioning; it is reachable, but it is not a supported public end-user login surface. `POST /mappings/users` is separately protected by internal access and is for controlled user mapping/provisioning.
 - Do not fake `Connected` state in UI. Only show connected when backend has verified mapping/status.
 - Do not use undocumented Zernio fields.
 - Keep Zernio IDs as external references, not RAS primary IDs.
@@ -111,15 +108,25 @@ npm run check
 
 Expected result: TypeScript build passes and all Node tests pass.
 
+## Persistence and SQL schema reference
+
+Production runtime persistence uses `JsonRasStore` (the JSON file selected by
+`RAS_DB_PATH`); its `migrate()` method performs the executable state upgrade.
+There is no SQL persistence runtime, SQL deployment target, or SQL migration
+runner in this repository. `packages/shared/src/dbSchema.ts`,
+`infra/schema.sql`, and `npm run schema:sql` are therefore **fresh-schema
+SQLite references only**. They must not be represented as an upgrade path for
+an existing SQL database.
+
 ## Google OAuth 2.0 login
 
-RAS login is Google OAuth-only. The backend exposes these auth routes before the final 404 fallback:
+Public end-user login is Google OAuth-only. The backend exposes these customer auth routes before the final 404 fallback:
 
 | Route | Purpose |
 |---|---|
 | `GET /auth/google` | Builds the Google authorization URL using scope `openid email profile`. |
-| `POST /auth/google/callback` | Exchanges Google code, reads Google profile, upserts user/customer, creates a session token, and returns dashboard redirect metadata. |
-| `GET /dashboard` | Requires `Authorization: Bearer <token>` and returns tenant dashboard data. |
+| `POST /auth/google/callback` | Exchanges Google code, reads the Google profile, creates or loads a lead user, creates a session token, and returns lead-safe dashboard redirect metadata. It does not create a customer/tenant, profile, or quota. |
+| `GET /dashboard` | Requires `Authorization: Bearer <token>` and returns lead-safe state until tenant binding; after binding it returns tenant dashboard data. |
 
 Required backend env keys are documented in `.env.example`:
 
@@ -130,6 +137,8 @@ GOOGLE_OAUTH_CALLBACK_URL=http://localhost:8080/auth/google/callback
 ```
 
 Do not commit real Client IDs/Secrets. Frontend `/login` must show only one CTA: `Continue with Google`.
+
+`POST /auth/login` remains implemented for controlled internal/test provisioning and is reachable in the runtime; it must not be presented by the frontend as a public end-user login option. `POST /mappings/users` requires internal access and is likewise a controlled provisioning path. Legacy demo provisioners `POST /demo/customer-zernio-profile` and `/dry-run/customer` are retired and return `410`; tenant/profile provisioning must stay on the trusted payment relay → durable outbox → worker path.
 
 ## Frontend ↔ backend API contract
 
@@ -142,9 +151,11 @@ Current MVP boundary:
 | `GET /api/integrations/summary` | `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` | Render verified social/platform connection state. |
 | customer dashboard | `GET /dashboard` or customer-scoped dashboard endpoint | Render package, assigned profile slot, VPS, agent, and onboarding state. |
 | account/profile mapping | `GET /mappings/customers/{customerId}` and `GET /customers/{customerId}/mapping` | Read RAS customer ↔ Zernio/profile/VPS mapping. |
-| `POST /billing/entitlements/provision` | RAS customer store + Zernio profile creation | Persist dynamic purchased quota `maxConnectedAccounts=N`, package/add-on status, and create the first profile lazily when needed. |
-| `GET /customers/{customerId}/connect/{platform}` | RAS quota enforcement + Zernio connect URL | Block if package/add-on inactive or active connections reached `N`; auto-create another profile for same-platform second account. |
-| connect action | backend/Zernio adapter through assigned profile slot | Open OAuth/connect only after RAS verifies entitlement and picks the correct customer-owned profile. |
+| `POST /billing/entitlements/provision` | Retired | Always returns `410 payment_capture_required`; it cannot provision an entitlement. |
+| signed trusted relay capture | `POST /billing/payments/captured` | An internal authenticated relay submits a signed assertion for an already-bound checkout intent. RAS authenticates that relay assertion; this is not direct PayPal verification. The capture is persisted with a durable outbox job. |
+| entitlement provisioning | Worker consumes the durable outbox job | The worker provisions the entitlement and Zernio resources idempotently after capture; no browser or direct provision endpoint performs this work. |
+| `GET /customers/{customerId}/connect/{platform}` | RAS quota enforcement + provision queue or Zernio connect URL | Block if package/add-on inactive or active connections reached `N`. If no suitable profile exists, return `202 profile_provisioning_pending` and atomically enqueue one durable profile-provisioning job; only a later request, after worker completion, returns the OAuth URL. |
+| connect action | Worker-created, customer-owned Zernio profile slot | Open OAuth/connect only after RAS verifies entitlement and a worker has provisioned/persisted the required profile slot. |
 
 Frontend env expected by the current split-repo setup:
 

@@ -6,6 +6,7 @@ import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
+import { paypalRelayConfigFromEnv, relayPaypalSandboxCapture } from './paypalTrustedRelay.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -239,13 +240,36 @@ function endCustomerAccessError(res: { statusCode: number; setHeader: (name: str
 
 function requireInternalAccess(req: IncomingMessage): boolean {
   const token = process.env.RAS_INTERNAL_API_TOKEN;
-  if (!token) return false;
-  return firstHeader(req, 'x-ras-internal-token') === token;
+  const supplied = firstHeader(req, 'x-ras-internal-token');
+  if (!token || !supplied) return false;
+  const expectedBuffer = Buffer.from(token);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length && timingSafeEqual(expectedBuffer, suppliedBuffer);
 }
 
 function endInternalAccessError(res: { statusCode: number; end: (chunk: string) => void }) {
   res.statusCode = 401;
   res.end(JSON.stringify({ ok: false, error: 'missing_internal_token' }));
+}
+
+type RelayCaptureAssertion = { intentId: string; paypalOrderId: string; transactionId: string; amount: string; currency: string; status: 'COMPLETED'; issuedAtIso: string; expiresAtIso: string; nonce: string };
+function canonicalRelayAssertion(value: RelayCaptureAssertion): string {
+  return JSON.stringify({ intentId: value.intentId, paypalOrderId: value.paypalOrderId, transactionId: value.transactionId, amount: value.amount, currency: value.currency, status: value.status, issuedAtIso: value.issuedAtIso, expiresAtIso: value.expiresAtIso, nonce: value.nonce });
+}
+function verifiedRelayAssertion(req: IncomingMessage, body: Record<string, unknown>, intent: { id: string; amount: string; currency: string }): RelayCaptureAssertion | undefined {
+  const secret = process.env.RAS_PAYMENT_RELAY_ASSERTION_SECRET;
+  const assertion = body.relay_assertion;
+  const signature = firstHeader(req, 'x-ras-relay-assertion-signature');
+  if (!secret || !signature || !assertion || typeof assertion !== 'object' || Array.isArray(assertion)) return undefined;
+  const value = assertion as Record<string, unknown>;
+  const candidate: RelayCaptureAssertion = { intentId: String(value.intentId ?? ''), paypalOrderId: String(value.paypalOrderId ?? ''), transactionId: String(value.transactionId ?? ''), amount: String(value.amount ?? ''), currency: String(value.currency ?? ''), status: 'COMPLETED', issuedAtIso: String(value.issuedAtIso ?? ''), expiresAtIso: String(value.expiresAtIso ?? ''), nonce: String(value.nonce ?? '') };
+  if (value.status !== 'COMPLETED' || !candidate.intentId || !candidate.paypalOrderId || !candidate.transactionId || !candidate.nonce || candidate.nonce.length > 256 || candidate.intentId !== intent.id || candidate.amount !== intent.amount || candidate.currency !== intent.currency) return undefined;
+  const issued = Date.parse(candidate.issuedAtIso); const expires = Date.parse(candidate.expiresAtIso); const now = Date.now();
+  if (!Number.isFinite(issued) || !Number.isFinite(expires) || expires < now || issued > now + 60_000 || expires - issued > 10 * 60_000) return undefined;
+  const expected = createHmac('sha256', secret).update(canonicalRelayAssertion(candidate)).digest('hex');
+  const actual = normalizeSignature(signature);
+  const expectedBuffer = Buffer.from(expected, 'hex'); const actualBuffer = Buffer.from(actual, 'hex');
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer) ? candidate : undefined;
 }
 
 async function exchangeGoogleCode(req: IncomingMessage, code: string): Promise<string> {
@@ -547,7 +571,8 @@ const server = createServer(async (req, res) => {
           ok: true,
           token: session.token,
           expiresAtIso: session.expiresAtIso,
-          customerId: dashboard.customer.id,
+          state: dashboard.state,
+          ...(dashboard.state === 'lead' ? {} : { customerId: dashboard.customer.id }),
           redirectTo: state.redirectTo,
         }),
       );
@@ -646,6 +671,11 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
       return;
     }
+    if (dashboard.state === 'lead') {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ ok: false, error: 'tenant_required' }));
+      return;
+    }
     const mapping = await store.upsertCustomerEntitlement({
       customerId: dashboard.customer.id,
       maxConnectedAccounts: 0,
@@ -670,7 +700,9 @@ const server = createServer(async (req, res) => {
     const amount = (billingCycle === 'yearly' ? pricing.yearlyMonthly * 12 : pricing.monthly) + (billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6);
     const ttlMinutes = Number.parseInt(process.env.RAS_CHECKOUT_INTENT_TTL_MINUTES ?? '30', 10);
     const expiresAtIso = new Date(Date.now() + (Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : 30) * 60_000).toISOString();
-    const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
+    const intent = await store.createCheckoutIntent(dashboard.state === 'lead'
+      ? { purchaserUserId: dashboard.user.id, purchaserEmail: dashboard.user.email, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso }
+      : { customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
     res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent })); return;
   }
 
@@ -680,33 +712,66 @@ const server = createServer(async (req, res) => {
     const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
-    if (!intentId || !customerId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_binding' })); return; }
+    if (!intentId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_binding' })); return; }
     const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
     if (!bound.intent) { res.statusCode = bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${bound.error}` })); return; }
     res.end(JSON.stringify({ ok: true, intent: bound.intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/paypal/sandbox/capture') {
+    // Authenticated browser callers submit identities only. Server code derives every
+    // payment fact and uses a deployment-owned (not caller-provided) RAS URL.
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+      return;
+    }
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
+    const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
+    if (!intentId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_paypal_capture_request' })); return; }
+    const intent = await store.getCheckoutIntent(intentId);
+    const owned = intent && (dashboard.state === 'lead'
+      ? intent.purchaserUserId === dashboard.user.id
+      : intent.customerId === dashboard.customer.id);
+    if (!owned) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+    const result = await relayPaypalSandboxCapture({ intent, paypalOrderId }, paypalRelayConfigFromEnv(process.env, `http://127.0.0.1:${port}`));
+    res.statusCode = result.status;
+    res.end(JSON.stringify(result));
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/payments/captured') {
     // Only the trusted server relay may report a provider capture. Pricing and tenant
     // identity are read from an already-bound, durable intent, never browser input.
     if (!requireInternalAccess(req)) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'internal_payment_relay_required' })); return; }
-    const body = await readJsonBody(req);
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+      return;
+    }
     const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
     const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');
     const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'captureStatus') ?? stringField(body, 'status');
     if (!intentId || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' })); return; }
-    const intentBefore = await store.getCheckoutIntent(intentId);
-    if (!intentBefore) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
-    const consumed = await store.consumeCheckoutIntentAfterCapture({ intentId, customerId: intentBefore.customerId, paypalOrderId, transactionId });
-    if (!consumed.intent) { res.statusCode = consumed.error === 'expired' ? 410 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${consumed.error}` })); return; }
-    const intent = consumed.intent;
-    const customer = (await store.load()).customers.find((row) => row.id === intent.customerId);
-    if (!customer) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' })); return; }
-    const now = new Date().toISOString();
-    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body, createdAtIso: now, updatedAtIso: now });
-    const queued = await store.enqueueJobIfAbsent({ id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now });
-    res.statusCode = 202; res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } })); return;
+    const intent = await store.getCheckoutIntent(intentId);
+    const assertion = intent && verifiedRelayAssertion(req, body, intent);
+    if (!assertion || assertion.paypalOrderId !== paypalOrderId || assertion.transactionId !== transactionId) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_relay_assertion' })); return; }
+    // This authenticates RAS's relay assertion; it is not direct PayPal verification.
+    const captured = await store.captureCheckoutIntentFromTrustedRelay({ intentId, paypalOrderId, transactionId, nonce: assertion.nonce, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body });
+    if (!captured.payment || !captured.customer || !captured.job) {
+      res.statusCode = captured.error === 'not_found' ? 404 : captured.error === 'expired' ? 410 : 409;
+      res.end(JSON.stringify({ ok: false, error: `checkout_intent_${captured.error}` })); return;
+    }
+    res.statusCode = 202; res.end(JSON.stringify({ ok: true, customerId: captured.customer.id, payment: { id: captured.payment.id, provisionStatus: captured.payment.provisionStatus, transactionId }, provisioning: { queued: captured.queued, jobId: captured.job.id } })); return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {
@@ -746,11 +811,8 @@ const server = createServer(async (req, res) => {
     const customerId = dashboard.customer.id;
     const customer = dashboard.customer;
     const maxConnectedAccounts = 1 + extraConnectSlots;
-    let zernioProfileId = customer.zernioProfileId;
-    if (!zernioProfileId && maxConnectedAccounts > 0) {
-      const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
-      zernioProfileId = profile.zernioProfileId;
-    }
+    // Legacy direct provisioning removed: provider profiles are worker-only.
+    const zernioProfileId = customer.zernioProfileId;
 
     const entitlement: RasEntitlement = {
       basePlan: {
@@ -936,20 +998,32 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    let profileId = mapping.zernioProfileId ?? mapping.zernioProfileIds[0];
-    const samePlatformExists = mapping.accounts.some((account) => account.platform === platform && account.status === 'connected');
-    if (!profileId || samePlatformExists) {
-      const state = await store.load();
-      const customer = state.customers.find((row) => row.id === customerId);
-      if (!customer) {
-        res.statusCode = 404;
-        res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
-        return;
-      }
-      const profile = await adapter.createProfile({ customerId, name: customer.name, email: customer.email });
-      if (!profile.zernioProfileId) throw new Error('Zernio profile response missing profile id');
-      profileId = profile.zernioProfileId;
-      await store.addCustomerZernioProfile(customerId, profileId);
+    const connectedProfileIdsForPlatform = new Set(
+      mapping.accounts.filter((account) => account.platform === platform && account.status === 'connected')
+        .map((account) => account.zernioProfileId)
+        .filter((profileId): profileId is string => Boolean(profileId)),
+    );
+    const profileId = mapping.zernioProfileIds.find((candidate) => !connectedProfileIdsForPlatform.has(candidate));
+    if (!profileId) {
+      // Provisioning is deliberately worker-only: API requests only record a durable,
+      // tenant/platform-scoped request. The stable ID deduplicates retries and races.
+      const reason = mapping.zernioProfileIds.length === 0 ? 'initial_connect' : 'same_platform_connect';
+      const jobId = `provision_profile:${customerId}:${platform}:${reason}`;
+      const queued = await store.enqueueJobIfAbsent({
+        id: jobId,
+        customerId,
+        profileId: '',
+        platform,
+        type: 'create_profile',
+        priority: 'P0',
+        status: 'queued',
+        retryCount: 0,
+        payload: { reason, platform },
+        createdAtIso: new Date().toISOString(),
+      });
+      res.statusCode = 202;
+      res.end(JSON.stringify({ ok: false, error: 'profile_provisioning_pending', provisioning: { queued: queued.inserted, jobId: queued.job.id, reason, platform }, entitlement: await store.getCustomerMapping(customerId) }));
+      return;
     }
 
     const redirectUrl = url.searchParams.get('redirectUrl') ?? `${firstHeader(req, 'origin') ?? 'https://runagentsys.com'}/dashboard`;
@@ -1368,56 +1442,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/demo/customer-zernio-profile') {
-    const body = await readJsonBody(req);
-    const customerId = stringField(body, 'customerId') ?? 'demo_khach_2';
-    const zernioProfileId = stringField(body, 'zernioProfileId') ?? '6a2d49446d68ffa8630cf8e6';
-    const name = stringField(body, 'name') ?? 'Khách 2 Demo';
-    const nowIso = new Date().toISOString();
-    const existing = (await store.load()).customers.find((row) => row.id === customerId);
-    const customer = await store.upsertCustomer({
-      ...existing,
-      id: customerId,
-      name,
-      tenantId: stringField(body, 'tenantId') ?? existing?.tenantId ?? customerId,
-      email: stringField(body, 'email') ?? existing?.email,
-      zernioProfileId,
-      status: 'active',
-      createdAtIso: existing?.createdAtIso ?? nowIso,
-      updatedAtIso: nowIso,
-    });
-    const sync = await refreshZernioAccountsForCustomer(customer.id);
-    await store.appendAuditLog({
-      id: `audit_${Date.now()}`,
-      customerId: customer.id,
-      action: 'customer.zernio_profile_mapped',
-      targetType: 'zernio_profile',
-      targetId: customer.zernioProfileId,
-      metadata: { source: 'demo/customer-zernio-profile', sync },
-      createdAtIso: nowIso,
-    });
-    const summary = await store.getConnectionSummary(customer.id);
-    res.statusCode = existing ? 200 : 201;
-    res.end(JSON.stringify({ ok: true, customer, summary: { ...summary, customerId: customer.id, sync } }));
-    return;
-  }
-
-  if (req.url === '/dry-run/customer') {
-    const existing = (await store.load()).customers.find((customer) => customer.id === 'demo');
-    const customer = existing?.zernioProfileId
-      ? existing
-      : await adapter.createProfile({ customerId: 'demo', name: 'Demo Customer' });
-    await store.upsertCustomer(customer);
-    await store.appendAuditLog({
-      id: `audit_${Date.now()}`,
-      customerId: customer.id,
-      action: 'customer.upserted',
-      targetType: 'customer',
-      targetId: customer.id,
-      metadata: { source: 'dry-run/customer' },
-      createdAtIso: new Date().toISOString(),
-    });
-    res.end(JSON.stringify(customer));
+  if (req.url === '/demo/customer-zernio-profile' || req.url === '/dry-run/customer') {
+    // These legacy demo provisioners bypassed captured-payment -> outbox -> worker.
+    // Keep the route tombstones so old smoke scripts fail safely rather than provisioning.
+    res.statusCode = 410;
+    res.end(JSON.stringify({ ok: false, error: 'legacy_demo_provisioning_route_retired' }));
     return;
   }
 

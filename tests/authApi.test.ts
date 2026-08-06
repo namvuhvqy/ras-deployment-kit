@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -324,7 +324,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
 });
 
 
-test('Google OAuth callback upserts user/customer and returns a session token', async () => {
+test('Google OAuth callback creates only a lead user and session, with no tenant resources', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-google-oauth-'));
   const dbPath = join(dir, 'ras-store.json');
   const port = 19_080 + Math.floor(Math.random() * 1000);
@@ -398,18 +398,40 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
       body: JSON.stringify({ code: 'google_code_test', state: authUrl.searchParams.get('state') }),
     });
     assert.equal(callback.status, 200);
-    const callbackPayload = (await callback.json()) as { token: string; customerId: string; redirectTo: string };
+    const callbackPayload = (await callback.json()) as { token: string; state: string; customerId?: string; redirectTo: string };
     assert.ok(callbackPayload.token.startsWith('sess_'));
     assert.equal(callbackPayload.redirectTo, '/dashboard');
-    assert.ok(callbackPayload.customerId.startsWith('cust_owner_example_com'));
+    assert.equal(callbackPayload.state, 'lead');
+    assert.equal(callbackPayload.customerId, undefined);
+
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as Record<string, unknown>;
+    assert.equal((persisted.users as unknown[]).length, 1);
+    assert.equal((persisted.sessions as unknown[]).length, 1);
+    assert.equal((persisted.customers as unknown[]).length, 0);
+    assert.equal((persisted.connectedAccounts as unknown[]).length, 0);
+    assert.equal((persisted.jobs as unknown[]).length, 0);
+    assert.equal((persisted.personalAccessTokens as unknown[]).length, 0);
+    assert.equal((persisted.checkoutIntents as unknown[]).length, 0);
 
     const dashboard = await fetch(`http://127.0.0.1:${port}/dashboard`, {
       headers: { authorization: `Bearer ${callbackPayload.token}` },
     });
     assert.equal(dashboard.status, 200);
-    const dashboardPayload = (await dashboard.json()) as { dashboard: { customer: { id: string; email: string } } };
-    assert.equal(dashboardPayload.dashboard.customer.id, callbackPayload.customerId);
-    assert.equal(dashboardPayload.dashboard.customer.email, 'owner@example.com');
+    assert.deepEqual(await dashboard.json(), {
+      ok: true,
+      dashboard: {
+        user: {
+          id: (persisted.users as Array<{ id: string }>)[0].id,
+          email: 'owner@example.com',
+          displayName: 'Owner Google',
+          role: 'owner',
+          status: 'active',
+          createdAtIso: (persisted.users as Array<{ createdAtIso: string }>)[0].createdAtIso,
+          updatedAtIso: (persisted.users as Array<{ updatedAtIso: string }>)[0].updatedAtIso,
+        },
+        state: 'lead',
+      },
+    });
 
     const authStartForBrowser = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
     const browserAuthPayload = (await authStartForBrowser.json()) as { authUrl: string };

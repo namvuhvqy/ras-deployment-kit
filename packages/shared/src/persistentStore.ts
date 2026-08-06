@@ -48,6 +48,8 @@ export interface RasPersistentState {
   auditLogs: StoredAuditLog[];
   billingPayments: RasBillingPayment[];
   checkoutIntents: RasCheckoutIntent[];
+  /** One-time signed relay assertion nonces. */
+  relayAssertionNonces: string[];
 }
 
 export interface StoredWebhookEvent {
@@ -94,7 +96,7 @@ export interface MigrationResult {
   sql: string;
 }
 
-export interface RasDashboard {
+export interface RasTenantDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
   state: 'ready' | 'needs_plan';
@@ -123,6 +125,14 @@ export interface RasDashboard {
   servicePackages: RasServicePackage[];
   connectedAccounts: ConnectedAccount[];
 }
+
+/** An authenticated lead has no tenant resources or control-panel data. */
+export interface RasLeadDashboard {
+  user: Omit<RasUser, 'password'>;
+  state: 'lead';
+}
+
+export type RasDashboard = RasTenantDashboard | RasLeadDashboard;
 
 export interface CustomerLifecycleStatus {
   customer: RasCustomer;
@@ -267,6 +277,7 @@ export class JsonRasStore {
       auditLogs: [],
       billingPayments: [],
       checkoutIntents: [],
+      relayAssertionNonces: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -292,6 +303,7 @@ export class JsonRasStore {
     state.auditLogs ??= [];
     state.billingPayments ??= [];
     state.checkoutIntents ??= [];
+    state.relayAssertionNonces ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -353,34 +365,15 @@ export class JsonRasStore {
 
     const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
     const entropy = Math.random().toString(36).slice(2, 8);
-    const customerId = `cust_${slug}_${entropy}`;
     const user: RasUser = {
       id: `user_${slug}_${entropy}`,
       email,
       displayName: input.displayName,
       role: 'owner',
-      customerId,
       status: 'active',
       createdAtIso: now,
       updatedAtIso: now,
     };
-    const customer: RasCustomer = {
-      id: customerId,
-      name: input.displayName ?? email,
-      email,
-      status: 'pending',
-      billingStatus: 'trial',
-      packageStatus: 'pending',
-      maxConnectedAccounts: 0,
-      activeConnectedAccounts: 0,
-      addOnStatus: {},
-      createdAtIso: now,
-      updatedAtIso: now,
-    };
-    await this.upsertCustomer({
-      ...customer,
-      entitlement: normalizeEntitlement(customer, 0),
-    });
     return this.upsertUser(user);
   }
 
@@ -405,23 +398,24 @@ export class JsonRasStore {
     if (!session) return undefined;
     const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
     if (!user) return undefined;
+    const { password: _password, ...safeUser } = user;
+    if (!user.customerId) return { user: safeUser, state: 'lead' };
     const customer = state.customers.find((row) => row.id === user.customerId);
     if (!customer) return undefined;
-    const { password: _password, ...safeUser } = user;
     const connectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
     const activeConnectedAccounts = connectedAccounts.filter((row) => row.status === 'connected').length;
     const maxConnectedAccounts = customer.maxConnectedAccounts ?? 0;
     const addOnStatus = customer.addOnStatus ?? {};
     const hasActivePlan = customer.packageStatus === 'active' || customer.billingStatus === 'active' || maxConnectedAccounts > 0;
-    const dashboardState: RasDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
+    const dashboardState: RasTenantDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
     const entitlement = normalizeEntitlement(customer, activeConnectedAccounts);
-    const renewalState: RasDashboard['dashboardSummary']['renewalState'] =
+    const renewalState: RasTenantDashboard['dashboardSummary']['renewalState'] =
       customer.billingStatus === 'past_due' || customer.packageStatus === 'past_due'
         ? 'past_due'
         : customer.billingStatus === 'active' || customer.packageStatus === 'active'
           ? 'active'
           : 'unknown';
-    const dashboardSummary: RasDashboard['dashboardSummary'] = {
+    const dashboardSummary: RasTenantDashboard['dashboardSummary'] = {
       renewalState,
       inbox: {
         unreadConversations: state.inboxConversations.filter((row) => row.customerId === customer.id && row.unreadCount > 0).length,
@@ -459,7 +453,7 @@ export class JsonRasStore {
     const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
     if (session) {
       const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
-      if (user) return { authType: 'session', customerId: user.customerId, userId: user.id, scopes: ['*'] };
+      if (user?.customerId) return { authType: 'session', customerId: user.customerId, userId: user.id, scopes: ['*'] };
     }
     const pat = state.personalAccessTokens.find((row) => row.tokenHash === hashPat(token) && !row.revokedAtIso && (!row.expiresAtIso || Date.parse(row.expiresAtIso) > Date.parse(nowIso)));
     if (!pat) return undefined;
@@ -568,10 +562,11 @@ export class JsonRasStore {
     return state.checkoutIntents.find((row) => row.id === id);
   }
 
-  async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
+  async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId?: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'identity_mismatch' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
     const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
-    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId);
     if (!intent) return { error: 'not_found' };
+    if (input.customerId !== undefined && intent.customerId !== input.customerId) return { error: 'identity_mismatch' };
     if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
     if (intent.status === 'consumed') return { error: 'consumed' };
     if (intent.paypalOrderId && intent.paypalOrderId !== input.paypalOrderId) return { error: 'already_bound' };
@@ -589,6 +584,42 @@ export class JsonRasStore {
     if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
     intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
     await this.write(state); return { intent };
+  }
+
+  /** Authenticated RAS relay assertion boundary; this is not direct PayPal verification. */
+  async captureCheckoutIntentFromTrustedRelay(input: { intentId: string; paypalOrderId: string; transactionId: string; nonce: string; rawCapture?: Record<string, unknown>; nowIso?: string }): Promise<{ customer?: RasCustomer; payment?: RasBillingPayment; job?: RasJob; queued?: boolean; error?: 'not_found' | 'expired' | 'not_bound' | 'already_consumed' | 'invalid_payment_customer' | 'lead_identity_mismatch' | 'lead_already_bound' | 'payment_identity_conflict' | 'relay_nonce_replayed' | 'corrupt_payment_or_outbox' }> {
+    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId);
+    if (!intent) return { error: 'not_found' };
+    const conflicting = state.billingPayments.some((row) => (row.paypalOrderId === input.paypalOrderId || row.transactionId === input.transactionId) && (row.paypalOrderId !== input.paypalOrderId || row.transactionId !== input.transactionId));
+    if (conflicting) return { error: 'payment_identity_conflict' };
+    if (intent.status === 'consumed') {
+      if (intent.transactionId !== input.transactionId) return { error: 'already_consumed' };
+      const payment = state.billingPayments.find((row) => row.paypalOrderId === input.paypalOrderId && row.transactionId === input.transactionId);
+      const customer = payment && state.customers.find((row) => row.id === payment.customerId);
+      const jobs = payment ? state.jobs.filter((row) => row.id === `provision_payment_${payment.id}` || (row.type === 'provision_entitlement' && row.payload.paymentId === payment.id)) : [];
+      if (!state.relayAssertionNonces.includes(input.nonce)) return { error: 'relay_nonce_replayed' };
+      return payment && customer && jobs.length === 1 ? { customer, payment, job: jobs[0], queued: false } : { error: 'corrupt_payment_or_outbox' };
+    }
+    if (state.relayAssertionNonces.includes(input.nonce)) return { error: 'relay_nonce_replayed' };
+    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
+    let customer: RasCustomer | undefined;
+    if (intent.customerId) { customer = state.customers.find((row) => row.id === intent.customerId); if (!customer) return { error: 'invalid_payment_customer' }; }
+    else {
+      const lead = state.users.find((row) => row.id === intent.purchaserUserId && row.email.toLowerCase() === intent.purchaserEmail?.toLowerCase() && row.status === 'active');
+      if (!lead) return { error: 'lead_identity_mismatch' };
+      if (lead.customerId) return { error: 'lead_already_bound' };
+      customer = { id: `cust_${intent.id}`, name: lead.displayName ?? lead.email, email: lead.email, status: 'pending', packageStatus: 'pending', addOnStatus: {}, maxConnectedAccounts: 0, createdAtIso: now, updatedAtIso: now };
+      state.customers.push(customer); lead.customerId = customer.id; lead.updatedAtIso = now; intent.customerId = customer.id;
+    }
+    if (state.billingPayments.some((row) => row.paypalOrderId === input.paypalOrderId || row.transactionId === input.transactionId)) return { error: 'payment_identity_conflict' };
+    const payment: RasBillingPayment = { id: `paypal:${input.paypalOrderId}`, provider: 'paypal', customerId: customer.id, paypalOrderId: input.paypalOrderId, transactionId: input.transactionId, status: 'captured', provisionStatus: 'pending', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: input.rawCapture, retryCount: 0, createdAtIso: now, updatedAtIso: now };
+    const job: RasJob = { id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now };
+    if (state.jobs.some((row) => row.id === job.id || (row.type === 'provision_entitlement' && row.payload.paymentId === payment.id))) return { error: 'corrupt_payment_or_outbox' };
+    intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
+    state.billingPayments.push(payment); state.jobs.push(job); state.relayAssertionNonces.push(input.nonce); await this.write(state);
+    return { customer, payment, job, queued: true };
   }
 
   async recordBillingPaymentCapture(input: Omit<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'> & Partial<Pick<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'>>): Promise<RasBillingPayment> {
@@ -1202,7 +1233,7 @@ export class JsonRasStore {
 
   private async emptyState(): Promise<RasPersistentState> {
     const now = new Date().toISOString();
-    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [] };
+    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], relayAssertionNonces: [] };
   }
 
   private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {

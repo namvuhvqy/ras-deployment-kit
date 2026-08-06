@@ -35,23 +35,23 @@ Status: LOCKED FOR MVP EXECUTION
 - [x] Step 1 docs: Add-ons schema documented with inactive-safe `active: false` behavior for modules such as Zernio and Social Automation.
 - [x] Step 1 docs: Backward-compatibility rule locked — keep `/customer-portal` demo path for smoke testing until protected `/dashboard` passes end-to-end.
 - [ ] Step 1 implementation: add TypeScript schema/types, store defaults, and contract tests.
-- [x] Step 2 scope update: Login is Google OAuth-only. `/login` must show exactly one `Continue with Google` CTA; no Email, Password, Forgot Password, password reset, or local-password fallback now or later.
+- [x] Step 2 scope update: public end-user login is Google OAuth-only. `/login` must show exactly one `Continue with Google` CTA; do not offer Email, Password, Forgot Password, password reset, or local-password fallback in the frontend. Legacy runtime `POST /auth/login` remains for controlled internal/test provisioning and must not be presented as public login.
 - [ ] Step 2 implementation: homepage Login link and `/login` UI connected to `/auth/google` + `/auth/google/callback`, then redirect to `/dashboard` after session creation.
 - [ ] Step 3: protected `/dashboard` UI rendering Base VPS → 2 Agent RAS → Add-ons widget/banner.
 
 ## 0.2 Active execution checkpoint — 2026-07-24
 
-Current active slice: make the post-login customer dashboard safe for new Google OAuth users and prepare Zernio team-level webhook handling.
+Current active slice: make the post-login dashboard lead-safe for new Google OAuth users and prepare Zernio team-level webhook handling.
 
 - [x] Rà soát backend/frontend split-repo state and identify insertion points:
   - Backend dashboard state belongs in `packages/shared/src/persistentStore.ts#getDashboardForSession()`.
   - Frontend Empty State belongs in `landingpage-ban-hang/app/customer-portal/page.tsx` and the proxy route `app/api/customer-portal/summary/route.ts`.
   - Zernio webhook persistence already has `webhookEvents`, `webhookFailures`, `recordWebhookEvent`, and `recordWebhookFailure`; the public team-level receiver still needs final route wiring in `apps/ras-api/src/server.ts`.
 - [x] Backend dashboard state for new users is implemented:
-  - `RasDashboard.state = 'ready' | 'needs_plan'`.
+  - A new Google user has `RasDashboard.state = 'lead'`; `ready` / `needs_plan` apply after tenant binding.
   - `entitlement.plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus`.
   - Optional CTA such as `/pricing` for users without an active plan/quota.
-- [x] Frontend Empty State: if dashboard/proxy returns `state === 'needs_plan'`, render welcome/upgrade screen instead of `customer_portal_unavailable` error.
+- [x] Frontend Empty State: if dashboard/proxy returns lead-safe state (or tenant `state === 'needs_plan'`), render welcome/upgrade screen instead of `customer_portal_unavailable` error.
 - [x] Zernio team-level webhook: receiver route, event persistence/dedupe, internal routing by profile/account identifiers, and failure status are covered in the active backend slice.
 - [x] Verification gate passed locally on 2026-07-25: backend `npm run check` and frontend `npm run lint && npm run build`.
 - [>] Git gate: docs updated; commit/push pending final diff review.
@@ -76,7 +76,7 @@ Current entitlement contract separates core infrastructure from social connectio
 - [x] `connectSlots` owns social/Zernio connection quota: included, purchased, trial, total, active connected accounts, trial expiry, and future Solo Connect API flag.
 - [x] `addOns` owns modular add-on rows such as `zernio-connect`; Zernio slot count remains RAS-owned entitlement logic, not a Zernio profile field.
 - [x] Dashboard response remains backward-compatible for old frontend consumers by still returning `plan`, `maxConnectedAccounts`, `activeConnectedAccounts`, and `addOnStatus` beside the new structured entitlement.
-- [x] New Google OAuth customers receive normalized pending entitlement so `needs_plan` users render a safe dashboard/paywall state instead of crashing on missing fields.
+- [x] New Google OAuth users receive lead-safe dashboard state with no tenant or entitlement. Tenant-bound users without an active plan receive normalized pending entitlement so `needs_plan` renders safely instead of crashing on missing fields.
 
 ### Zernio integration test deadline
 
@@ -106,7 +106,7 @@ For any approved production deploy after this gate:
 
 ## 0.5 v1.1.0 Social Inbox — Chặng A/B (human-gated delivery)
 
-- [x] Inbox domain contract: tenant-scoped `InboxConversation` / `InboxMessage`, provider-message idempotency, unread state, and SQL migration statements.
+- [x] Inbox domain contract: tenant-scoped `InboxConversation` / `InboxMessage`, provider-message idempotency, unread state, and fresh-schema SQL reference statements (runtime persistence/migration is JSON-store based).
 - [x] Inbound router: signed Zernio `message.received` is schema-validated, event-deduped, and tenant-resolved **only** through the persisted connected-account mapping.
 - [x] Worker: `webhook_process` persists inbound/outbound mirror messages with `mode: draft_only`; it never calls an inbox send endpoint.
 - [x] Read APIs: authenticated customer-scoped conversation and message endpoints; cross-tenant requests return `403`.
@@ -151,15 +151,15 @@ Both service lines share:
 ## 2. MVP sales/onboarding flow
 
 ```text
-Customer signs in with Google OR sale creates lead
+Lead signs in with Google OAuth or arrives through sales
   ↓
-Sale/Admin creates customer account
+Google login creates/loads a lead user + session only
   ↓
-Admin assigns package
+Dashboard returns lead-safe state; no tenant/profile/quota is created on login
   ↓
-Admin assigns prepared profile slot and/or VPS
+Signed trusted relay capture or controlled provisioning binds the tenant and records durable provisioning work
   ↓
-Customer logs in to runagentsys.com with Google OAuth
+Worker provisions entitlement and applicable profile slot/VPS
   ↓
 Customer connects platforms allowed by package
   ↓
@@ -172,9 +172,9 @@ Dashboard shows real status and next action
 
 1. **Lock MVP docs and API contract** around customer → account → profile slot → integration. ✅ Initial contract locked: frontend summary route proxies `GET {RAS_API_BASE}/customers/{RAS_CUSTOMER_ID}/connection-summary` and never fakes verified connection state. ✅ Protected dashboard RFC/API contract added in `docs/ARCH.md` for Base VPS + 2 Agent RAS + Add-ons while preserving `/customer-portal` demo smoke path.
 2. **Customer/order/package minimal API**: create/list/update customer and package status, including service line (`zernio_webapp`, `ras_vps_2_agent`, `hybrid`).
-3. **RAS-owned entitlement API**: after payment, persist dynamic purchased quota `maxConnectedAccounts=N`, package/add-on status, and customer mapping. Quotas such as “5 connected accounts” are examples only and are enforced by RAS DB/API/UI, not by Zernio profile settings.
-4. **Create/assign Zernio profiles lazily**: provision the first profile through `POST /v1/profiles` when entitlement exists; allocate more profiles automatically when a customer connects multiple accounts on the same platform, because Zernio allows one account per platform per profile.
-5. **Login/session MVP**: Google OAuth-only customer login plus admin-assisted account activation; keep RBAC simple at first. Do not build Email/Password or password reset flows.
+3. **RAS-owned entitlement flow**: direct `POST /billing/entitlements/provision` is retired (`410`). A signed trusted relay capture of an already-bound intent persists payment and a durable outbox job; the worker then provisions dynamic purchased quota `maxConnectedAccounts=N`, package/add-on status, tenant mapping, and applicable resources. Relay assertion authentication is not direct PayPal verification. Quotas such as “5 connected accounts” are examples only and are enforced by RAS DB/API/UI, not by Zernio profile settings.
+4. **Create/assign Zernio profiles lazily**: when an entitled customer needs a first or additional same-platform profile, the connect API atomically queues a durable idempotent provisioning job and returns `202 profile_provisioning_pending`; only the worker calls `POST /v1/profiles` and persists the slot. A later connect request returns the OAuth URL, because Zernio allows one account per platform per profile.
+5. **Login/session MVP**: public end-user Google OAuth-only login creates/loads a lead user and session, not a tenant. Keep RBAC simple at first. Do not build Email/Password or password-reset frontend flows; legacy `POST /auth/login` and internal `POST /mappings/users` remain controlled provisioning/test paths and are not frontend login features.
 6. **Customer dashboard API**: `me`, package, assigned profile, integration summary, renewal/expiry status, plus explicit `state='needs_plan'` for newly logged-in users without entitlement.
 7. **Account/service management screen**: display customer account, current service, package, renewal date/status, payment/manual follow-up note, assigned profile/VPS/agent resources. If `state='needs_plan'`, display welcome/upgrade Empty State instead of technical API error.
 8. **Integration connect/status API**: Telegram/WhatsApp/Facebook/Zalo/Zernio-backed platforms. Before returning a Zernio OAuth URL, RAS must verify package/add-on active status and `activeConnectedAccounts < maxConnectedAccounts`.

@@ -73,6 +73,30 @@ test('RasJobWorker drains due queued jobs fairly and persists completion metadat
   }
 });
 
+test('RasJobWorker creates and persists a queued tenant/platform connect profile exactly once', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_connect', name: 'Connect tenant', email: 'connect@example.test', maxConnectedAccounts: 2, packageStatus: 'active', addOnStatus: { zernio: 'active' } });
+    const created: string[] = [];
+    const adapter = { ...noopAdapter, async createProfile(input) { created.push(input.customerId); return { id: input.customerId, name: input.name, email: input.email, zernioProfileId: 'profile_connect_2' }; } } satisfies ZernioAdapter;
+    const job = { id: 'provision_profile:cust_connect:facebook:same_platform_connect', customerId: 'cust_connect', profileId: '', platform: 'facebook' as const, type: 'create_profile' as const, priority: 'P0' as const, status: 'queued' as const, retryCount: 0, payload: { reason: 'same_platform_connect', platform: 'facebook' }, createdAtIso: new Date().toISOString() };
+    assert.equal((await store.enqueueJobIfAbsent(job)).inserted, true);
+    assert.equal((await store.enqueueJobIfAbsent(job)).inserted, false);
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    assert.deepEqual(created, ['cust_connect']);
+    const completed = await store.load();
+    assert.deepEqual(completed.customers[0]?.zernioProfileIds, ['profile_connect_2']);
+    assert.equal(completed.jobs[0]?.status, 'completed');
+    await store.enqueueJob({ ...job, id: 'provision_profile_retry:cust_connect:facebook', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString() });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    assert.deepEqual(created, ['cust_connect'], 'a retry observes the persisted mapping and cannot create another profile');
+    assert.equal((await store.load()).jobs[1]?.result?.idempotent, true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('RasJobWorker provisions a captured payment from a durable outbox job exactly once', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

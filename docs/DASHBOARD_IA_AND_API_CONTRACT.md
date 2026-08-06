@@ -27,13 +27,14 @@ The browser never selects a tenant by query parameter, build environment, or UI 
 
 ### Customer dashboard state
 
-- `needs_plan`: safe welcome and `/pay` CTA; no technical error and no provider provisioning.
+- `lead`: safe welcome and `/pay` CTA before tenant binding; no technical error, customer/tenant, entitlement, profile, quota, or provider provisioning is created by login.
+- `needs_plan`: safe welcome and `/pay` CTA for a tenant-bound session without an active plan; no provider provisioning.
 - `ready`: show Overview, Channels, Inbox entry point, Security, VPS/Agents and Billing.
 - Degraded/missing optional records render `unknown`/empty cards, never a fabricated connected state.
 
 ## 3. API contract delta
 
-Keep the existing `GET /dashboard` response backward compatible. Add these fields additively, each derived from the authenticated session customer:
+Keep the existing tenant-bound `GET /dashboard` response backward compatible. A lead session instead returns lead-safe state without customer-derived fields. Add these tenant fields additively, each derived from the authenticated session customer:
 
 ```ts
 type DashboardV2 = {
@@ -56,7 +57,7 @@ type DashboardV2 = {
 
 ### Required backend behavior
 
-1. Session/PAT principal resolves customer before any data lookup; cross-tenant result is `403`.
+1. A tenant-bound session/PAT principal resolves customer before any tenant data lookup; cross-tenant result is `403`. A lead session returns only `state: 'lead'` safe data.
 2. `dashboardSummary` values are computed from RAS persistence only; do not query Zernio directly on dashboard page render.
 3. Inbox counts are tenant scoped and do not expose conversation text in this summary.
 4. Customer-facing endpoint does not expose `zernioProfileId`, raw provider IDs, host/IP, secret metadata, or other tenant internals.
@@ -87,7 +88,7 @@ Every mutation records actor, customer, before/after safe fields, request id and
 ## 6. Acceptance gates
 
 - Missing/invalid session remains `401`; cross-tenant attempts remain `403`.
-- New Google customer receives `needs_plan` with no provider side effect.
+- New Google lead receives `state: 'lead'` with no customer/tenant, entitlement, profile, quota, or provider side effect.
 - Dashboard only displays backend-verified connected account state.
 - Backend `npm run check`; frontend `npm run lint && npm run build` pass.
 - Before production: staging smoke for no-session, invalid-session, ready customer, needs-plan customer and admin-forbidden customer.
