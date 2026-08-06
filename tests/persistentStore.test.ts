@@ -129,9 +129,10 @@ test('JsonRasStore serializes concurrent lifecycle sweeps to one durable transit
     await first.upsertCustomer({ id: 'cust_concurrent', name: 'Concurrent', entitlement: { basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: '2026-08-20T00:00:00.000Z' }, connectSlots: { status: 'active', includedSlots: 0, purchasedSlots: 0, trialSlots: 0, totalSlots: 0, activeConnectedAccounts: 0 }, addOns: [] } });
     const results = await Promise.all([first.sweepSubscriptionLifecycle('2026-08-20T00:00:00.000Z'), second.sweepSubscriptionLifecycle('2026-08-20T00:00:00.000Z')]);
     const state = await first.load();
-    assert.equal(results.flat().length, 1);
-    assert.equal(state.subscriptionLifecycleEvents.length, 1);
-    assert.equal(state.auditLogs.length, 1);
+    assert.equal(results.flat().length, 2);
+    assert.equal(state.subscriptionLifecycleEvents.length, 2);
+    assert.equal(state.auditLogs.length, 2);
+    assert.deepEqual(state.subscriptionLifecycleEvents.map((event) => event.lifecycleState), ['expiring_soon', 'past_due']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

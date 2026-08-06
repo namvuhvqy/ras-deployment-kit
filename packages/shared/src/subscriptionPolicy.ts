@@ -6,7 +6,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
 
-function parseIso(iso: string | undefined): number | undefined {
+/** Strictly validates an explicit server timestamp without consulting a clock. */
+export function parseSubscriptionPolicyIso(iso: string | undefined): number | undefined {
   if (!iso) return undefined;
   const match = ISO_TIMESTAMP.exec(iso);
   if (!match) return undefined;
@@ -33,8 +34,8 @@ export function evaluateSubscriptionLifecycle(
   expiresAtIso: string | undefined,
   nowIso: string,
 ): SubscriptionLifecycleEvaluation {
-  const expiresAtMs = parseIso(expiresAtIso);
-  const nowMs = parseIso(nowIso);
+  const expiresAtMs = parseSubscriptionPolicyIso(expiresAtIso);
+  const nowMs = parseSubscriptionPolicyIso(nowIso);
   if (expiresAtMs === undefined || nowMs === undefined) return { state: 'unknown' };
 
   const reminderAtMs = expiresAtMs - REMINDER_DAYS * DAY_MS;
@@ -47,7 +48,7 @@ export function evaluateSubscriptionLifecycle(
 
 /** Adds one billing period in UTC, clamping dates such as January 31 to February's last day. */
 export function addPeriod(startIso: string, billingCycle: RasBillingCycle): string | undefined {
-  const startMs = parseIso(startIso);
+  const startMs = parseSubscriptionPolicyIso(startIso);
   if (startMs === undefined) return undefined;
 
   const start = new Date(startMs);

@@ -26,7 +26,7 @@ import type {
   SocialPost,
   RasUser,
 } from './types.js';
-import { evaluateSubscriptionLifecycle } from './subscriptionPolicy.js';
+import { evaluateSubscriptionLifecycle, parseSubscriptionPolicyIso } from './subscriptionPolicy.js';
 
 export interface RasPersistentState {
   schemaVersion: number;
@@ -565,6 +565,8 @@ export class JsonRasStore {
 
   /** Atomically records date-derived lifecycle reminders and transitions exactly once per expiry. */
   async sweepSubscriptionLifecycle(nowIso: string): Promise<SubscriptionLifecycleEvent[]> {
+    // Validate before mutate: mutate initializes legacy fields and always writes its state.
+    if (parseSubscriptionPolicyIso(nowIso) === undefined) return [];
     return this.mutate((state) => {
       const created: SubscriptionLifecycleEvent[] = [];
       state.subscriptionLifecycleEvents ??= [];
@@ -572,15 +574,20 @@ export class JsonRasStore {
         const evaluation = evaluateSubscriptionLifecycle(customer.entitlement?.basePlan.expiresAtIso, nowIso);
         if (evaluation.state === 'unknown' || evaluation.state === 'active' || !evaluation.expiresAtIso) continue;
 
-        const kind = evaluation.state === 'expiring_soon' ? 'reminder' : 'transition';
-        const eventId = subscriptionLifecycleEventId(customer.id, kind, evaluation.state, evaluation.expiresAtIso);
-        if (state.subscriptionLifecycleEvents.some((event) => event.id === eventId)) continue;
-
-        const event: SubscriptionLifecycleEvent = { id: eventId, customerId: customer.id, kind, lifecycleState: evaluation.state, expiresAtIso: evaluation.expiresAtIso, createdAtIso: nowIso };
-        state.subscriptionLifecycleEvents.push(event);
-        state.auditLogs.push({ id: `audit_${eventId}`, customerId: customer.id, action: `subscription.lifecycle.${kind}`, targetType: 'subscription', targetId: customer.id, metadata: { lifecycleState: evaluation.state, expiresAtIso: evaluation.expiresAtIso }, createdAtIso: nowIso });
-        if (evaluation.state === 'expired') this.expireCustomerEntitlements(customer);
-        created.push(event);
+        const milestones: Array<{ kind: SubscriptionLifecycleEvent['kind']; lifecycleState: SubscriptionLifecycleEvent['lifecycleState'] }> = [
+          { kind: 'reminder', lifecycleState: 'expiring_soon' },
+          ...(evaluation.state === 'expiring_soon' ? [] : [{ kind: 'transition' as const, lifecycleState: 'past_due' as const }]),
+          ...(evaluation.state === 'expired' ? [{ kind: 'transition' as const, lifecycleState: 'expired' as const }] : []),
+        ];
+        for (const milestone of milestones) {
+          const eventId = subscriptionLifecycleEventId(customer.id, milestone.kind, milestone.lifecycleState, evaluation.expiresAtIso);
+          if (state.subscriptionLifecycleEvents.some((event) => event.id === eventId)) continue;
+          const event: SubscriptionLifecycleEvent = { id: eventId, customerId: customer.id, ...milestone, expiresAtIso: evaluation.expiresAtIso, createdAtIso: nowIso };
+          state.subscriptionLifecycleEvents.push(event);
+          state.auditLogs.push({ id: `audit_${eventId}`, customerId: customer.id, action: `subscription.lifecycle.${milestone.kind}`, targetType: 'subscription', targetId: customer.id, metadata: { lifecycleState: milestone.lifecycleState, expiresAtIso: evaluation.expiresAtIso }, createdAtIso: nowIso });
+          if (milestone.lifecycleState === 'expired') this.expireCustomerEntitlements(customer);
+          created.push(event);
+        }
       }
       return created;
     });
