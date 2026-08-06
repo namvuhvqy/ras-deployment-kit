@@ -558,10 +558,11 @@ export class JsonRasStore {
     return state.checkoutIntents.find((row) => row.id === id);
   }
 
-  async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
+  async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId?: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'identity_mismatch' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
     const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
-    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId);
     if (!intent) return { error: 'not_found' };
+    if (input.customerId !== undefined && intent.customerId !== input.customerId) return { error: 'identity_mismatch' };
     if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
     if (intent.status === 'consumed') return { error: 'consumed' };
     if (intent.paypalOrderId && intent.paypalOrderId !== input.paypalOrderId) return { error: 'already_bound' };
@@ -579,6 +580,39 @@ export class JsonRasStore {
     if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
     intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
     await this.write(state); return { intent };
+  }
+
+  /** Trusted internal relay boundary; no external provider verification is performed here. */
+  async captureCheckoutIntentFromTrustedRelay(input: { intentId: string; paypalOrderId: string; transactionId: string; rawCapture?: Record<string, unknown>; nowIso?: string }): Promise<{ customer?: RasCustomer; payment?: RasBillingPayment; job?: RasJob; queued?: boolean; error?: 'not_found' | 'expired' | 'not_bound' | 'already_consumed' | 'invalid_payment_customer' | 'lead_identity_mismatch' | 'lead_already_bound' }> {
+    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
+    const intent = state.checkoutIntents.find((row) => row.id === input.intentId);
+    if (!intent) return { error: 'not_found' };
+    if (intent.status === 'consumed') {
+      if (intent.transactionId !== input.transactionId) return { error: 'already_consumed' };
+      const payment = state.billingPayments.find((row) => row.paypalOrderId === input.paypalOrderId && row.transactionId === input.transactionId);
+      const customer = payment && state.customers.find((row) => row.id === payment.customerId);
+      const job = payment && state.jobs.find((row) => row.id === `provision_payment_${payment.id}`);
+      return payment && customer && job ? { customer, payment, job, queued: false } : { error: 'already_consumed' };
+    }
+    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
+    let customer: RasCustomer | undefined;
+    if (intent.customerId) {
+      customer = state.customers.find((row) => row.id === intent.customerId);
+      if (!customer) return { error: 'invalid_payment_customer' };
+    } else {
+      const lead = state.users.find((row) => row.id === intent.purchaserUserId && row.email.toLowerCase() === intent.purchaserEmail?.toLowerCase() && row.status === 'active');
+      if (!lead) return { error: 'lead_identity_mismatch' };
+      if (lead.customerId) return { error: 'lead_already_bound' };
+      customer = { id: `cust_${intent.id}`, name: lead.displayName ?? lead.email, email: lead.email, status: 'pending', packageStatus: 'pending', addOnStatus: {}, maxConnectedAccounts: 0, createdAtIso: now, updatedAtIso: now };
+      state.customers.push(customer); lead.customerId = customer.id; lead.updatedAtIso = now; intent.customerId = customer.id;
+    }
+    intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
+    const payment: RasBillingPayment = { id: `paypal:${input.paypalOrderId}`, provider: 'paypal', customerId: customer.id, paypalOrderId: input.paypalOrderId, transactionId: input.transactionId, status: 'captured', provisionStatus: 'pending', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: input.rawCapture, retryCount: 0, createdAtIso: now, updatedAtIso: now };
+    state.billingPayments.push(payment);
+    const job: RasJob = { id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now };
+    state.jobs.push(job); await this.write(state);
+    return { customer, payment, job, queued: true };
   }
 
   async recordBillingPaymentCapture(input: Omit<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'> & Partial<Pick<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'>>): Promise<RasBillingPayment> {

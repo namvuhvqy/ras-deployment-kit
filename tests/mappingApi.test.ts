@@ -387,7 +387,7 @@ test('billing entitlement provisioning rejects alias payloads from direct sessio
   });
 });
 
-test('lead sessions cannot bootstrap trial, checkout, or personal access tokens', async () => {
+test('lead sessions cannot bootstrap trial or personal access tokens, but can create a lead-bound checkout intent', async () => {
   const state = emptyState();
   Object.assign(state, {
     users: [{ id: 'lead_1', email: 'lead@example.test', role: 'owner', status: 'active', createdAtIso: now, updatedAtIso: now }],
@@ -398,13 +398,50 @@ test('lead sessions cannot bootstrap trial, checkout, or personal access tokens'
     const trial = await fetch(`${baseUrl}/billing/entitlements/activate-trial`, { method: 'POST', headers });
     assert.equal(trial.status, 403);
     assert.equal((await trial.json() as { error: string }).error, 'tenant_required');
-    const checkout = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers, body: JSON.stringify({ plan: 'lite', extra_connect_slots: 0 }) });
-    assert.equal(checkout.status, 403);
-    assert.equal((await checkout.json() as { error: string }).error, 'tenant_required');
+    const checkout = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers, body: JSON.stringify({ plan: 'lite', extra_connect_slots: 0, customer_id: 'forged', amount: 1 }) });
+    assert.equal(checkout.status, 201);
+    const intent = (await checkout.json() as { intent: { id: string; customerId?: string; purchaserUserId?: string; purchaserEmail?: string; amount: string } }).intent;
+    assert.equal(intent.customerId, undefined);
+    assert.equal(intent.purchaserUserId, 'lead_1');
+    assert.equal(intent.purchaserEmail, 'lead@example.test');
+    assert.equal(intent.amount, '19');
     const pat = await fetch(`${baseUrl}/api/v1/personal-access-tokens`, { method: 'POST', headers, body: JSON.stringify({ name: 'no-tenant', scopes: ['accounts:read'] }) });
     assert.equal(pat.status, 401);
     const persisted = JSON.parse(await (await fetch(`${baseUrl}/health`)).text()) as { counts: { customers: number; jobs: number } };
     assert.deepEqual(persisted.counts, { customers: 0, sandboxes: 0, agents: 0, servicePackages: 0, connectedAccounts: 0, jobs: 0 });
+  });
+});
+
+test('trusted relay capture binds a lead once, records durable outbox, and does not provision Zernio in capture', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [{ id: 'lead_capture', email: 'capture@example.test', displayName: 'Capture Lead', role: 'owner', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 'sess_capture', token: 'token_capture', userId: 'lead_capture', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const headers = { authorization: 'Bearer token_capture', 'content-type': 'application/json' };
+    const created = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers, body: JSON.stringify({ plan: 'pro', billing_cycle: 'monthly', extra_connect_slots: 2, customer_id: 'attacker', amount: 0 }) });
+    assert.equal(created.status, 201);
+    const intent = (await created.json() as { intent: { id: string } }).intent;
+    const browserCapture = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-LEAD-1', transaction_id: 'CAP-LEAD-1', capture_status: 'COMPLETED' }) });
+    assert.equal(browserCapture.status, 401);
+    const bind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, customer_id: 'attacker', paypal_order_id: 'ORDER-LEAD-1' }) });
+    assert.equal(bind.status, 409);
+    const trustedBind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-LEAD-1' }) });
+    assert.equal(trustedBind.status, 200);
+    const captureBody = { intent_id: intent.id, paypal_order_id: 'ORDER-LEAD-1', transaction_id: 'CAP-LEAD-1', capture_status: 'COMPLETED', customer_id: 'attacker', amount: 1 };
+    const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify(captureBody) });
+    assert.equal(captured.status, 202);
+    const payload = await captured.json() as { customerId: string; provisioning: { queued: boolean } };
+    assert.equal(payload.provisioning.queued, true);
+    const replay = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify(captureBody) });
+    assert.equal(replay.status, 202);
+    assert.equal((await replay.json() as { provisioning: { queued: boolean } }).provisioning.queued, false);
+    const dashboard = await fetch(`${baseUrl}/dashboard`, { headers: { authorization: 'Bearer token_capture' } });
+    const dashboardPayload = await dashboard.json() as { dashboard: { state: string; customer: { id: string; zernioProfileId?: string } } };
+    assert.equal(dashboardPayload.dashboard.state, 'needs_plan');
+    assert.equal(dashboardPayload.dashboard.customer.id, payload.customerId);
+    assert.equal(dashboardPayload.dashboard.customer.zernioProfileId, undefined);
   });
 });
 

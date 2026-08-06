@@ -18,7 +18,11 @@ export type RasProvisionStatus = 'pending' | 'pending_retry' | 'provisioned' | '
 
 export interface RasCheckoutIntent {
   id: string;
-  customerId: string;
+  /** Present for an existing tenant purchase; absent for a pre-tenant lead purchase. */
+  customerId?: string;
+  /** Immutable authenticated lead identity used to bind a tenant after trusted capture. */
+  purchaserUserId?: string;
+  purchaserEmail?: string;
   plan: Exclude<RasBasePlanId, 'none'>;
   billingCycle: RasBillingCycle;
   extraConnectSlots: number;

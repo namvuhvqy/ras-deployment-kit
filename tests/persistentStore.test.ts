@@ -15,8 +15,8 @@ test('JsonRasStore migrates an empty store with current schema metadata', async 
     const state = JSON.parse(await readFile(path, 'utf8'));
 
     assert.equal(result.created, true);
-    assert.equal(result.previousVersion, 2);
-    assert.equal(result.currentVersion, 2);
+    assert.equal(result.previousVersion, 3);
+    assert.equal(result.currentVersion, 3);
     assert.match(result.sql, /CREATE TABLE IF NOT EXISTS customers/);
     assert.deepEqual(state.customers, []);
     assert.deepEqual(state.jobs, []);
@@ -60,7 +60,7 @@ for (const owner of [undefined, '{malformed']) {
       const old = new Date(Date.now() - 2_000); await utimes(lockPath, old, old);
       await store.appendAuditLog({ id: 'after_orphan', action: 'recovered', targetType: 'test', metadata: {}, createdAtIso: new Date().toISOString() });
       const state = JSON.parse(await readFile(path, 'utf8'));
-      assert.equal(state.auditLogs[0]?.id, 'after_orphan'); assert.equal(state.schemaVersion, 2);
+      assert.equal(state.auditLogs[0]?.id, 'after_orphan'); assert.equal(state.schemaVersion, 3);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 }
@@ -339,7 +339,7 @@ test('JsonRasStore checkout intents bind one PayPal order and consume exactly on
     const store = new JsonRasStore(join(dir, 'ras-store.json'));
     await store.migrate();
     const intent = await store.createCheckoutIntent({ customerId: 'cust_a', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, amount: '25', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
-    assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_b', paypalOrderId: 'ORDER-1' })).error, 'not_found');
+    assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_b', paypalOrderId: 'ORDER-1' })).error, 'identity_mismatch');
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1' })).intent?.status, 'bound');
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-2' })).error, 'already_bound');
     assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-1' })).intent?.status, 'consumed');
