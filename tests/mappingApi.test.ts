@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -14,7 +15,7 @@ async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string)
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token' },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', RAS_PAYMENT_RELAY_ASSERTION_SECRET: 'test-relay-assertion-secret' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -35,6 +36,11 @@ async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string)
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+function relayHeaders(assertion: Record<string, string>): Record<string, string> {
+  const canonical = JSON.stringify(assertion);
+  return { 'x-ras-internal-token': 'test-internal-token', 'x-ras-relay-assertion-signature': `sha256=${createHmac('sha256', 'test-relay-assertion-secret').update(canonical).digest('hex')}`, 'content-type': 'application/json' };
 }
 
 function emptyState(): Record<string, unknown> {
@@ -429,12 +435,13 @@ test('trusted relay capture binds a lead once, records durable outbox, and does 
     assert.equal(bind.status, 409);
     const trustedBind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-LEAD-1' }) });
     assert.equal(trustedBind.status, 200);
-    const captureBody = { intent_id: intent.id, paypal_order_id: 'ORDER-LEAD-1', transaction_id: 'CAP-LEAD-1', capture_status: 'COMPLETED', customer_id: 'attacker', amount: 1 };
-    const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify(captureBody) });
+    const relay_assertion = { intentId: intent.id, paypalOrderId: 'ORDER-LEAD-1', transactionId: 'CAP-LEAD-1', amount: '51', currency: 'USD', status: 'COMPLETED', issuedAtIso: new Date().toISOString(), expiresAtIso: new Date(Date.now() + 60_000).toISOString(), nonce: 'lead-capture-nonce' };
+    const captureBody = { intent_id: intent.id, paypal_order_id: 'ORDER-LEAD-1', transaction_id: 'CAP-LEAD-1', capture_status: 'COMPLETED', relay_assertion };
+    const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: relayHeaders(relay_assertion), body: JSON.stringify(captureBody) });
     assert.equal(captured.status, 202);
     const payload = await captured.json() as { customerId: string; provisioning: { queued: boolean } };
     assert.equal(payload.provisioning.queued, true);
-    const replay = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify(captureBody) });
+    const replay = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: relayHeaders(relay_assertion), body: JSON.stringify(captureBody) });
     assert.equal(replay.status, 202);
     assert.equal((await replay.json() as { provisioning: { queued: boolean } }).provisioning.queued, false);
     const dashboard = await fetch(`${baseUrl}/dashboard`, { headers: { authorization: 'Bearer token_capture' } });
@@ -714,9 +721,10 @@ test('checkout capture uses an owned bound intent rather than relay supplied pri
     assert.equal(intent.amount, '25');
     const bind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, customer_id: 'cust_a', paypal_order_id: 'ORDER-INTENT-1' }) });
     assert.equal(bind.status, 200);
-    const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-INTENT-1', captureStatus: 'COMPLETED', total_amount: 1, plan: 'max' }) });
+    const relay_assertion = { intentId: intent.id, paypalOrderId: 'ORDER-INTENT-1', transactionId: 'CAP-INTENT-1', amount: '25', currency: 'USD', status: 'COMPLETED', issuedAtIso: new Date().toISOString(), expiresAtIso: new Date(Date.now() + 60_000).toISOString(), nonce: 'tenant-capture-nonce' };
+    const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: relayHeaders(relay_assertion), body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-INTENT-1', captureStatus: 'COMPLETED', total_amount: 1, plan: 'max', relay_assertion }) });
     assert.equal(captured.status, 202);
     const repeated = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-OTHER', capture_status: 'COMPLETED' }) });
-    assert.equal(repeated.status, 409);
+    assert.equal(repeated.status, 401);
   });
 });

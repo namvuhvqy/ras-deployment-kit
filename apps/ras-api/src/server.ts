@@ -248,6 +248,26 @@ function endInternalAccessError(res: { statusCode: number; end: (chunk: string) 
   res.end(JSON.stringify({ ok: false, error: 'missing_internal_token' }));
 }
 
+type RelayCaptureAssertion = { intentId: string; paypalOrderId: string; transactionId: string; amount: string; currency: string; status: 'COMPLETED'; issuedAtIso: string; expiresAtIso: string; nonce: string };
+function canonicalRelayAssertion(value: RelayCaptureAssertion): string {
+  return JSON.stringify({ intentId: value.intentId, paypalOrderId: value.paypalOrderId, transactionId: value.transactionId, amount: value.amount, currency: value.currency, status: value.status, issuedAtIso: value.issuedAtIso, expiresAtIso: value.expiresAtIso, nonce: value.nonce });
+}
+function verifiedRelayAssertion(req: IncomingMessage, body: Record<string, unknown>, intent: { id: string; amount: string; currency: string }): RelayCaptureAssertion | undefined {
+  const secret = process.env.RAS_PAYMENT_RELAY_ASSERTION_SECRET;
+  const assertion = body.relay_assertion;
+  const signature = firstHeader(req, 'x-ras-relay-assertion-signature');
+  if (!secret || !signature || !assertion || typeof assertion !== 'object' || Array.isArray(assertion)) return undefined;
+  const value = assertion as Record<string, unknown>;
+  const candidate: RelayCaptureAssertion = { intentId: String(value.intentId ?? ''), paypalOrderId: String(value.paypalOrderId ?? ''), transactionId: String(value.transactionId ?? ''), amount: String(value.amount ?? ''), currency: String(value.currency ?? ''), status: 'COMPLETED', issuedAtIso: String(value.issuedAtIso ?? ''), expiresAtIso: String(value.expiresAtIso ?? ''), nonce: String(value.nonce ?? '') };
+  if (value.status !== 'COMPLETED' || !candidate.intentId || !candidate.paypalOrderId || !candidate.transactionId || !candidate.nonce || candidate.nonce.length > 256 || candidate.intentId !== intent.id || candidate.amount !== intent.amount || candidate.currency !== intent.currency) return undefined;
+  const issued = Date.parse(candidate.issuedAtIso); const expires = Date.parse(candidate.expiresAtIso); const now = Date.now();
+  if (!Number.isFinite(issued) || !Number.isFinite(expires) || expires < now || issued > now + 60_000 || expires - issued > 10 * 60_000) return undefined;
+  const expected = createHmac('sha256', secret).update(canonicalRelayAssertion(candidate)).digest('hex');
+  const actual = normalizeSignature(signature);
+  const expectedBuffer = Buffer.from(expected, 'hex'); const actualBuffer = Buffer.from(actual, 'hex');
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer) ? candidate : undefined;
+}
+
 async function exchangeGoogleCode(req: IncomingMessage, code: string): Promise<string> {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -704,9 +724,11 @@ const server = createServer(async (req, res) => {
     const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');
     const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'captureStatus') ?? stringField(body, 'status');
     if (!intentId || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' })); return; }
-    // This endpoint trusts an authenticated internal payment relay. It deliberately
-    // does not assert that PayPal itself was contacted or externally verified.
-    const captured = await store.captureCheckoutIntentFromTrustedRelay({ intentId, paypalOrderId, transactionId, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body });
+    const intent = await store.getCheckoutIntent(intentId);
+    const assertion = intent && verifiedRelayAssertion(req, body, intent);
+    if (!assertion || assertion.paypalOrderId !== paypalOrderId || assertion.transactionId !== transactionId) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_relay_assertion' })); return; }
+    // This authenticates RAS's relay assertion; it is not direct PayPal verification.
+    const captured = await store.captureCheckoutIntentFromTrustedRelay({ intentId, paypalOrderId, transactionId, nonce: assertion.nonce, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body });
     if (!captured.payment || !captured.customer || !captured.job) {
       res.statusCode = captured.error === 'not_found' ? 404 : captured.error === 'expired' ? 410 : 409;
       res.end(JSON.stringify({ ok: false, error: `checkout_intent_${captured.error}` })); return;
