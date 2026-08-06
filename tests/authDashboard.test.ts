@@ -98,6 +98,43 @@ test('dashboard summary is tenant-scoped and preserves needs-plan defaults', asy
   }
 });
 
+test('dashboard entitlement allowlists add-on status keys and values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-dashboard-entitlement-redaction-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertUser({ id: 'user_redaction', email: 'redaction@example.test', role: 'owner', customerId: 'cust_redaction', status: 'active', createdAtIso: now, updatedAtIso: now });
+    await store.upsertCustomer({
+      id: 'cust_redaction', name: 'Redaction', status: 'active', createdAtIso: now,
+      entitlement: {
+        basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] } },
+        connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 },
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'active' }],
+      },
+      addOnStatus: {
+        zernio: 'active', providerId: 'provider-id', providerToken: 'provider-token', internalMetadata: 'internal-metadata',
+      } as unknown as Record<string, 'pending' | 'active' | 'inactive' | 'cancelled' | 'expired'>,
+    });
+
+    const session = await store.createSession({ userId: 'user_redaction', ttlMs: 60_000, nowIso: now });
+    const dashboard = await store.getDashboardForSession(session.token, now);
+    if (!dashboard || dashboard.state === 'lead') throw new Error('expected tenant dashboard');
+    assert.equal(dashboard.entitlement.addOnStatus.zernio, 'active');
+
+    const forbiddenKeys = new Set(['providerId', 'providerToken', 'internalMetadata']);
+    const assertNoForbiddenKeys = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        assert.equal(forbiddenKeys.has(key), false, `dashboard must not expose ${key}`);
+        assertNoForbiddenKeys(child);
+      }
+    };
+    assertNoForbiddenKeys(dashboard);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('login creates session only for active configured users', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-login-'));
   try {

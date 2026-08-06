@@ -6,6 +6,7 @@ import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
 import type {
   AddOnEntitlement,
   ConnectedAccount,
+  EntitlementStatus,
   RasAgentInstance,
   RasBillingPayment,
   RasCheckoutIntent,
@@ -102,12 +103,36 @@ export interface MigrationResult {
 }
 
 /** Deep allowlisted product/quota view; never expose persisted entitlement extras. */
+type DashboardAddOnStatus = Record<string, EntitlementStatus>;
+type CustomerAddOnStatus = NonNullable<RasCustomer['addOnStatus']>;
+
 export type DashboardEntitlement = RasEntitlement & {
   plan: 'none' | string;
   maxConnectedAccounts: number;
   activeConnectedAccounts: number;
-  addOnStatus: Record<string, string>;
+  addOnStatus: DashboardAddOnStatus;
 };
+
+const dashboardAddOnStatuses: EntitlementStatus[] = ['active', 'inactive', 'past_due', 'cancelled', 'expired', 'pending'];
+
+/** Only entitlement-declared add-ons and legacy zernio may expose a recognized status. */
+function projectDashboardAddOnStatus(entitlement: RasEntitlement, addOnStatus: Record<string, string>): DashboardAddOnStatus {
+  const safeAddOnStatus: DashboardAddOnStatus = {};
+  const knownAddOnIds = ['zernio', ...entitlement.addOns.map((addOn) => addOn.id)];
+  for (const addOnId of knownAddOnIds) {
+    const status = addOnStatus[addOnId];
+    if (typeof status === 'string' && dashboardAddOnStatuses.includes(status as EntitlementStatus)) safeAddOnStatus[addOnId] = status as EntitlementStatus;
+  }
+  return safeAddOnStatus;
+}
+
+function projectDashboardCustomerAddOnStatus(entitlement: RasEntitlement, addOnStatus: Record<string, string>): CustomerAddOnStatus {
+  const safeAddOnStatus: CustomerAddOnStatus = {};
+  for (const [addOnId, status] of Object.entries(projectDashboardAddOnStatus(entitlement, addOnStatus))) {
+    if (status !== 'past_due') safeAddOnStatus[addOnId] = status;
+  }
+  return safeAddOnStatus;
+}
 
 function projectDashboardEntitlement(entitlement: RasEntitlement, activeConnectedAccounts: number, addOnStatus: Record<string, string>): DashboardEntitlement {
   const basePlan = entitlement.basePlan;
@@ -131,7 +156,7 @@ function projectDashboardEntitlement(entitlement: RasEntitlement, activeConnecte
       ...(entitlement.connectSlots.soloApiEnabled !== undefined && { soloApiEnabled: entitlement.connectSlots.soloApiEnabled }),
     },
     addOns: entitlement.addOns.map((addOn) => ({ id: addOn.id, name: addOn.name, status: addOn.status, ...(addOn.slots !== undefined && { slots: addOn.slots }) })),
-    plan: basePlan.planId, maxConnectedAccounts: entitlement.connectSlots.totalSlots, activeConnectedAccounts, addOnStatus: { ...addOnStatus },
+    plan: basePlan.planId, maxConnectedAccounts: entitlement.connectSlots.totalSlots, activeConnectedAccounts, addOnStatus: projectDashboardAddOnStatus(entitlement, addOnStatus),
   };
 }
 
@@ -467,7 +492,7 @@ export class JsonRasStore {
     };
     return {
       user: safeUser,
-      customer: { ...customer, entitlement },
+      customer: { ...customer, entitlement, addOnStatus: projectDashboardCustomerAddOnStatus(entitlement, addOnStatus) },
       state: dashboardState,
       dashboardSummary,
       entitlement: projectDashboardEntitlement(entitlement, activeConnectedAccounts, addOnStatus),
