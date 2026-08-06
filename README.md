@@ -138,7 +138,7 @@ GOOGLE_OAUTH_CALLBACK_URL=http://localhost:8080/auth/google/callback
 
 Do not commit real Client IDs/Secrets. Frontend `/login` must show only one CTA: `Continue with Google`.
 
-`POST /auth/login` remains implemented for controlled internal/test provisioning and is reachable in the runtime; it must not be presented by the frontend as a public end-user login option. `POST /mappings/users` requires internal access and is likewise a controlled provisioning path.
+`POST /auth/login` remains implemented for controlled internal/test provisioning and is reachable in the runtime; it must not be presented by the frontend as a public end-user login option. `POST /mappings/users` requires internal access and is likewise a controlled provisioning path. Legacy demo provisioners `POST /demo/customer-zernio-profile` and `/dry-run/customer` are retired and return `410`; tenant/profile provisioning must stay on the trusted payment relay → durable outbox → worker path.
 
 ## Frontend ↔ backend API contract
 

@@ -1398,56 +1398,11 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/demo/customer-zernio-profile') {
-    const body = await readJsonBody(req);
-    const customerId = stringField(body, 'customerId') ?? 'demo_khach_2';
-    const zernioProfileId = stringField(body, 'zernioProfileId') ?? '6a2d49446d68ffa8630cf8e6';
-    const name = stringField(body, 'name') ?? 'Khách 2 Demo';
-    const nowIso = new Date().toISOString();
-    const existing = (await store.load()).customers.find((row) => row.id === customerId);
-    const customer = await store.upsertCustomer({
-      ...existing,
-      id: customerId,
-      name,
-      tenantId: stringField(body, 'tenantId') ?? existing?.tenantId ?? customerId,
-      email: stringField(body, 'email') ?? existing?.email,
-      zernioProfileId,
-      status: 'active',
-      createdAtIso: existing?.createdAtIso ?? nowIso,
-      updatedAtIso: nowIso,
-    });
-    const sync = await refreshZernioAccountsForCustomer(customer.id);
-    await store.appendAuditLog({
-      id: `audit_${Date.now()}`,
-      customerId: customer.id,
-      action: 'customer.zernio_profile_mapped',
-      targetType: 'zernio_profile',
-      targetId: customer.zernioProfileId,
-      metadata: { source: 'demo/customer-zernio-profile', sync },
-      createdAtIso: nowIso,
-    });
-    const summary = await store.getConnectionSummary(customer.id);
-    res.statusCode = existing ? 200 : 201;
-    res.end(JSON.stringify({ ok: true, customer, summary: { ...summary, customerId: customer.id, sync } }));
-    return;
-  }
-
-  if (req.url === '/dry-run/customer') {
-    const existing = (await store.load()).customers.find((customer) => customer.id === 'demo');
-    const customer = existing?.zernioProfileId
-      ? existing
-      : await adapter.createProfile({ customerId: 'demo', name: 'Demo Customer' });
-    await store.upsertCustomer(customer);
-    await store.appendAuditLog({
-      id: `audit_${Date.now()}`,
-      customerId: customer.id,
-      action: 'customer.upserted',
-      targetType: 'customer',
-      targetId: customer.id,
-      metadata: { source: 'dry-run/customer' },
-      createdAtIso: new Date().toISOString(),
-    });
-    res.end(JSON.stringify(customer));
+  if (req.url === '/demo/customer-zernio-profile' || req.url === '/dry-run/customer') {
+    // These legacy demo provisioners bypassed captured-payment -> outbox -> worker.
+    // Keep the route tombstones so old smoke scripts fail safely rather than provisioning.
+    res.statusCode = 410;
+    res.end(JSON.stringify({ ok: false, error: 'legacy_demo_provisioning_route_retired' }));
     return;
   }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -8,14 +8,14 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
-async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>): Promise<T> {
+async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string, dbPath: string) => Promise<T>, environment: NodeJS.ProcessEnv = {}): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ras-mapping-api-'));
   const dbPath = join(dir, 'ras-store.json');
   const port = 19_080 + Math.floor(Math.random() * 1000);
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', RAS_PAYMENT_RELAY_ASSERTION_SECRET: 'test-relay-assertion-secret' },
+    env: { ...process.env, ...environment, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', RAS_PAYMENT_RELAY_ASSERTION_SECRET: 'test-relay-assertion-secret' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -30,7 +30,7 @@ async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string)
       });
       child.on('error', reject);
     });
-    return await run(`http://127.0.0.1:${port}`);
+    return await run(`http://127.0.0.1:${port}`, dbPath);
   } finally {
     child.kill();
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
@@ -72,6 +72,24 @@ test('captured payment endpoint rejects session callers without the trusted serv
     assert.equal(response.status, 401);
     assert.equal((await response.json() as { error: string }).error, 'internal_payment_relay_required');
   });
+});
+
+test('retired demo provisioners are inert without authentication, including in live Zernio mode', async () => {
+  const state = emptyState();
+  await withApi(state, async (baseUrl, dbPath) => {
+    for (const route of ['/demo/customer-zernio-profile', '/dry-run/customer']) {
+      const response = await fetch(`${baseUrl}${route}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ customerId: 'attacker', zernioProfileId: 'provider-profile' }),
+      });
+      assert.equal(response.status, 410);
+      assert.deepEqual(await response.json(), { ok: false, error: 'legacy_demo_provisioning_route_retired' });
+    }
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { customers: unknown[]; auditLogs: unknown[] };
+    assert.deepEqual(persisted.customers, []);
+    assert.deepEqual(persisted.auditLogs, []);
+  }, { ZERNIO_MODE: 'live', ZERNIO_API_KEY: 'test-only-key', ZERNIO_BASE_URL: 'http://127.0.0.1:1' });
 });
 
 test('internal access rejects tokens with differing byte lengths without throwing', async () => {
