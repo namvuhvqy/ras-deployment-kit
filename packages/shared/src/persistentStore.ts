@@ -94,7 +94,7 @@ export interface MigrationResult {
   sql: string;
 }
 
-export interface RasDashboard {
+export interface RasTenantDashboard {
   user: Omit<RasUser, 'password'>;
   customer: RasCustomer;
   state: 'ready' | 'needs_plan';
@@ -123,6 +123,14 @@ export interface RasDashboard {
   servicePackages: RasServicePackage[];
   connectedAccounts: ConnectedAccount[];
 }
+
+/** An authenticated lead has no tenant resources or control-panel data. */
+export interface RasLeadDashboard {
+  user: Omit<RasUser, 'password'>;
+  state: 'lead';
+}
+
+export type RasDashboard = RasTenantDashboard | RasLeadDashboard;
 
 export interface CustomerLifecycleStatus {
   customer: RasCustomer;
@@ -353,34 +361,15 @@ export class JsonRasStore {
 
     const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
     const entropy = Math.random().toString(36).slice(2, 8);
-    const customerId = `cust_${slug}_${entropy}`;
     const user: RasUser = {
       id: `user_${slug}_${entropy}`,
       email,
       displayName: input.displayName,
       role: 'owner',
-      customerId,
       status: 'active',
       createdAtIso: now,
       updatedAtIso: now,
     };
-    const customer: RasCustomer = {
-      id: customerId,
-      name: input.displayName ?? email,
-      email,
-      status: 'pending',
-      billingStatus: 'trial',
-      packageStatus: 'pending',
-      maxConnectedAccounts: 0,
-      activeConnectedAccounts: 0,
-      addOnStatus: {},
-      createdAtIso: now,
-      updatedAtIso: now,
-    };
-    await this.upsertCustomer({
-      ...customer,
-      entitlement: normalizeEntitlement(customer, 0),
-    });
     return this.upsertUser(user);
   }
 
@@ -405,23 +394,24 @@ export class JsonRasStore {
     if (!session) return undefined;
     const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
     if (!user) return undefined;
+    const { password: _password, ...safeUser } = user;
+    if (!user.customerId) return { user: safeUser, state: 'lead' };
     const customer = state.customers.find((row) => row.id === user.customerId);
     if (!customer) return undefined;
-    const { password: _password, ...safeUser } = user;
     const connectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id);
     const activeConnectedAccounts = connectedAccounts.filter((row) => row.status === 'connected').length;
     const maxConnectedAccounts = customer.maxConnectedAccounts ?? 0;
     const addOnStatus = customer.addOnStatus ?? {};
     const hasActivePlan = customer.packageStatus === 'active' || customer.billingStatus === 'active' || maxConnectedAccounts > 0;
-    const dashboardState: RasDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
+    const dashboardState: RasTenantDashboard['state'] = hasActivePlan ? 'ready' : 'needs_plan';
     const entitlement = normalizeEntitlement(customer, activeConnectedAccounts);
-    const renewalState: RasDashboard['dashboardSummary']['renewalState'] =
+    const renewalState: RasTenantDashboard['dashboardSummary']['renewalState'] =
       customer.billingStatus === 'past_due' || customer.packageStatus === 'past_due'
         ? 'past_due'
         : customer.billingStatus === 'active' || customer.packageStatus === 'active'
           ? 'active'
           : 'unknown';
-    const dashboardSummary: RasDashboard['dashboardSummary'] = {
+    const dashboardSummary: RasTenantDashboard['dashboardSummary'] = {
       renewalState,
       inbox: {
         unreadConversations: state.inboxConversations.filter((row) => row.customerId === customer.id && row.unreadCount > 0).length,
@@ -459,7 +449,7 @@ export class JsonRasStore {
     const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
     if (session) {
       const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
-      if (user) return { authType: 'session', customerId: user.customerId, userId: user.id, scopes: ['*'] };
+      if (user?.customerId) return { authType: 'session', customerId: user.customerId, userId: user.id, scopes: ['*'] };
     }
     const pat = state.personalAccessTokens.find((row) => row.tokenHash === hashPat(token) && !row.revokedAtIso && (!row.expiresAtIso || Date.parse(row.expiresAtIso) > Date.parse(nowIso)));
     if (!pat) return undefined;

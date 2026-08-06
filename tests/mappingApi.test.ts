@@ -387,6 +387,27 @@ test('billing entitlement provisioning rejects alias payloads from direct sessio
   });
 });
 
+test('lead sessions cannot bootstrap trial, checkout, or personal access tokens', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [{ id: 'lead_1', email: 'lead@example.test', role: 'owner', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 'sess_lead', token: 'token_lead', userId: 'lead_1', createdAtIso: now, expiresAtIso: new Date(Date.now() + 60 * 60 * 1000).toISOString() }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const headers = { authorization: 'Bearer token_lead', 'content-type': 'application/json' };
+    const trial = await fetch(`${baseUrl}/billing/entitlements/activate-trial`, { method: 'POST', headers });
+    assert.equal(trial.status, 403);
+    assert.equal((await trial.json() as { error: string }).error, 'tenant_required');
+    const checkout = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers, body: JSON.stringify({ plan: 'lite', extra_connect_slots: 0 }) });
+    assert.equal(checkout.status, 403);
+    assert.equal((await checkout.json() as { error: string }).error, 'tenant_required');
+    const pat = await fetch(`${baseUrl}/api/v1/personal-access-tokens`, { method: 'POST', headers, body: JSON.stringify({ name: 'no-tenant', scopes: ['accounts:read'] }) });
+    assert.equal(pat.status, 401);
+    const persisted = JSON.parse(await (await fetch(`${baseUrl}/health`)).text()) as { counts: { customers: number; jobs: number } };
+    assert.deepEqual(persisted.counts, { customers: 0, sandboxes: 0, agents: 0, servicePackages: 0, connectedAccounts: 0, jobs: 0 });
+  });
+});
+
 test('authenticated trial activation grants base entitlement without enabling Zernio slots', async () => {
   const state = emptyState();
   state.customers = [

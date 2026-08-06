@@ -547,7 +547,8 @@ const server = createServer(async (req, res) => {
           ok: true,
           token: session.token,
           expiresAtIso: session.expiresAtIso,
-          customerId: dashboard.customer.id,
+          state: dashboard.state,
+          ...(dashboard.state === 'lead' ? {} : { customerId: dashboard.customer.id }),
           redirectTo: state.redirectTo,
         }),
       );
@@ -646,6 +647,11 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
       return;
     }
+    if (dashboard.state === 'lead') {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ ok: false, error: 'tenant_required' }));
+      return;
+    }
     const mapping = await store.upsertCustomerEntitlement({
       customerId: dashboard.customer.id,
       maxConnectedAccounts: 0,
@@ -660,6 +666,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/billing/checkout-intents') {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    if (dashboard.state === 'lead') { res.statusCode = 403; res.end(JSON.stringify({ ok: false, error: 'tenant_required' })); return; }
     const body = await readJsonBody(req);
     const plan = basePlanField(body); const billingCycle = billingCycleField(body);
     const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);

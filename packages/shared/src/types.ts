@@ -109,7 +109,8 @@ export interface RasUser {
   email: string;
   displayName?: string;
   role: RasUserRole;
-  customerId: string;
+  /** Absent for an authenticated lead until server-verified provisioning binds a tenant. */
+  customerId?: string;
   status: RasUserStatus;
   password?: string;
   createdAtIso: string;
