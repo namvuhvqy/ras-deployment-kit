@@ -6,6 +6,7 @@ import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
+import { evaluatePaidCapability, type PaidCapabilityDecision } from '../../../packages/shared/src/entitlementPolicy.js';
 import { paypalRelayConfigFromEnv, relayPaypalSandboxCapture } from './paypalTrustedRelay.js';
 
 const adapter = createZernioAdapterFromEnv();
@@ -220,6 +221,17 @@ async function requireCustomerAccess(req: IncomingMessage, customerId: string, r
 async function requireSessionPrincipal(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   return principal?.authType === 'session' ? principal : undefined;
+}
+
+function endPaidCapabilityError(res: { statusCode: number; end: (chunk?: string) => void }, error: Exclude<PaidCapabilityDecision, 'allow'>) {
+  res.statusCode = 403;
+  res.end(JSON.stringify({ ok: false, error }));
+}
+
+async function requirePaidZernioCapability(customerId: string): Promise<PaidCapabilityDecision> {
+  const state = await store.load();
+  const customer = state.customers.find((row) => row.id === customerId);
+  return evaluatePaidCapability(customer?.entitlement, new Date().toISOString());
 }
 
 function endCustomerAccessError(res: { statusCode: number; setHeader: (name: string, value: string | number) => void; end: (chunk?: string) => void }, access: { status: CustomerAccess; retryAfterSeconds?: number }) {
@@ -860,6 +872,8 @@ const server = createServer(async (req, res) => {
     if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     if (req.method === 'GET' && !operation) { res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicSocialPost) })); return; }
     if (req.method !== 'POST' || !operation) { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    const paidCapability = await requirePaidZernioCapability(customerId);
+    if (paidCapability !== 'allow') { endPaidCapabilityError(res, paidCapability); return; }
     const idempotencyKey = firstHeader(req, 'idempotency-key')?.trim();
     let body: Record<string, unknown>;
     try { body = await readJsonBody(req); } catch { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_json' })); return; }
@@ -894,17 +908,14 @@ const server = createServer(async (req, res) => {
       endCustomerAccessError(res, access);
       return;
     }
+    const paidCapability = await requirePaidZernioCapability(customerId);
+    if (paidCapability !== 'allow') { endPaidCapabilityError(res, paidCapability); return; }
 
     await refreshZernioAccountsForCustomer(customerId);
     const mapping = await store.getCustomerMapping(customerId);
     if (!mapping) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
-      return;
-    }
-    if (mapping.packageStatus !== 'active' || (mapping.addOnStatus.zernio && mapping.addOnStatus.zernio !== 'active')) {
-      res.statusCode = 403;
-      res.end(JSON.stringify({ ok: false, error: 'zernio_addon_inactive', entitlement: mapping }));
       return;
     }
     if (mapping.activeConnectedAccounts >= mapping.maxConnectedAccounts) {
@@ -979,17 +990,14 @@ const server = createServer(async (req, res) => {
       endCustomerAccessError(res, access);
       return;
     }
+    const paidCapability = await requirePaidZernioCapability(customerId);
+    if (paidCapability !== 'allow') { endPaidCapabilityError(res, paidCapability); return; }
 
     await refreshZernioAccountsForCustomer(customerId);
     const mapping = await store.getCustomerMapping(customerId);
     if (!mapping) {
       res.statusCode = 404;
       res.end(JSON.stringify({ ok: false, error: 'customer_not_found' }));
-      return;
-    }
-    if (mapping.packageStatus !== 'active' || (mapping.addOnStatus.zernio && mapping.addOnStatus.zernio !== 'active')) {
-      res.statusCode = 403;
-      res.end(JSON.stringify({ ok: false, error: 'zernio_addon_inactive', entitlement: mapping }));
       return;
     }
     if (mapping.activeConnectedAccounts >= mapping.maxConnectedAccounts) {
@@ -1342,6 +1350,8 @@ const server = createServer(async (req, res) => {
     const decodedDraftId = decodeURIComponent(draftId);
     const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:approve');
     if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    const paidCapability = await requirePaidZernioCapability(decodedCustomerId);
+    if (paidCapability !== 'allow') { endPaidCapabilityError(res, paidCapability); return; }
     if (!access.principal?.userId) { endCustomerAccessError(res, { status: 'unauthorized' }); return; }
     try {
       const { draft, job } = await store.approveInboxDraftReply({
@@ -1374,6 +1384,8 @@ const server = createServer(async (req, res) => {
     const decodedConversationId = decodeURIComponent(conversationId);
     const access = await requireCustomerAccess(req, decodedCustomerId, 'inbox:draft');
     if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    const paidCapability = await requirePaidZernioCapability(decodedCustomerId);
+    if (paidCapability !== 'allow') { endPaidCapabilityError(res, paidCapability); return; }
     const body = await readJsonBody(req);
     const text = stringField(body, 'text');
     if (!text || !access.principal?.userId) {

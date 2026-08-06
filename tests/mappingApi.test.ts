@@ -8,6 +8,14 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
+function activeEntitlement(expiresAtIso = new Date(Date.now() + 86_400_000).toISOString()) {
+  return {
+    basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso },
+    connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 },
+    addOns: [{ id: 'zernio', name: 'Zernio Connect', status: 'active' }],
+  };
+}
+
 async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string, dbPath: string) => Promise<T>, environment: NodeJS.ProcessEnv = {}): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ras-mapping-api-'));
   const dbPath = join(dir, 'ras-store.json');
@@ -206,7 +214,7 @@ test('inbox read APIs are tenant-scoped and never expose another customer messag
       { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
       { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
     ],
-    customers: [{ id: 'cust_a', name: 'A', status: 'active' }, { id: 'cust_b', name: 'B', status: 'active' }],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active', entitlement: activeEntitlement() }, { id: 'cust_b', name: 'B', status: 'active' }],
     inboxConversations: [{ id: 'conv_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', providerConversationId: 'conv_a', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now }],
     inboxMessages: [{ id: 'msg_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', conversationId: 'conv_a', providerMessageId: 'provider_a', direction: 'inbound', text: 'Riêng tư', receivedAtIso: now, createdAtIso: now }],
   });
@@ -235,7 +243,7 @@ test('inbox draft endpoint creates a tenant-scoped pending-review reply and reje
       { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
       { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
     ],
-    customers: [{ id: 'cust_a', name: 'A', status: 'active' }, { id: 'cust_b', name: 'B', status: 'active' }],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active', entitlement: activeEntitlement() }, { id: 'cust_b', name: 'B', status: 'active' }],
     inboxConversations: [{ id: 'conv_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', providerConversationId: 'conv_a', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now }],
   });
   await withApi(state, async (baseUrl) => {
@@ -266,7 +274,7 @@ test('inbox approval queues exactly one reply job and preserves cross-tenant den
       { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
       { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
     ],
-    customers: [{ id: 'cust_a', name: 'A', status: 'active' }, { id: 'cust_b', name: 'B', status: 'active' }],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active', entitlement: activeEntitlement() }, { id: 'cust_b', name: 'B', status: 'active' }],
     inboxConversations: [{ id: 'conv_a', customerId: 'cust_a', accountId: 'acct_a', platform: 'facebook', providerConversationId: 'conv_a', status: 'open', lastMessageAtIso: now, unreadCount: 1, createdAtIso: now, updatedAtIso: now }],
     inboxDraftReplies: [{ id: 'draft_a', customerId: 'cust_a', conversationId: 'conv_a', text: 'Đã duyệt', status: 'pending_review', sendAttempted: false, createdByUserId: 'user_a', createdAtIso: now }],
   });
@@ -597,6 +605,7 @@ test('connect endpoint enforces RAS quota before returning Zernio OAuth URL', as
       maxConnectedAccounts: 1,
       packageStatus: 'active',
       addOnStatus: { zernio: 'active' },
+      entitlement: activeEntitlement(),
       status: 'active',
       createdAtIso: now,
       updatedAtIso: now,
@@ -642,7 +651,7 @@ test('Facebook Page selection endpoints are tenant-scoped and fail closed withou
       { id: 'sess_a', token: 'token_a', userId: 'user_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
       { id: 'sess_b', token: 'token_b', userId: 'user_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3600000).toISOString() },
     ],
-    customers: [{ id: 'cust_a', name: 'A', status: 'active', zernioProfileId: 'profile_a', zernioProfileIds: ['profile_a'], maxConnectedAccounts: 1, activeConnectedAccounts: 0, packageStatus: 'active', addOnStatus: { zernio: 'active' } }],
+    customers: [{ id: 'cust_a', name: 'A', status: 'active', zernioProfileId: 'profile_a', zernioProfileIds: ['profile_a'], maxConnectedAccounts: 1, activeConnectedAccounts: 0, packageStatus: 'active', addOnStatus: { zernio: 'active' }, entitlement: activeEntitlement() }],
   });
   await withApi(state, async (baseUrl) => {
     const missingSession = await fetch(`${baseUrl}/customers/cust_a/connect/facebook/pages?tempToken=temporary`);
@@ -690,6 +699,7 @@ test('connect endpoint queues one worker-only Zernio profile provision for a sec
       maxConnectedAccounts: 2,
       packageStatus: 'active',
       addOnStatus: { zernio: 'active' },
+      entitlement: activeEntitlement(),
       status: 'active',
       createdAtIso: now,
       updatedAtIso: now,

@@ -10,6 +10,14 @@ const now = new Date().toISOString();
 const future = new Date(Date.now() + 60 * 60_000).toISOString();
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
+function activeEntitlement(expiresAtIso = new Date(Date.now() + 24 * 60 * 60_000).toISOString()) {
+  return {
+    basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso },
+    connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 },
+    addOns: [{ id: 'zernio', name: 'Zernio Connect', status: 'active' }],
+  };
+}
+
 function state() {
   return {
     schemaVersion: 1, migratedAtIso: now,
@@ -19,7 +27,7 @@ function state() {
       { id: 'pat_read', customerId: 'cust_a', createdByUserId: 'user_a', name: 'reader', tokenPrefix: 'reader', tokenHash: hash('reader-token'), scopes: ['posts:read'], createdAtIso: now },
       { id: 'pat_other', customerId: 'cust_b', createdByUserId: 'user_b', name: 'other', tokenPrefix: 'other', tokenHash: hash('other-token'), scopes: ['posts:read', 'posts:write'], createdAtIso: now },
     ],
-    customers: [{ id: 'cust_a', name: 'A' }, { id: 'cust_b', name: 'B' }],
+    customers: [{ id: 'cust_a', name: 'A', entitlement: activeEntitlement() }, { id: 'cust_b', name: 'B' }],
     sandboxes: [], agents: [], servicePackages: [],
     connectedAccounts: [
       { id: 'acct_a', customerId: 'cust_a', platform: 'facebook', zernioAccountId: 'provider_a', zernioProfileId: 'profile_a', status: 'connected' },

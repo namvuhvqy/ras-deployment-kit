@@ -36,6 +36,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         sandboxId: 'sandbox_1',
         servicePackageId: 'pkg_growth',
         billingStatus: 'active',
+        entitlement: { basePlan: { planId: 'lite', status: 'active', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: new Date(Date.now() + 86_400_000).toISOString() }, connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 }, addOns: [{ id: 'zernio', name: 'Zernio Connect', status: 'active' }] },
         createdAtIso: now,
       },
       {
