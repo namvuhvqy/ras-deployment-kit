@@ -21,6 +21,7 @@ export function evaluatePaidCapability(
   const zernioAddOn = entitlement.addOns.find((addOn) => addOn.id === 'zernio' || addOn.id === 'zernio-connect');
   if (
     entitlement.basePlan.planId === 'none'
+    || entitlement.basePlan.status !== 'active'
     || entitlement.connectSlots.status !== 'active'
     || zernioAddOn?.status !== 'active'
   ) return 'entitlement_inactive';

@@ -11,10 +11,12 @@ function entitlement(overrides: Partial<RasEntitlement['basePlan']> = {}): RasEn
   };
 }
 
-test('paid capability policy derives lifecycle from expiry and allows grace without trusting stored status', () => {
-  assert.equal(evaluatePaidCapability(entitlement({ status: 'expired' }), '2026-08-15T00:00:00.000Z'), 'allow');
+test('paid capability policy requires an active base-plan status while retaining lifecycle precedence', () => {
+  for (const status of ['pending', 'inactive', 'past_due', 'cancelled', 'expired'] as const) {
+    assert.equal(evaluatePaidCapability(entitlement({ status }), '2026-08-15T00:00:00.000Z'), 'entitlement_inactive');
+  }
   assert.equal(evaluatePaidCapability(entitlement({ status: 'active' }), '2026-08-21T00:00:00.000Z'), 'allow');
-  assert.equal(evaluatePaidCapability(entitlement(), '2026-08-27T00:00:00.000Z'), 'entitlement_expired');
+  assert.equal(evaluatePaidCapability(entitlement({ status: 'inactive' }), '2026-08-27T00:00:00.000Z'), 'entitlement_expired');
 });
 
 test('paid capability policy fails closed for unavailable expiry and inactive base or Zernio capability', () => {

@@ -1050,6 +1050,11 @@ const server = createServer(async (req, res) => {
       endCustomerAccessError(res, access);
       return;
     }
+    const paidCapability = await requirePaidZernioCapability(customerId);
+    if (paidCapability !== 'allow') {
+      endPaidCapabilityError(res, paidCapability);
+      return;
+    }
     const account = await store.getConnectedAccount(accountId);
     if (!account || account.customerId !== customerId) {
       res.statusCode = 404;
