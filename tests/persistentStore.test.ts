@@ -22,6 +22,14 @@ test('subscription lifecycle policy derives dates solely from supplied server da
   );
 });
 
+test('subscription lifecycle policy rejects normalized-invalid ISO calendar dates', () => {
+  const invalidIso = '2026-02-30T00:00:00.000Z';
+
+  assert.equal(evaluateSubscriptionLifecycle(invalidIso, '2026-02-20T00:00:00.000Z').state, 'unknown');
+  assert.equal(addPeriod(invalidIso, 'monthly'), undefined);
+  assert.equal(evaluateSubscriptionLifecycle('2026-02-28T01:00:00.000+01:00', '2026-02-28T00:00:00.000Z').state, 'past_due');
+});
+
 test('subscription calendar periods clamp monthly and yearly boundary dates', () => {
   assert.equal(addPeriod('2024-01-31T12:00:00.000Z', 'monthly'), '2024-02-29T12:00:00.000Z');
   assert.equal(addPeriod('2023-01-31T12:00:00.000Z', 'monthly'), '2023-02-28T12:00:00.000Z');
