@@ -723,7 +723,14 @@ const server = createServer(async (req, res) => {
     // payment fact and uses a deployment-owned (not caller-provided) RAS URL.
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
-    const body = await readJsonBody(req);
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
+      return;
+    }
     const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
     if (!intentId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_paypal_capture_request' })); return; }
