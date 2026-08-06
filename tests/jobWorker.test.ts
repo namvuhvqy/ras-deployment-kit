@@ -175,6 +175,42 @@ test('RasJobWorker renews a paid tenant without recreating its entitlement resou
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('RasJobWorker fails closed and requeues a plan-changing renewal without mutating entitlement state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-plan-change-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({
+      id: 'cust_plan_change', name: 'Plan change tenant', email: 'plan-change@example.test', zernioProfileId: 'profile_existing', zernioProfileIds: ['profile_existing'], maxConnectedAccounts: 5,
+      packageStatus: 'expired', addOnStatus: { zernio: 'expired', archive: 'expired' },
+      entitlement: {
+        basePlan: { planId: 'lite', status: 'expired', billingCycle: 'monthly', vps: { type: 'dedicated', size: 'large' }, agents: { included: 4, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: '2026-01-01T00:00:00.000Z', expiresAtIso: '2026-09-15T00:00:00.000Z' },
+        connectSlots: { status: 'expired', includedSlots: 2, purchasedSlots: 2, trialSlots: 1, totalSlots: 5, activeConnectedAccounts: 1 },
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'expired', slots: 5 }, { id: 'archive', name: 'Archive', status: 'expired', priceUsd: 9 }],
+      },
+    });
+    await store.upsertSandbox({ id: 'sandbox_plan_change', customerId: 'cust_plan_change', provider: 'vps', status: 'running', createdAtIso: '2026-01-01T00:00:00.000Z', updatedAtIso: '2026-01-01T00:00:00.000Z' });
+    await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: 'cust_plan_change', paypalOrderId: 'ORDER-PLAN-CHANGE', transactionId: 'CAPTURE-PLAN-CHANGE', status: 'captured', amount: '49', currency: 'USD', plan: 'pro', billingCycle: 'monthly', extraConnectSlots: 1, createdAtIso: '2026-09-01T00:00:00.000Z', updatedAtIso: '2026-09-01T00:00:00.000Z' });
+    await store.enqueueJob({ id: 'provision_payment_plan_change', customerId: 'cust_plan_change', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: 'paypal:ORDER-PLAN-CHANGE' }, createdAtIso: '2026-09-01T00:00:00.000Z' });
+    const before = await store.load();
+    let createProfileCalls = 0;
+    const adapter = { ...noopAdapter, async createProfile() { createProfileCalls += 1; throw new Error('plan-changing renewal must not create a profile'); } } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 0, failed: 0, requeued: 1 });
+    const after = await store.load();
+    assert.equal(createProfileCalls, 0);
+    assert.deepEqual(after.customers, before.customers, 'customer entitlement, package/add-on status, and slots must remain unchanged');
+    assert.deepEqual(after.sandboxes, before.sandboxes, 'resources must remain unchanged');
+    assert.deepEqual(after.connectedAccounts, before.connectedAccounts, 'mappings must remain unchanged');
+    assert.equal(after.billingPayments[0]?.provisionStatus, 'pending', 'payment must not be provisioned');
+    assert.equal(after.jobs[0]?.status, 'queued');
+    assert.equal(after.jobs[0]?.retryCount, 1);
+    assert.equal(after.jobs[0]?.lastError, 'Plan change requires dedicated entitlement migration');
+    assert.ok(after.jobs[0]?.runAfterIso);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('RasJobWorker renews from payment time when prior expiry is malformed', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-renewal-invalid-expiry-'));
   try {

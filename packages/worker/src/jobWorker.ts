@@ -174,6 +174,10 @@ export class RasJobWorker {
     const customer = state.customers.find((row) => row.id === job.customerId);
     if (!customer) throw new Error(`Customer not found: ${job.customerId}`);
     const priorEntitlement = customer.entitlement;
+    const priorPlanId = priorEntitlement?.basePlan.planId;
+    if (priorPlanId && priorPlanId !== 'none' && payment.plan !== priorPlanId) {
+      throw new Error('Plan change requires dedicated entitlement migration');
+    }
     const isRenewal = Boolean(priorEntitlement?.basePlan && (priorEntitlement.basePlan.activatedAtIso || priorEntitlement.basePlan.expiresAtIso));
     const paymentTimeIso = validPaymentTime(payment.createdAtIso, payment.updatedAtIso);
     const priorExpiryMs = parseSubscriptionPolicyIso(priorEntitlement?.basePlan.expiresAtIso);
