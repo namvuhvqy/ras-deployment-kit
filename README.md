@@ -154,8 +154,8 @@ Current MVP boundary:
 | `POST /billing/entitlements/provision` | Retired | Always returns `410 payment_capture_required`; it cannot provision an entitlement. |
 | signed trusted relay capture | `POST /billing/payments/captured` | An internal authenticated relay submits a signed assertion for an already-bound checkout intent. RAS authenticates that relay assertion; this is not direct PayPal verification. The capture is persisted with a durable outbox job. |
 | entitlement provisioning | Worker consumes the durable outbox job | The worker provisions the entitlement and Zernio resources idempotently after capture; no browser or direct provision endpoint performs this work. |
-| `GET /customers/{customerId}/connect/{platform}` | RAS quota enforcement + Zernio connect URL | Block if package/add-on inactive or active connections reached `N`; auto-create another profile for same-platform second account. |
-| connect action | backend/Zernio adapter through assigned profile slot | Open OAuth/connect only after RAS verifies entitlement and picks the correct customer-owned profile. |
+| `GET /customers/{customerId}/connect/{platform}` | RAS quota enforcement + provision queue or Zernio connect URL | Block if package/add-on inactive or active connections reached `N`. If no suitable profile exists, return `202 profile_provisioning_pending` and atomically enqueue one durable profile-provisioning job; only a later request, after worker completion, returns the OAuth URL. |
+| connect action | Worker-created, customer-owned Zernio profile slot | Open OAuth/connect only after RAS verifies entitlement and a worker has provisioned/persisted the required profile slot. |
 
 Frontend env expected by the current split-repo setup:
 
