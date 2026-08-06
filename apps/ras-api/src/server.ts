@@ -6,6 +6,7 @@ import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
+import { paypalRelayConfigFromEnv, relayPaypalSandboxCapture } from './paypalTrustedRelay.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -715,6 +716,26 @@ const server = createServer(async (req, res) => {
     const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
     if (!bound.intent) { res.statusCode = bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${bound.error}` })); return; }
     res.end(JSON.stringify({ ok: true, intent: bound.intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/paypal/sandbox/capture') {
+    // Authenticated browser callers submit identities only. Server code derives every
+    // payment fact and uses a deployment-owned (not caller-provided) RAS URL.
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    const body = await readJsonBody(req);
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
+    const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
+    if (!intentId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_paypal_capture_request' })); return; }
+    const intent = await store.getCheckoutIntent(intentId);
+    const owned = intent && (dashboard.state === 'lead'
+      ? intent.purchaserUserId === dashboard.user.id
+      : intent.customerId === dashboard.customer.id);
+    if (!owned) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+    const result = await relayPaypalSandboxCapture({ intent, paypalOrderId }, paypalRelayConfigFromEnv(process.env, `http://127.0.0.1:${port}`));
+    res.statusCode = result.status;
+    res.end(JSON.stringify(result));
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/payments/captured') {
