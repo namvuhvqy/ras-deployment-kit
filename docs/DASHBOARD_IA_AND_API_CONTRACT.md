@@ -40,7 +40,10 @@ Keep the existing tenant-bound `GET /dashboard` response backward compatible. A 
 type DashboardV2 = {
   dashboard: {
     state: 'ready' | 'needs_plan';
+    // Exact safe projection only; never a persisted RasCustomer record.
     customer: { id: string; name: string; status?: string };
+    // Product/quota value type only: basePlan, connectSlots, and addOns.
+    // It contains no provider/profile/account identity fields.
     entitlement: RasEntitlement;
     // Dashboard-safe projection only; never a persisted ConnectedAccount record.
     connectedAccounts: Array<{

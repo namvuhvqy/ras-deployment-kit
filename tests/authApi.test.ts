@@ -7,6 +7,19 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
+function assertDashboardHasNoProviderFields(value: unknown): void {
+  const prohibited = new Set(['zernioProfileId', 'zernioProfileIds', 'zernioAccountId', 'profileId', 'accessToken']);
+  if (Array.isArray(value)) {
+    for (const item of value) assertDashboardHasNoProviderFields(item);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [key, nested] of Object.entries(value)) {
+    assert.equal(prohibited.has(key), false, `dashboard must not expose ${key}`);
+    assertDashboardHasNoProviderFields(nested);
+  }
+}
+
 test('API login returns a bearer token that unlocks dashboard payload', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-auth-api-'));
   const dbPath = join(dir, 'ras-store.json');
@@ -33,6 +46,12 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         id: 'cust_1',
         name: 'Shop Demo',
         status: 'active',
+        zernioProfileId: 'provider_profile_1',
+        zernioProfileIds: ['provider_profile_1', 'provider_profile_2'],
+        zernioAccountId: 'provider_account_1',
+        profileId: 'internal_profile_1',
+        accessToken: 'provider_access_token',
+        tenantId: 'internal_tenant_1',
         sandboxId: 'sandbox_1',
         servicePackageId: 'pkg_growth',
         billingStatus: 'active',
@@ -171,9 +190,12 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       headers: { authorization: `Bearer ${loginPayload.token}` },
     });
     assert.equal(dashboard.status, 200);
-    const payload = (await dashboard.json()) as { dashboard: { customer: { id: string }; agents: Array<{ kind: string }> } };
+    const payload = (await dashboard.json()) as { dashboard: { customer: { id: string; name: string; status?: string }; agents: Array<{ kind: string }> } };
     assert.equal(payload.dashboard.customer.id, 'cust_1');
+    assert.equal(payload.dashboard.customer.name, 'Shop Demo');
+    assert.equal(payload.dashboard.customer.status, 'active');
     assert.equal(payload.dashboard.agents[0].kind, 'ras1-hermes');
+    assertDashboardHasNoProviderFields(payload.dashboard);
 
     const mapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(mapping.status, 200);

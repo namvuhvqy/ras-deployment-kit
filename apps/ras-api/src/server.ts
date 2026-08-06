@@ -687,10 +687,25 @@ const server = createServer(async (req, res) => {
       ...(lifecycle?.graceEndsAtIso ? { graceEndsAtIso: lifecycle.graceEndsAtIso } : {}),
       paidCapability: evaluatePaidCapability(dashboard.entitlement, nowIso),
     };
-    // Provider health is independent of billing. Dashboard connections expose only
-    // the local identifier and UX-safe connection state, never provider or profile IDs.
+    // Customer-facing dashboard records are explicit projections, never raw persistence.
+    // RasEntitlement is a product/quota value type (no provider identity fields).
+    const customer = (({ id, name, status }) => ({ id, name, ...(status ? { status } : {}) }))(dashboard.customer);
+    const user = (({ id, email, displayName, role }) => ({ id, email, ...(displayName ? { displayName } : {}), role }))(dashboard.user);
     const connectedAccounts = dashboard.connectedAccounts.map(({ id, platform, status }) => ({ id, platform, status }));
-    res.end(JSON.stringify({ ok: true, dashboard: { ...dashboard, connectedAccounts, subscription } }));
+    const sandboxes = dashboard.sandboxes.map(({ id, provider, region, status, createdAtIso, updatedAtIso }) => ({
+      id, provider, ...(region ? { region } : {}), status, createdAtIso, updatedAtIso,
+    }));
+    const agents = dashboard.agents.map(({ id, kind, status, version, lastHeartbeatAtIso, updatedAtIso }) => ({
+      id, kind, status, ...(version ? { version } : {}), ...(lastHeartbeatAtIso ? { lastHeartbeatAtIso } : {}), updatedAtIso,
+    }));
+    const servicePackages = dashboard.servicePackages.map(({ id, name, description, status, monthlyPriceVnd, includedAgents, includedSocialAccounts, features }) => ({
+      id, name, ...(description ? { description } : {}), status, ...(monthlyPriceVnd !== undefined ? { monthlyPriceVnd } : {}), includedAgents,
+      ...(includedSocialAccounts !== undefined ? { includedSocialAccounts } : {}), features,
+    }));
+    res.end(JSON.stringify({ ok: true, dashboard: {
+      user, customer, state: dashboard.state, dashboardSummary: dashboard.dashboardSummary, entitlement: dashboard.entitlement,
+      ...(dashboard.cta ? { cta: dashboard.cta } : {}), sandboxes, agents, servicePackages, connectedAccounts, subscription,
+    } }));
     return;
   }
 
