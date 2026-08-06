@@ -42,7 +42,13 @@ type DashboardV2 = {
     state: 'ready' | 'needs_plan';
     customer: { id: string; name: string; status?: string };
     entitlement: RasEntitlement;
-    connectedAccounts: ConnectedAccount[];
+    // Dashboard-safe projection only; never a persisted ConnectedAccount record.
+    connectedAccounts: Array<{
+      id: string; // local RAS connection ID
+      platform: SocialPlatform;
+      status: 'pending' | 'connected' | 'disconnected' | 'error';
+    }>;
+    // No provider account/profile IDs, internal profile IDs, tokens, or customer IDs.
     agents: RasAgentInstance[];
     sandbox?: RasSandboxEnvironment;
     dashboardSummary: {

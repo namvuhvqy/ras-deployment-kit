@@ -687,11 +687,9 @@ const server = createServer(async (req, res) => {
       ...(lifecycle?.graceEndsAtIso ? { graceEndsAtIso: lifecycle.graceEndsAtIso } : {}),
       paidCapability: evaluatePaidCapability(dashboard.entitlement, nowIso),
     };
-    // Provider health is independent of billing. Deliberately preserve its mapping
-    // and status while excluding any unmodelled persisted secret fields.
-    const connectedAccounts = dashboard.connectedAccounts.map(({ id, customerId, platform, zernioAccountId, zernioProfileId, profileId, handle, username, status, capabilities, connectedAtIso, lastVerifiedAtIso }) => ({
-      id, customerId, platform, zernioAccountId, zernioProfileId, profileId, handle, username, status, capabilities, connectedAtIso, lastVerifiedAtIso,
-    }));
+    // Provider health is independent of billing. Dashboard connections expose only
+    // the local identifier and UX-safe connection state, never provider or profile IDs.
+    const connectedAccounts = dashboard.connectedAccounts.map(({ id, platform, status }) => ({ id, platform, status }));
     res.end(JSON.stringify({ ok: true, dashboard: { ...dashboard, connectedAccounts, subscription } }));
     return;
   }

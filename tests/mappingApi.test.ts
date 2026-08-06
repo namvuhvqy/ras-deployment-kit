@@ -216,7 +216,7 @@ test('dashboard exposes a date-derived subscription without changing provider co
   state.users = cases.map(({ id }) => ({ id: `user_${id}`, email: `${id}@example.test`, role: 'owner', customerId: `cust_${id}`, status: 'active', createdAtIso: now, updatedAtIso: now }));
   state.sessions = cases.map(({ id }) => ({ id: `session_${id}`, token: `token_${id}`, userId: `user_${id}`, createdAtIso: now, expiresAtIso: expiry(1) }));
   state.customers = cases.map(({ id, expiresAtIso }) => ({ id: `cust_${id}`, name: id, status: 'active', createdAtIso: now, updatedAtIso: now, entitlement: activeEntitlement(expiresAtIso) }));
-  state.connectedAccounts = [{ id: 'account_expired', customerId: 'cust_expired', zernioAccountId: 'provider_expired', platform: 'facebook', status: 'connected', connectedAtIso: now, lastVerifiedAtIso: now, accessToken: 'must-not-leak' }];
+  state.connectedAccounts = [{ id: 'account_expired', customerId: 'cust_expired', zernioAccountId: 'provider_expired', zernioProfileId: 'provider_profile_expired', profileId: 'internal_profile_expired', platform: 'facebook', status: 'connected', connectedAtIso: now, lastVerifiedAtIso: now, accessToken: 'must-not-leak' }];
 
   await withApi(state, async (baseUrl, dbPath) => {
     // Server startup migrates legacy fixture shape; establish the durable baseline
@@ -236,9 +236,11 @@ test('dashboard exposes a date-derived subscription without changing provider co
         assert.ok(payload.dashboard.subscription.graceEndsAtIso);
       }
       if (expected.id === 'expired') {
-        assert.equal(payload.dashboard.connectedAccounts[0]?.id, 'account_expired');
-        assert.equal(payload.dashboard.connectedAccounts[0]?.status, 'connected');
-        assert.equal(payload.dashboard.connectedAccounts[0]?.accessToken, undefined);
+        assert.deepEqual(payload.dashboard.connectedAccounts, [{ id: 'account_expired', platform: 'facebook', status: 'connected' }]);
+        const serializedConnections = JSON.stringify(payload.dashboard.connectedAccounts);
+        for (const sensitiveField of ['zernioAccountId', 'zernioProfileId', 'profileId', 'accessToken']) {
+          assert.equal(serializedConnections.includes(`\"${sensitiveField}\"`), false, `${sensitiveField} must not appear in dashboard connectedAccounts`);
+        }
       }
     }
     assert.equal(await readFile(dbPath, 'utf8'), before);
