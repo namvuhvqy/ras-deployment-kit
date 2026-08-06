@@ -25,22 +25,19 @@ Both services share the same customer/order/package/onboarding backend. Do **not
 ## 2. MVP customer flow
 
 ```text
-Lead/customer arrives
+Lead arrives
   ├─ via runagentsys.com registration/contact form
   └─ or via sale/manual conversation
         ↓
-Sale/Admin creates or activates customer account
+Customer logs in to runagentsys.com with Google OAuth
         ↓
-Admin assigns package
-  ├─ zernio_webapp
-  ├─ ras_vps_2_agent
-  └─ hybrid
+Google login creates or loads a lead user and session only
         ↓
-Admin assigns prepared resources
-  ├─ Zernio profile/account slot for webapp integrations
-  └─ VPS/sandbox record for managed 2-agent setup, if included
+Dashboard remains lead-safe; no customer/tenant, profile, or quota is created on login
         ↓
-Customer logs in to runagentsys.com
+Captured payment or controlled provisioning binds the tenant, assigns package/resources, and queues provisioning
+        ↓
+Worker provisions entitlement and applicable Zernio/VPS resources
         ↓
 Customer connects Telegram/WhatsApp/Facebook/Zalo/other platforms allowed by package
         ↓

@@ -14,10 +14,10 @@ Primary MVP flow:
 
 ```text
 web lead or sale lead
-→ sale/admin creates customer account
-→ admin assigns package
-→ admin assigns prepared profile slot and/or VPS
-→ customer logs in to runagentsys.com
+→ Google OAuth creates/loads a lead user + session only
+→ dashboard returns lead-safe state; login creates no customer/tenant, profile, or quota
+→ signed trusted relay capture or controlled provisioning binds tenant and queues durable work
+→ worker provisions entitlement and applicable profile slot/VPS
 → customer connects platforms
 → backend/Zernio verifies status
 ```
