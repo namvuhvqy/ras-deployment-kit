@@ -371,30 +371,48 @@ export class JsonRasStore {
     const email = input.email.toLowerCase();
     const existing = state.users.find((row) => row.email.toLowerCase() === email);
     if (existing) {
+      const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
+      const entropy = Math.random().toString(36).slice(2, 8);
+      const existingCustomer = existing.customerId ? state.customers.find((row) => row.id === existing.customerId) : undefined;
+      // If an older user record lost its customerId, recover the existing
+      // email-matched customer before minting a tenant. This preserves the
+      // customer's entitlement and resources instead of orphaning them.
+      const legacyCustomer = existingCustomer ?? state.customers.find((row) => row.email?.toLowerCase() === email);
+      // An existing user/customer binding is authoritative even if its customer
+      // projection was lost; preserve that ID instead of minting a new tenant.
+      const customerId = existing.customerId || existingCustomer?.id || legacyCustomer?.id || `cust_${slug}_${entropy}`;
+      const customer: RasCustomer = legacyCustomer
+        ? { ...legacyCustomer, id: customerId, email: legacyCustomer.email ?? email, updatedAtIso: now }
+        : {
+            id: customerId,
+            name: input.displayName ?? existing.displayName ?? email,
+            email,
+            status: 'pending',
+            billingStatus: 'trial',
+            packageStatus: 'pending',
+            maxConnectedAccounts: 0,
+            activeConnectedAccounts: 0,
+            addOnStatus: {},
+            createdAtIso: now,
+            updatedAtIso: now,
+          };
       const updated: RasUser = {
         ...existing,
+        customerId,
         displayName: input.displayName ?? existing.displayName,
         status: 'active',
         updatedAtIso: now,
       };
-      const existingCustomer = state.customers.find((row) => row.id === updated.customerId);
-      if (!existingCustomer) {
-        const repairedCustomer: RasCustomer = {
-          id: updated.customerId,
-          name: updated.displayName ?? updated.email,
-          email: updated.email,
-          status: 'pending',
-          billingStatus: 'trial',
-          packageStatus: 'pending',
-          maxConnectedAccounts: 0,
-          activeConnectedAccounts: 0,
-          addOnStatus: {},
-          createdAtIso: now,
-          updatedAtIso: now,
-        };
-        await this.upsertCustomer({ ...repairedCustomer, entitlement: normalizeEntitlement(repairedCustomer, 0) });
-      }
-      await this.upsertUser(updated);
+      // Preserve the existing customer record when possible, including a legacy
+      // email-matched record that predates stable IDs. Update user and customer
+      // in one persisted state transition so login cannot leave a half-repaired
+      // identity projection.
+      const customerIndex = state.customers.indexOf(legacyCustomer!);
+      if (customerIndex >= 0) state.customers[customerIndex] = customer;
+      else state.customers.push(customer);
+      const userIndex = state.users.indexOf(existing);
+      state.users[userIndex] = updated;
+      await this.write(state);
       return updated;
     }
 
