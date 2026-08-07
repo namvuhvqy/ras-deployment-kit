@@ -55,6 +55,30 @@ test('dashboard requires a valid session token and returns tenant control panel 
   }
 });
 
+test('Google login repairs legacy email-matched user/customer records missing stable identity fields', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-legacy-google-repair-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertUser({
+      id: 'legacy_user', email: 'legacy@example.test', displayName: 'Old name', role: 'owner',
+      customerId: '' as string, status: 'active', createdAtIso: now, updatedAtIso: now,
+    });
+    await store.upsertCustomer({
+      id: '' as string, name: 'Old name', email: 'legacy@example.test', status: 'pending', createdAtIso: now,
+    });
+
+    const session = await store.createSessionForGoogleUser({ email: 'legacy@example.test', displayName: 'New name', nowIso: now });
+    const dashboard = await store.getDashboardForSession(session.token, now);
+
+    assert.ok(dashboard?.customer.id);
+    assert.equal(dashboard?.customer.email, 'legacy@example.test');
+    assert.equal(dashboard?.user.customerId, dashboard?.customer.id);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('dashboard summary is tenant-scoped and preserves needs-plan defaults', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-dashboard-summary-'));
   try {

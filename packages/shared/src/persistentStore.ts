@@ -371,13 +371,39 @@ export class JsonRasStore {
     const email = input.email.toLowerCase();
     const existing = state.users.find((row) => row.email.toLowerCase() === email);
     if (existing) {
+      const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
+      const entropy = Math.random().toString(36).slice(2, 8);
+      const existingCustomer = existing.customerId ? state.customers.find((row) => row.id === existing.customerId) : undefined;
+      const legacyCustomer = existingCustomer ?? state.customers.find((row) => !row.id && row.email?.toLowerCase() === email);
+      const customerId = existingCustomer?.id || `cust_${slug}_${entropy}`;
+      const customer: RasCustomer = legacyCustomer
+        ? { ...legacyCustomer, id: customerId, email: legacyCustomer.email ?? email, updatedAtIso: now }
+        : {
+            id: customerId,
+            name: input.displayName ?? existing.displayName ?? email,
+            email,
+            status: 'pending',
+            billingStatus: 'trial',
+            packageStatus: 'pending',
+            maxConnectedAccounts: 0,
+            activeConnectedAccounts: 0,
+            addOnStatus: {},
+            createdAtIso: now,
+            updatedAtIso: now,
+          };
       const updated: RasUser = {
         ...existing,
+        customerId,
         displayName: input.displayName ?? existing.displayName,
         status: 'active',
         updatedAtIso: now,
       };
-      await this.upsertUser(updated);
+      const customerIndex = state.customers.indexOf(legacyCustomer!);
+      if (customerIndex >= 0) state.customers[customerIndex] = customer;
+      else state.customers.push(customer);
+      const userIndex = state.users.indexOf(existing);
+      state.users[userIndex] = updated;
+      await this.write(state);
       return updated;
     }
 
