@@ -214,6 +214,18 @@ async function requireSessionPrincipal(req: IncomingMessage): Promise<import('..
   return principal?.authType === 'session' ? principal : undefined;
 }
 
+async function requireAdminSession(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
+  const principal = await requireSessionPrincipal(req);
+  // Global operations access is deliberately separate from tenant-local roles.
+  const systemAdminIds = new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
+  return principal?.userId && systemAdminIds.has(principal.userId) ? principal : undefined;
+}
+
+function endAdminAccessError(res: { statusCode: number; end: (chunk?: string) => void }, authenticated: boolean): void {
+  res.statusCode = authenticated ? 403 : 401;
+  res.end(JSON.stringify({ ok: false, error: authenticated ? 'admin_role_required' : 'session_auth_required' }));
+}
+
 function endCustomerAccessError(res: { statusCode: number; setHeader: (name: string, value: string | number) => void; end: (chunk?: string) => void }, access: { status: CustomerAccess; retryAfterSeconds?: number }) {
   if (access.status === 'rate_limited') {
     res.statusCode = 429;
@@ -440,6 +452,47 @@ const server = createServer(async (req, res) => {
     });
     res.statusCode = result.inserted ? 202 : 200;
     res.end(JSON.stringify({ ok: true, deduped: !result.inserted, eventId, signature: 'verified' }));
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/admin/customers') {
+    const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
+    if (!admin) { endAdminAccessError(res, Boolean(session)); return; }
+    const state = await store.load();
+    res.end(JSON.stringify({ ok: true, customers: state.customers.map(({ id, name, email, status, servicePackageId, sandboxId, updatedAtIso }) => ({ id, name, email, status, servicePackageId, sandboxId, updatedAtIso })) }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/admin/customers') {
+    const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
+    if (!admin?.userId) { endAdminAccessError(res, Boolean(session)); return; }
+    const body = await readJsonBody(req); const id = stringField(body, 'id'); const name = stringField(body, 'name'); const email = stringField(body, 'email');
+    if (!id || !name || !/^[-a-zA-Z0-9_]+$/.test(id)) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_admin_customer' })); return; }
+    try { const customer = await store.createAdminCustomer({ id, name, email, actorUserId: admin.userId }); res.statusCode = 201; res.end(JSON.stringify({ ok: true, customer })); }
+    catch (error) { res.statusCode = error instanceof Error && error.message === 'admin_customer_exists' ? 409 : 400; res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'admin_customer_create_failed' })); }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/admin/customers/') && req.url.endsWith('/operations')) {
+    const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
+    if (!admin) { endAdminAccessError(res, Boolean(session)); return; }
+    const customerId = decodeURIComponent(req.url.slice('/admin/customers/'.length, -'/operations'.length)); const operations = await store.getAdminOperations(customerId);
+    if (!operations) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'admin_customer_not_found' })); return; }
+    res.end(JSON.stringify({ ok: true, operations })); return;
+  }
+
+  if (req.method === 'POST' && req.url?.startsWith('/admin/customers/') && req.url.endsWith('/assignments')) {
+    const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
+    if (!admin?.userId) { endAdminAccessError(res, Boolean(session)); return; }
+    const customerId = decodeURIComponent(req.url.slice('/admin/customers/'.length, -'/assignments'.length)); const idempotencyKey = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'].trim() : ''; const body = await readJsonBody(req); const servicePackageId = stringField(body, 'servicePackageId');
+    const profile = body.profileSlot as Record<string, unknown> | undefined; const sandbox = body.sandbox as Record<string, unknown> | undefined; const rawAgents = Array.isArray(body.agents) ? body.agents : [];
+    const profileSlot = profile && stringField(profile, 'id') ? { id: stringField(profile, 'id')! } : undefined;
+    const sandboxStatus = sandbox && stringField(sandbox, 'status'); const sandboxProvider = sandbox && stringField(sandbox, 'provider');
+    const sandboxInput = sandbox && stringField(sandbox, 'id') && (sandboxProvider === 'vps' || sandboxProvider === 'cloud') && ['provisioning', 'starting', 'running', 'degraded', 'stopped', 'failed'].includes(sandboxStatus ?? '') ? { id: stringField(sandbox, 'id')!, provider: sandboxProvider as 'vps' | 'cloud', status: sandboxStatus as import('../../../packages/shared/src/types.js').SandboxStatus, endpoint: stringField(sandbox, 'endpoint') } : undefined;
+    const agents = rawAgents.map((value) => value as Record<string, unknown>).flatMap((agent) => { const id = stringField(agent, 'id'); const kind = stringField(agent, 'kind'); const status = stringField(agent, 'status'); return id && (kind === 'ras1-hermes' || kind === 'ras2-openclaw') && ['unknown', 'starting', 'running', 'degraded', 'stopped', 'failed'].includes(status ?? '') ? [{ id, kind: kind as import('../../../packages/shared/src/types.js').AgentKind, status: status as import('../../../packages/shared/src/types.js').AgentStatus }] : []; });
+    if (!servicePackageId || !/^[A-Za-z0-9_-]{8,128}$/.test(idempotencyKey) || rawAgents.length !== agents.length || (profile && !profileSlot) || (sandbox && !sandboxInput)) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_admin_assignment' })); return; }
+    try { await store.applyAdminAssignment({ customerId, servicePackageId, profileSlot, sandbox: sandboxInput, agents, actorUserId: admin.userId, idempotencyKey }); const operations = await store.getAdminOperations(customerId); res.end(JSON.stringify({ ok: true, operations })); }
+    catch (error) { const message = error instanceof Error ? error.message : 'admin_assignment_failed'; res.statusCode = message === 'admin_customer_not_found' || message === 'admin_service_package_not_found' ? 404 : ['admin_profile_slot_unavailable', 'admin_sandbox_assigned', 'admin_agent_assigned', 'admin_agent_sandbox_mismatch', 'admin_assignment_idempotency_conflict'].includes(message) ? 409 : 400; res.end(JSON.stringify({ ok: false, error: message })); }
     return;
   }
 

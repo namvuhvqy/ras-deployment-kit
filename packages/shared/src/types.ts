@@ -143,6 +143,8 @@ export interface RasPrincipal {
   authType: 'session' | 'pat';
   customerId: string;
   userId?: string;
+  /** Present only for session principals; PATs are never admin credentials. */
+  role?: RasUserRole;
   scopes: string[];
   tokenId?: string;
 }
@@ -198,6 +200,36 @@ export interface RasAgentInstance {
   healthUrl?: string;
   lastHeartbeatAtIso?: string;
   lastLogExcerpt?: string;
+  updatedAtIso: string;
+}
+
+export type RasOrderStatus = 'draft' | 'assigned' | 'cancelled';
+export type RasProfileSlotStatus = 'available' | 'assigned' | 'disabled';
+
+/** Internal operations record. It is not payment capture evidence. */
+export interface RasOrder {
+  id: string;
+  customerId: string;
+  servicePackageId: string;
+  status: RasOrderStatus;
+  source: 'manual';
+  createdByUserId: string;
+  /** Caller supplied opaque key; retries must resolve the same manual assignment. */
+  idempotencyKey: string;
+  /** Canonical assignment inputs bound to the idempotency key. */
+  assignmentFingerprint: string;
+  createdAtIso: string;
+  updatedAtIso: string;
+}
+
+/** A prepared provider/profile capacity reference; it never stores provider credentials. */
+export interface RasProfileSlot {
+  id: string;
+  provider: 'zernio';
+  profileId: string;
+  status: RasProfileSlotStatus;
+  customerId?: string;
+  createdAtIso: string;
   updatedAtIso: string;
 }
 
