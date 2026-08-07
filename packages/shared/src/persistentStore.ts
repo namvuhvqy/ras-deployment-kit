@@ -48,6 +48,14 @@ export interface RasPersistentState {
   auditLogs: StoredAuditLog[];
   billingPayments: RasBillingPayment[];
   checkoutIntents: RasCheckoutIntent[];
+  googleOAuthStates: StoredGoogleOAuthState[];
+}
+
+export interface StoredGoogleOAuthState {
+  state: string;
+  redirectTo: string;
+  frontendOrigin: string;
+  createdAtMs: number;
 }
 
 export interface StoredWebhookEvent {
@@ -267,6 +275,7 @@ export class JsonRasStore {
       auditLogs: [],
       billingPayments: [],
       checkoutIntents: [],
+      googleOAuthStates: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -292,6 +301,7 @@ export class JsonRasStore {
     state.auditLogs ??= [];
     state.billingPayments ??= [];
     state.checkoutIntents ??= [];
+    state.googleOAuthStates ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -305,6 +315,26 @@ export class JsonRasStore {
 
   async load(): Promise<RasPersistentState> {
     return (await this.readIfExists()) ?? (await this.createEmpty());
+  }
+
+  async createGoogleOAuthState(input: StoredGoogleOAuthState): Promise<void> {
+    await this.mutate((state) => {
+      const now = Date.now();
+      state.googleOAuthStates = (state.googleOAuthStates ?? []).filter((row) => now - row.createdAtMs <= 10 * 60 * 1000);
+      state.googleOAuthStates.push(input);
+    });
+  }
+
+  async consumeGoogleOAuthState(stateToken: string | undefined, nowMs: number = Date.now()): Promise<StoredGoogleOAuthState | undefined> {
+    if (!stateToken) return undefined;
+    return this.mutate((state) => {
+      const states = state.googleOAuthStates ?? [];
+      const index = states.findIndex((row) => row.state === stateToken);
+      if (index < 0) return undefined;
+      const [stored] = states.splice(index, 1);
+      state.googleOAuthStates = states.filter((row) => nowMs - row.createdAtMs <= 10 * 60 * 1000);
+      return nowMs - stored.createdAtMs <= 10 * 60 * 1000 ? stored : undefined;
+    });
   }
 
   async upsertUser(user: RasUser): Promise<RasUser> {
@@ -1202,7 +1232,7 @@ export class JsonRasStore {
 
   private async emptyState(): Promise<RasPersistentState> {
     const now = new Date().toISOString();
-    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [] };
+    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], googleOAuthStates: [] };
   }
 
   private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {

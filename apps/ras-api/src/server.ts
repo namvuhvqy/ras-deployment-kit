@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createStoreFromEnv } from '../../../packages/shared/src/persistentStore.js';
 import { createZernioWebhookRouter } from './webhookRouter.js';
@@ -126,8 +126,6 @@ function firstNumberField(body: Record<string, unknown>, fields: string[]): numb
 }
 
 const GOOGLE_OAUTH_SCOPE = 'openid email profile';
-type GoogleOAuthState = { redirectTo: string; frontendOrigin: string; createdAtMs: number };
-const googleOAuthStates = new Map<string, GoogleOAuthState>();
 
 function publicBaseUrl(req: IncomingMessage): string {
   const proto = firstHeader(req, 'x-forwarded-proto') ?? 'http';
@@ -169,19 +167,14 @@ function frontendOAuthCallbackUrl(token: string, redirectTo: string, frontendOri
   return callback.toString();
 }
 
-function createOAuthState(redirectTo: string, frontendOrigin: string): string {
-  const state = `oauth_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-  googleOAuthStates.set(state, { redirectTo, frontendOrigin, createdAtMs: Date.now() });
+async function createOAuthState(redirectTo: string, frontendOrigin: string): Promise<string> {
+  const state = `oauth_${randomBytes(32).toString('base64url')}`;
+  await store.createGoogleOAuthState({ state, redirectTo, frontendOrigin, createdAtMs: Date.now() });
   return state;
 }
 
-function consumeOAuthState(state: string | undefined): GoogleOAuthState | undefined {
-  if (!state) return undefined;
-  const stored = googleOAuthStates.get(state);
-  if (!stored) return undefined;
-  googleOAuthStates.delete(state);
-  if (Date.now() - stored.createdAtMs > 10 * 60 * 1000) return undefined;
-  return stored;
+async function consumeOAuthState(state: string | undefined) {
+  return store.consumeGoogleOAuthState(state);
 }
 
 function hasScope(scopes: string[], requiredScope?: string): boolean {
@@ -471,7 +464,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     const code = url.searchParams.get('code') ?? undefined;
-    const state = consumeOAuthState(url.searchParams.get('state') ?? undefined);
+    const state = await consumeOAuthState(url.searchParams.get('state') ?? undefined);
     if (!code || !state) {
       const failed = new URL('/login', frontendBaseUrl());
       failed.searchParams.set('error', 'invalid_google_oauth_callback');
@@ -514,7 +507,7 @@ const server = createServer(async (req, res) => {
     }
     const redirectTo = safeRedirectPath(url.searchParams.get('redirectTo') ?? undefined);
     const frontendOrigin = allowedFrontendOrigin(url.searchParams.get('frontendOrigin') ?? undefined);
-    const state = createOAuthState(redirectTo, frontendOrigin);
+    const state = await createOAuthState(redirectTo, frontendOrigin);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', clientId);
     authUrl.searchParams.set('redirect_uri', googleCallbackUrl(req));
@@ -530,7 +523,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/auth/google/callback') {
     const body = await readJsonBody(req);
     const code = stringField(body, 'code');
-    const state = consumeOAuthState(stringField(body, 'state'));
+    const state = await consumeOAuthState(stringField(body, 'state'));
     if (!code || !state) {
       res.statusCode = 400;
       res.end(JSON.stringify({ ok: false, error: 'invalid_google_oauth_callback' }));

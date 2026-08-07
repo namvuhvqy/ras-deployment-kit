@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -384,24 +384,37 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
       child.on('error', reject);
     });
 
-    const authStart = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
+    const previewOrigin = 'https://landingpage-ban-hang-preview-namvuhvqys-projects.vercel.app';
+    const authStart = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard&frontendOrigin=${encodeURIComponent(previewOrigin)}`);
     assert.equal(authStart.status, 200);
     const authStartPayload = (await authStart.json()) as { authUrl: string };
     const authUrl = new URL(authStartPayload.authUrl);
     assert.equal(authUrl.hostname, 'accounts.google.com');
     assert.equal(authUrl.searchParams.get('scope'), 'openid email profile');
     assert.equal(authUrl.searchParams.get('client_id'), 'client_test');
+    const oauthState = authUrl.searchParams.get('state');
+    assert.ok(oauthState);
+    const persistedStates = (JSON.parse(await readFile(dbPath, 'utf8')) as { googleOAuthStates: Array<{ state: string; redirectTo: string; frontendOrigin: string }> }).googleOAuthStates;
+    assert.deepEqual(persistedStates.map(({ state, redirectTo, frontendOrigin }) => ({ state, redirectTo, frontendOrigin })), [{ state: oauthState, redirectTo: '/dashboard', frontendOrigin: previewOrigin }]);
 
     const callback = await fetch(`http://127.0.0.1:${port}/auth/google/callback`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code: 'google_code_test', state: authUrl.searchParams.get('state') }),
+      body: JSON.stringify({ code: 'google_code_test', state: oauthState }),
     });
     assert.equal(callback.status, 200);
     const callbackPayload = (await callback.json()) as { token: string; customerId: string; redirectTo: string };
     assert.ok(callbackPayload.token.startsWith('sess_'));
     assert.equal(callbackPayload.redirectTo, '/dashboard');
     assert.ok(callbackPayload.customerId.startsWith('cust_owner_example_com'));
+
+    const reusedState = await fetch(`http://127.0.0.1:${port}/auth/google/callback`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'google_code_test', state: oauthState }),
+    });
+    assert.equal(reusedState.status, 400);
+    assert.deepEqual((JSON.parse(await readFile(dbPath, 'utf8')) as { googleOAuthStates: unknown[] }).googleOAuthStates, []);
 
     const dashboard = await fetch(`http://127.0.0.1:${port}/dashboard`, {
       headers: { authorization: `Bearer ${callbackPayload.token}` },
@@ -411,7 +424,7 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     assert.equal(dashboardPayload.dashboard.customer.id, callbackPayload.customerId);
     assert.equal(dashboardPayload.dashboard.customer.email, 'owner@example.com');
 
-    const authStartForBrowser = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
+    const authStartForBrowser = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard&frontendOrigin=${encodeURIComponent(previewOrigin)}`);
     const browserAuthPayload = (await authStartForBrowser.json()) as { authUrl: string };
     const browserAuthUrl = new URL(browserAuthPayload.authUrl);
     const browserCallback = await fetch(`http://127.0.0.1:${port}/auth/google/callback?code=google_code_test&state=${encodeURIComponent(browserAuthUrl.searchParams.get('state') ?? '')}`, {
@@ -421,7 +434,7 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     const location = browserCallback.headers.get('location');
     assert.ok(location);
     const handoffUrl = new URL(location);
-    assert.equal(handoffUrl.origin, 'https://runagentsys.com');
+    assert.equal(handoffUrl.origin, previewOrigin);
     assert.equal(handoffUrl.pathname, '/api/auth/google/callback');
     assert.ok(handoffUrl.searchParams.get('token')?.startsWith('sess_'));
     assert.equal(handoffUrl.searchParams.get('redirectTo'), '/dashboard');
