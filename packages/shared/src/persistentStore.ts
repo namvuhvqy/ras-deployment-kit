@@ -377,6 +377,23 @@ export class JsonRasStore {
         status: 'active',
         updatedAtIso: now,
       };
+      const existingCustomer = state.customers.find((row) => row.id === updated.customerId);
+      if (!existingCustomer) {
+        const repairedCustomer: RasCustomer = {
+          id: updated.customerId,
+          name: updated.displayName ?? updated.email,
+          email: updated.email,
+          status: 'pending',
+          billingStatus: 'trial',
+          packageStatus: 'pending',
+          maxConnectedAccounts: 0,
+          activeConnectedAccounts: 0,
+          addOnStatus: {},
+          createdAtIso: now,
+          updatedAtIso: now,
+        };
+        await this.upsertCustomer({ ...repairedCustomer, entitlement: normalizeEntitlement(repairedCustomer, 0) });
+      }
       await this.upsertUser(updated);
       return updated;
     }

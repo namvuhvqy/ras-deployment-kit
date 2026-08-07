@@ -98,6 +98,36 @@ test('dashboard summary is tenant-scoped and preserves needs-plan defaults', asy
   }
 });
 
+test('Google login repairs a legacy active user whose customer projection is missing without granting entitlement', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-google-customer-repair-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertUser({
+      id: 'user_legacy',
+      email: 'legacy@example.test',
+      displayName: 'Legacy owner',
+      role: 'owner',
+      customerId: 'cust_missing',
+      status: 'active',
+      createdAtIso: now,
+      updatedAtIso: now,
+    });
+
+    const user = await store.upsertGoogleUser({ email: 'legacy@example.test', nowIso: now });
+    const session = await store.createSession({ userId: user.id, ttlMs: 60_000, nowIso: now });
+    const dashboard = await store.getDashboardForSession(session.token, now);
+
+    assert.equal(user.customerId, 'cust_missing');
+    assert.equal(dashboard?.customer.id, 'cust_missing');
+    assert.equal(dashboard?.state, 'needs_plan');
+    assert.equal(dashboard?.entitlement.connectSlots.totalSlots, 0);
+    assert.equal(dashboard?.connectedAccounts.length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('login creates session only for active configured users', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-login-'));
   try {
