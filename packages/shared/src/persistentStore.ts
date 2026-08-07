@@ -374,10 +374,13 @@ export class JsonRasStore {
       const slug = email.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase() || 'google_user';
       const entropy = Math.random().toString(36).slice(2, 8);
       const existingCustomer = existing.customerId ? state.customers.find((row) => row.id === existing.customerId) : undefined;
-      const legacyCustomer = existingCustomer ?? state.customers.find((row) => !row.id && row.email?.toLowerCase() === email);
+      // If an older user record lost its customerId, recover the existing
+      // email-matched customer before minting a tenant. This preserves the
+      // customer's entitlement and resources instead of orphaning them.
+      const legacyCustomer = existingCustomer ?? state.customers.find((row) => row.email?.toLowerCase() === email);
       // An existing user/customer binding is authoritative even if its customer
       // projection was lost; preserve that ID instead of minting a new tenant.
-      const customerId = existing.customerId || existingCustomer?.id || `cust_${slug}_${entropy}`;
+      const customerId = existing.customerId || existingCustomer?.id || legacyCustomer?.id || `cust_${slug}_${entropy}`;
       const customer: RasCustomer = legacyCustomer
         ? { ...legacyCustomer, id: customerId, email: legacyCustomer.email ?? email, updatedAtIso: now }
         : {

@@ -79,6 +79,24 @@ test('Google login repairs legacy email-matched user/customer records missing st
   }
 });
 
+test('Google login restores an established email-matched customer when the legacy user lost customerId', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-legacy-established-customer-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertUser({ id: 'legacy_user', email: 'owner@example.test', role: 'owner', customerId: '' as string, status: 'active', createdAtIso: now, updatedAtIso: now });
+    await store.upsertCustomer({ id: 'cust_established', name: 'Established', email: 'owner@example.test', status: 'active', billingStatus: 'active', createdAtIso: now });
+
+    const session = await store.createSessionForGoogleUser({ email: 'owner@example.test', nowIso: now });
+    const dashboard = await store.getDashboardForSession(session.token, now);
+
+    assert.equal(dashboard?.user.customerId, 'cust_established');
+    assert.equal(dashboard?.customer.id, 'cust_established');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('dashboard summary is tenant-scoped and preserves needs-plan defaults', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-dashboard-summary-'));
   try {
