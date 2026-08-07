@@ -209,6 +209,17 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'operator@example.com', password: 'secret' }),
     });
     const operatorToken = ((await operatorLogin.json()) as { token: string }).token;
+    const anonymousPackages = await fetch(`http://127.0.0.1:${port}/admin/service-packages`);
+    assert.equal(anonymousPackages.status, 401);
+    const operatorPackages = await fetch(`http://127.0.0.1:${port}/admin/service-packages`, { headers: { authorization: `Bearer ${operatorToken}` } });
+    assert.equal(operatorPackages.status, 403);
+    const servicePackages = await fetch(`http://127.0.0.1:${port}/admin/service-packages`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(servicePackages.status, 200);
+    const servicePackagesPayload = (await servicePackages.json()) as { servicePackages: Array<{ id: string; name: string; status: string; includedAgents: number }> };
+    assert.deepEqual(servicePackagesPayload.servicePackages.map((row) => row.id), ['pkg_growth']);
+    assert.equal(servicePackagesPayload.servicePackages[0].name, 'Growth Sandbox');
+    assert.equal(servicePackagesPayload.servicePackages[0].status, 'active');
+    assert.equal(servicePackagesPayload.servicePackages[0].includedAgents, 2);
     const operatorDenied = await fetch(`http://127.0.0.1:${port}/admin/customers`, { headers: { authorization: `Bearer ${operatorToken}` } });
     assert.equal(operatorDenied.status, 403);
 

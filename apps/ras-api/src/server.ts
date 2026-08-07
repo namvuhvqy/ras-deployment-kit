@@ -455,6 +455,17 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/admin/service-packages') {
+    const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
+    if (!admin) { endAdminAccessError(res, Boolean(session)); return; }
+    const state = await store.load();
+    const servicePackages = state.servicePackages
+      .filter((row) => row.status === 'active')
+      .map(({ id, name, description, status, monthlyPriceVnd, includedAgents, includedSocialAccounts, features, updatedAtIso }) => ({ id, name, description, status, monthlyPriceVnd, includedAgents, includedSocialAccounts, features, updatedAtIso }));
+    res.end(JSON.stringify({ ok: true, servicePackages }));
+    return;
+  }
+
   if (req.method === 'GET' && req.url === '/admin/customers') {
     const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
     if (!admin) { endAdminAccessError(res, Boolean(session)); return; }
