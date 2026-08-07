@@ -20,6 +20,8 @@ import type {
   RasSession,
   RasPersonalAccessToken,
   RasPrincipal,
+  RasOrder,
+  RasProfileSlot,
   RasApiRateLimitBucket,
   SocialPost,
   RasUser,
@@ -36,6 +38,8 @@ export interface RasPersistentState {
   sandboxes: RasSandboxEnvironment[];
   agents: RasAgentInstance[];
   servicePackages: RasServicePackage[];
+  orders: RasOrder[];
+  profileSlots: RasProfileSlot[];
   connectedAccounts: ConnectedAccount[];
   socialPosts: SocialPost[];
   inboxConversations: InboxConversation[];
@@ -263,6 +267,8 @@ export class JsonRasStore {
       sandboxes: [],
       agents: [],
       servicePackages: [],
+      orders: [],
+      profileSlots: [],
       connectedAccounts: [],
       socialPosts: [],
       inboxConversations: [],
@@ -289,6 +295,8 @@ export class JsonRasStore {
     state.sandboxes ??= [];
     state.agents ??= [];
     state.servicePackages ??= [];
+    state.orders ??= [];
+    state.profileSlots ??= [];
     state.connectedAccounts ??= [];
     state.socialPosts ??= [];
     state.inboxConversations ??= [];
@@ -524,7 +532,7 @@ export class JsonRasStore {
     const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
     if (session) {
       const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
-      if (user) return { authType: 'session', customerId: user.customerId, userId: user.id, scopes: ['*'] };
+      if (user) return { authType: 'session', customerId: user.customerId, userId: user.id, role: user.role, scopes: ['*'] };
     }
     const pat = state.personalAccessTokens.find((row) => row.tokenHash === hashPat(token) && !row.revokedAtIso && (!row.expiresAtIso || Date.parse(row.expiresAtIso) > Date.parse(nowIso)));
     if (!pat) return undefined;
@@ -617,6 +625,61 @@ export class JsonRasStore {
     else state.customers.push(customer);
     await this.write(state);
     return customer;
+  }
+
+  async createAdminCustomer(input: { id: string; name: string; email?: string; actorUserId: string }): Promise<RasCustomer> {
+    return this.mutate((state) => {
+      if (state.customers.some((row) => row.id === input.id)) throw new Error('admin_customer_exists');
+      const now = new Date().toISOString();
+      const customer: RasCustomer = { id: input.id, name: input.name, email: input.email, status: 'pending', billingStatus: 'trial', packageStatus: 'pending', maxConnectedAccounts: 0, activeConnectedAccounts: 0, addOnStatus: {}, createdAtIso: now, updatedAtIso: now };
+      state.customers.push(customer);
+      state.auditLogs.push({ id: `audit_${randomBytes(12).toString('hex')}`, customerId: customer.id, action: 'admin.customer.created', targetType: 'customer', targetId: customer.id, metadata: { actorUserId: input.actorUserId }, createdAtIso: now });
+      return customer;
+    });
+  }
+
+  async applyAdminAssignment(input: { customerId: string; servicePackageId: string; profileSlot?: { id: string }; sandbox?: { id: string; provider: 'vps' | 'cloud'; status: RasSandboxEnvironment['status']; endpoint?: string }; agents?: Array<{ id: string; kind: RasAgentInstance['kind']; status: RasAgentInstance['status'] }>; actorUserId: string; idempotencyKey: string }): Promise<void> {
+    await this.mutate((state) => {
+      const fingerprint = JSON.stringify({ servicePackageId: input.servicePackageId, profileSlotId: input.profileSlot?.id, sandbox: input.sandbox, agents: [...(input.agents ?? [])].sort((a, b) => a.id.localeCompare(b.id)) });
+      const customerIndex = state.customers.findIndex((row) => row.id === input.customerId);
+      if (customerIndex < 0) throw new Error('admin_customer_not_found');
+      if (!state.servicePackages.some((row) => row.id === input.servicePackageId && row.status === 'active')) throw new Error('admin_service_package_not_found');
+      const replay = state.orders.find((row) => row.customerId === input.customerId && row.idempotencyKey === input.idempotencyKey);
+      if (replay) {
+        if (replay.assignmentFingerprint !== fingerprint) throw new Error('admin_assignment_idempotency_conflict');
+        return;
+      }
+      const customer = state.customers[customerIndex];
+      const slot = input.profileSlot ? state.profileSlots.find((row) => row.id === input.profileSlot!.id) : undefined;
+      if (input.profileSlot && (!slot || (slot.status === 'available' && Boolean(slot.customerId)) || (slot.status === 'assigned' && slot.customerId !== customer.id) || slot.status === 'disabled')) throw new Error('admin_profile_slot_unavailable');
+      const existingSandbox = input.sandbox ? state.sandboxes.find((row) => row.id === input.sandbox!.id) : undefined;
+      if (existingSandbox && existingSandbox.customerId !== customer.id) throw new Error('admin_sandbox_assigned');
+      for (const item of input.agents ?? []) {
+        const existing = state.agents.find((row) => row.id === item.id);
+        if (existing && existing.customerId !== customer.id) throw new Error('admin_agent_assigned');
+        if (existing && input.sandbox && existing.sandboxId !== input.sandbox.id) throw new Error('admin_agent_sandbox_mismatch');
+      }
+      const now = new Date().toISOString();
+      if (slot) { slot.status = 'assigned'; slot.customerId = customer.id; slot.updatedAtIso = now; }
+      if (input.sandbox) {
+        const sandbox: RasSandboxEnvironment = { id: input.sandbox.id, customerId: customer.id, provider: input.sandbox.provider, status: input.sandbox.status, endpoint: input.sandbox.endpoint, createdAtIso: existingSandbox?.createdAtIso ?? now, updatedAtIso: now };
+        if (existingSandbox) state.sandboxes[state.sandboxes.indexOf(existingSandbox)] = sandbox; else state.sandboxes.push(sandbox);
+        customer.sandboxId = sandbox.id;
+      }
+      for (const item of input.agents ?? []) {
+        const existing = state.agents.find((row) => row.id === item.id);
+        const agent: RasAgentInstance = { id: item.id, customerId: customer.id, sandboxId: input.sandbox?.id ?? existing?.sandboxId ?? customer.sandboxId ?? '', kind: item.kind, status: item.status, updatedAtIso: now };
+        if (existing) state.agents[state.agents.indexOf(existing)] = agent; else state.agents.push(agent);
+      }
+      customer.servicePackageId = input.servicePackageId; customer.updatedAtIso = now; state.customers[customerIndex] = customer;
+      const order: RasOrder = { id: `order_${randomBytes(12).toString('hex')}`, customerId: customer.id, servicePackageId: input.servicePackageId, status: 'assigned', source: 'manual', createdByUserId: input.actorUserId, idempotencyKey: input.idempotencyKey, assignmentFingerprint: fingerprint, createdAtIso: now, updatedAtIso: now }; state.orders.push(order);
+      state.auditLogs.push({ id: `audit_${randomBytes(12).toString('hex')}`, customerId: customer.id, action: 'admin.customer.assignment.applied', targetType: 'customer', targetId: customer.id, metadata: { actorUserId: input.actorUserId, servicePackageId: input.servicePackageId, profileSlotId: input.profileSlot?.id, sandboxId: input.sandbox?.id, agentIds: (input.agents ?? []).map((row) => row.id), orderId: order.id }, createdAtIso: now });
+    });
+  }
+
+  async getAdminOperations(customerId: string) {
+    const state = await this.load(); const customer = state.customers.find((row) => row.id === customerId); if (!customer) return undefined;
+    return { customer, orders: state.orders.filter((row) => row.customerId === customerId), profileSlots: state.profileSlots.filter((row) => row.customerId === customerId), sandbox: customer.sandboxId ? state.sandboxes.find((row) => row.id === customer.sandboxId) : undefined, agents: state.agents.filter((row) => row.customerId === customerId), auditLogs: state.auditLogs.filter((row) => row.customerId === customerId).sort((a, b) => Date.parse(b.createdAtIso) - Date.parse(a.createdAtIso)) };
   }
 
   async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
@@ -1267,7 +1330,7 @@ export class JsonRasStore {
 
   private async emptyState(): Promise<RasPersistentState> {
     const now = new Date().toISOString();
-    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], googleOAuthStates: [] };
+    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], orders: [], profileSlots: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], googleOAuthStates: [] };
   }
 
   private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {
