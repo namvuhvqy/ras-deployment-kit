@@ -26,6 +26,16 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         createdAtIso: now,
         updatedAtIso: now,
       },
+      {
+        id: 'user_operator',
+        email: 'operator@example.com',
+        role: 'operator',
+        customerId: 'cust_1',
+        status: 'active',
+        password: 'secret',
+        createdAtIso: now,
+        updatedAtIso: now,
+      },
     ],
     sessions: [],
     customers: [
@@ -81,6 +91,11 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
         status: 'stopped',
         updatedAtIso: now,
       },
+    ],
+    profileSlots: [
+      { id: 'slot_ops_1', provider: 'zernio', profileId: 'profile_ops_1', status: 'available', createdAtIso: now, updatedAtIso: now },
+      { id: 'slot_other_1', provider: 'zernio', profileId: 'profile_other_1', status: 'assigned', customerId: 'cust_1', createdAtIso: now, updatedAtIso: now },
+      { id: 'slot_corrupt_1', provider: 'zernio', profileId: 'profile_corrupt_1', status: 'available', customerId: 'cust_1', createdAtIso: now, updatedAtIso: now },
     ],
     servicePackages: [
       {
@@ -138,7 +153,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_PAT_RATE_LIMIT_PER_MINUTE: '3' },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_PAT_RATE_LIMIT_PER_MINUTE: '3', RAS_SYSTEM_ADMIN_USER_IDS: 'user_1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -173,6 +188,78 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     const payload = (await dashboard.json()) as { dashboard: { customer: { id: string }; agents: Array<{ kind: string }> } };
     assert.equal(payload.dashboard.customer.id, 'cust_1');
     assert.equal(payload.dashboard.agents[0].kind, 'ras1-hermes');
+
+    const adminDenied = await fetch(`http://127.0.0.1:${port}/admin/customers`);
+    assert.equal(adminDenied.status, 401);
+
+    const createCustomer = await fetch(`http://127.0.0.1:${port}/admin/customers`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'cust_ops', name: 'Operations customer', email: 'ops@example.com' }),
+    });
+    assert.equal(createCustomer.status, 201);
+    assert.equal(((await createCustomer.json()) as { customer: { id: string } }).customer.id, 'cust_ops');
+
+    const duplicateCustomer = await fetch(`http://127.0.0.1:${port}/admin/customers`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'cust_ops', name: 'must not overwrite' }),
+    });
+    assert.equal(duplicateCustomer.status, 409);
+
+    const operatorLogin = await fetch(`http://127.0.0.1:${port}/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'operator@example.com', password: 'secret' }),
+    });
+    const operatorToken = ((await operatorLogin.json()) as { token: string }).token;
+    const operatorDenied = await fetch(`http://127.0.0.1:${port}/admin/customers`, { headers: { authorization: `Bearer ${operatorToken}` } });
+    assert.equal(operatorDenied.status, 403);
+
+    const assignOps = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json', 'idempotency-key': 'assign-ops-0001' },
+      body: JSON.stringify({ servicePackageId: 'pkg_growth', profileSlot: { id: 'slot_ops_1' }, sandbox: { id: 'sandbox_ops_1', provider: 'vps', status: 'provisioning' }, agents: [{ id: 'agent_ops_1', kind: 'ras1-hermes', status: 'starting' }] }),
+    });
+    assert.equal(assignOps.status, 200);
+    const operations = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/operations`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(operations.status, 200);
+    const operationsPayload = (await operations.json()) as { operations: { customer: { servicePackageId?: string; sandboxId?: string }; orders: unknown[]; profileSlots: Array<{ customerId?: string }>; agents: Array<{ status: string }>; auditLogs: Array<{ action: string; metadata: { actorUserId?: string } }> } };
+    assert.equal(operationsPayload.operations.customer.servicePackageId, 'pkg_growth');
+    assert.equal(operationsPayload.operations.customer.sandboxId, 'sandbox_ops_1');
+    assert.equal(operationsPayload.operations.orders.length, 1);
+    assert.equal(operationsPayload.operations.profileSlots[0].customerId, 'cust_ops');
+    assert.equal(operationsPayload.operations.agents[0].status, 'starting');
+    assert.equal(operationsPayload.operations.auditLogs[0].action, 'admin.customer.assignment.applied');
+    assert.equal(operationsPayload.operations.auditLogs[0].metadata.actorUserId, 'user_1');
+
+    const assignmentReplay = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json', 'idempotency-key': 'assign-ops-0001' },
+      body: JSON.stringify({ servicePackageId: 'pkg_growth', profileSlot: { id: 'slot_ops_1' }, sandbox: { id: 'sandbox_ops_1', provider: 'vps', status: 'provisioning' }, agents: [{ id: 'agent_ops_1', kind: 'ras1-hermes', status: 'starting' }] }),
+    });
+    assert.equal(assignmentReplay.status, 200);
+    const changedReplay = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json', 'idempotency-key': 'assign-ops-0001' }, body: JSON.stringify({ servicePackageId: 'pkg_growth', sandbox: { id: 'sandbox_ops_1', provider: 'vps', status: 'running' } }),
+    });
+    assert.equal(changedReplay.status, 409);
+    const operationsAfterReplay = (await (await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/operations`, { headers: { authorization: `Bearer ${loginPayload.token}` } })).json()) as { operations: { orders: unknown[]; auditLogs: Array<{ action: string }> } };
+    assert.equal(operationsAfterReplay.operations.orders.length, 1);
+    assert.equal(operationsAfterReplay.operations.auditLogs.filter((row) => row.action === 'admin.customer.assignment.applied').length, 1);
+
+    const missingKey = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ servicePackageId: 'pkg_growth' }),
+    });
+    assert.equal(missingKey.status, 400);
+    const crossTenantSlot = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json', 'idempotency-key': 'assign-ops-0002' }, body: JSON.stringify({ servicePackageId: 'pkg_growth', profileSlot: { id: 'slot_other_1' } }),
+    });
+    assert.equal(crossTenantSlot.status, 409);
+    const corruptSlot = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json', 'idempotency-key': 'assign-ops-0004' }, body: JSON.stringify({ servicePackageId: 'pkg_growth', profileSlot: { id: 'slot_corrupt_1' } }),
+    });
+    assert.equal(corruptSlot.status, 409);
+    const crossTenantSandbox = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
+      method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json', 'idempotency-key': 'assign-ops-0003' }, body: JSON.stringify({ servicePackageId: 'pkg_growth', sandbox: { id: 'sandbox_1', provider: 'vps', status: 'running' } }),
+    });
+    assert.equal(crossTenantSandbox.status, 409);
+    const operationsAfterDenied = (await (await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/operations`, { headers: { authorization: `Bearer ${loginPayload.token}` } })).json()) as { operations: { orders: unknown[] } };
+    assert.equal(operationsAfterDenied.operations.orders.length, 1);
 
     const mapping = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
     assert.equal(mapping.status, 200);
@@ -209,6 +296,8 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.equal(patPrincipal.principal.authType, 'pat');
     assert.equal(patPrincipal.principal.customerId, 'cust_1');
     assert.deepEqual(patPrincipal.principal.scopes, ['accounts:read']);
+    const patAdminDenied = await fetch(`http://127.0.0.1:${port}/admin/customers`, { headers: { authorization: `Bearer ${patPayload.plaintextToken}` } });
+    assert.equal(patAdminDenied.status, 401);
 
     const rotatePat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens/${patPayload.token.id}/rotate`, {
       method: 'POST', headers: { authorization: `Bearer ${loginPayload.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ expiresAtIso: '2027-01-01T00:00:00.000Z' }),
