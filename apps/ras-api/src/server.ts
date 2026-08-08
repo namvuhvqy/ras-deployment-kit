@@ -214,11 +214,14 @@ async function requireSessionPrincipal(req: IncomingMessage): Promise<import('..
   return principal?.authType === 'session' ? principal : undefined;
 }
 
+function systemAdminUserIds(): Set<string> {
+  return new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
+}
+
 async function requireAdminSession(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
   const principal = await requireSessionPrincipal(req);
   // Global operations access is deliberately separate from tenant-local roles.
-  const systemAdminIds = new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
-  return principal?.userId && systemAdminIds.has(principal.userId) ? principal : undefined;
+  return principal?.userId && systemAdminUserIds().has(principal.userId) ? principal : undefined;
 }
 
 function endAdminAccessError(res: { statusCode: number; end: (chunk?: string) => void }, authenticated: boolean): void {
@@ -477,7 +480,7 @@ const server = createServer(async (req, res) => {
     const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
     if (!admin) { endAdminAccessError(res, Boolean(session)); return; }
     const state = await store.load();
-    res.end(JSON.stringify({ ok: true, customers: state.customers.map(({ id, name, email, status, servicePackageId, sandboxId, updatedAtIso }) => ({ id, name, email, status, servicePackageId, sandboxId, updatedAtIso })) }));
+    res.end(JSON.stringify({ ok: true, customers: state.customers.filter((customer) => !customer.isSystemPrincipal).map(({ id, name, email, status, servicePackageId, sandboxId, updatedAtIso }) => ({ id, name, email, status, servicePackageId, sandboxId, updatedAtIso })) }));
     return;
   }
 
@@ -548,8 +551,10 @@ const server = createServer(async (req, res) => {
       const accessToken = await exchangeGoogleCode(req, code);
       const profile = await fetchGoogleProfile(accessToken);
       const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
-      const dashboard = await store.getDashboardForSession(session.token);
-      if (!dashboard) throw new Error('google_session_dashboard_missing');
+      const principal = await store.resolvePrincipal(session.token);
+      if (!principal?.userId || !principal.customerId) throw new Error('google_session_principal_missing');
+      if (systemAdminUserIds().has(principal.userId)) await store.markCustomerSystemPrincipal(principal.customerId);
+      else if (!(await store.getDashboardForSession(session.token))) throw new Error('google_session_dashboard_missing');
       res.statusCode = 302;
       res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo, state.frontendOrigin));
       res.end();
@@ -604,14 +609,16 @@ const server = createServer(async (req, res) => {
       const accessToken = await exchangeGoogleCode(req, code);
       const profile = await fetchGoogleProfile(accessToken);
       const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
-      const dashboard = await store.getDashboardForSession(session.token);
-      if (!dashboard) throw new Error('google_session_dashboard_missing');
+      const principal = await store.resolvePrincipal(session.token);
+      if (!principal?.userId || !principal.customerId) throw new Error('google_session_principal_missing');
+      if (systemAdminUserIds().has(principal.userId)) await store.markCustomerSystemPrincipal(principal.customerId);
+      else if (!(await store.getDashboardForSession(session.token))) throw new Error('google_session_dashboard_missing');
       res.end(
         JSON.stringify({
           ok: true,
           token: session.token,
           expiresAtIso: session.expiresAtIso,
-          customerId: dashboard.customer.id,
+          customerId: principal.customerId,
           redirectTo: state.redirectTo,
         }),
       );
@@ -734,8 +741,15 @@ const server = createServer(async (req, res) => {
     const amount = (billingCycle === 'yearly' ? pricing.yearlyMonthly * 12 : pricing.monthly) + (billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6);
     const ttlMinutes = Number.parseInt(process.env.RAS_CHECKOUT_INTENT_TTL_MINUTES ?? '30', 10);
     const expiresAtIso = new Date(Date.now() + (Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : 30) * 60_000).toISOString();
-    const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
-    res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent })); return;
+    try {
+      const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
+      res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'checkout_intent_create_failed';
+      res.statusCode = ['checkout_already_in_progress', 'checkout_recently_captured', 'checkout_not_available_for_system_principal'].includes(message) ? 409 : 400;
+      res.end(JSON.stringify({ ok: false, error: message }));
+    }
+    return;
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/billing/checkout-intents/')) {

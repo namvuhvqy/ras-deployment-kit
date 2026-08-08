@@ -358,11 +358,29 @@ test('JsonRasStore checkout intents bind one PayPal order and consume exactly on
   try {
     const store = new JsonRasStore(join(dir, 'ras-store.json'));
     await store.migrate();
+    await store.upsertCustomer({ id: 'cust_a', name: 'Customer A', status: 'pending', createdAtIso: '2029-01-01T00:00:00.000Z', updatedAtIso: '2029-01-01T00:00:00.000Z' });
     const intent = await store.createCheckoutIntent({ customerId: 'cust_a', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, amount: '25', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_b', paypalOrderId: 'ORDER-1' })).error, 'not_found');
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1' })).intent?.status, 'bound');
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-2' })).error, 'already_bound');
     assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-1' })).intent?.status, 'consumed');
     assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-2' })).error, 'already_consumed');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('checkout guard blocks in-flight/recent duplicates and system principals but permits a later renewal', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-checkout-'));
+  try {
+    const path = join(dir, 'ras-store.json'); const store = new JsonRasStore(path); await store.migrate(); const now = new Date().toISOString();
+    await store.upsertCustomer({ id: 'cust_checkout', name: 'Checkout', status: 'pending', createdAtIso: now, updatedAtIso: now });
+    const input = { customerId: 'cust_checkout', plan: 'lite' as const, billingCycle: 'monthly' as const, extraConnectSlots: 0, amount: '19', currency: 'USD' as const, expiresAtIso: new Date(Date.now() + 60_000).toISOString() };
+    await store.createCheckoutIntent(input);
+    await assert.rejects(() => store.createCheckoutIntent(input), /checkout_already_in_progress/);
+    const state = await store.load(); state.checkoutIntents[0].status = 'expired'; state.billingPayments.push({ id: 'paypal:recent', provider: 'paypal', customerId: 'cust_checkout', paypalOrderId: 'recent', transactionId: 'recent', status: 'captured', provisionStatus: 'provisioned', amount: '19', currency: 'USD', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, retryCount: 0, createdAtIso: now, updatedAtIso: now }); await writeFile(path, JSON.stringify(state));
+    await assert.rejects(() => store.createCheckoutIntent(input), /checkout_recently_captured/);
+    const older = await store.load(); older.billingPayments[0].createdAtIso = new Date(Date.now() - 31 * 60_000).toISOString(); await writeFile(path, JSON.stringify(older));
+    assert.equal((await store.createCheckoutIntent(input)).status, 'created');
+    await store.markCustomerSystemPrincipal('cust_checkout');
+    await assert.rejects(() => store.createCheckoutIntent({ ...input, plan: 'pro', amount: '45' }), /checkout_not_available_for_system_principal/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

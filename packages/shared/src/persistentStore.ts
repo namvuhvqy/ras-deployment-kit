@@ -684,8 +684,8 @@ export class JsonRasStore {
 
   async getAdminBillingOverview() {
     const state = await this.load();
-    const customers = new Map(state.customers.map((customer) => [customer.id, customer]));
-    const payments = [...state.billingPayments]
+    const customers = new Map(state.customers.filter((customer) => !customer.isSystemPrincipal).map((customer) => [customer.id, customer]));
+    const payments = [...state.billingPayments].filter((payment) => !state.customers.find((customer) => customer.id === payment.customerId)?.isSystemPrincipal)
       .sort((a, b) => Date.parse(b.updatedAtIso) - Date.parse(a.updatedAtIso))
       .map((payment) => {
         const customer = customers.get(payment.customerId);
@@ -722,12 +722,37 @@ export class JsonRasStore {
   }
 
   async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
-    const state = await this.load();
-    const now = new Date().toISOString();
-    const intent: RasCheckoutIntent = { ...input, id: input.id ?? `checkout_${randomBytes(16).toString('hex')}`, status: 'created', createdAtIso: input.createdAtIso ?? now, updatedAtIso: input.updatedAtIso ?? now };
-    state.checkoutIntents.push(intent);
-    await this.write(state);
-    return intent;
+    return this.mutate((state) => {
+      const now = new Date().toISOString();
+      const customer = state.customers.find((row) => row.id === input.customerId);
+      if (!customer || customer.isSystemPrincipal) throw new Error('checkout_not_available_for_system_principal');
+      const samePurchase = (row: { customerId: string; plan: string; billingCycle: string; extraConnectSlots: number }) => row.customerId === input.customerId && row.plan === input.plan && row.billingCycle === input.billingCycle && row.extraConnectSlots === input.extraConnectSlots;
+      if (state.checkoutIntents.some((row) => samePurchase(row) && ['created', 'bound'].includes(row.status) && Date.parse(row.expiresAtIso) > Date.parse(now))) throw new Error('checkout_already_in_progress');
+      // A short post-capture guard prevents accidental double-click/re-entry; it must not block a later renewal.
+      const duplicateWindowMs = 30 * 60_000;
+      if (state.billingPayments.some((row) => samePurchase(row) && row.status === 'captured' && row.reconciliationStatus !== 'duplicate_review' && Date.parse(now) - Date.parse(row.createdAtIso) < duplicateWindowMs)) throw new Error('checkout_recently_captured');
+      const intent: RasCheckoutIntent = { ...input, id: input.id ?? `checkout_${randomBytes(16).toString('hex')}`, status: 'created', createdAtIso: input.createdAtIso ?? now, updatedAtIso: input.updatedAtIso ?? now };
+      state.checkoutIntents.push(intent);
+      return intent;
+    });
+  }
+
+  async markPaymentDuplicateReview(input: { paymentId: string; reason?: 'duplicate_same_plan' | 'manual_review' }): Promise<RasBillingPayment | undefined> {
+    return this.mutate((state) => {
+      const payment = state.billingPayments.find((row) => row.id === input.paymentId);
+      if (!payment) return undefined;
+      payment.reconciliationStatus = 'duplicate_review'; payment.reconciliationReason = input.reason ?? 'duplicate_same_plan'; payment.updatedAtIso = new Date().toISOString();
+      return payment;
+    });
+  }
+
+  async markCustomerSystemPrincipal(customerId: string): Promise<boolean> {
+    return this.mutate((state) => {
+      const customer = state.customers.find((row) => row.id === customerId);
+      if (!customer) return false;
+      customer.isSystemPrincipal = true; customer.updatedAtIso = new Date().toISOString();
+      return true;
+    });
   }
 
   async getCheckoutIntent(id: string): Promise<RasCheckoutIntent | undefined> {

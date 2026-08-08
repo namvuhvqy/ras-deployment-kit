@@ -13,6 +13,8 @@ export type RasBasePlanId = 'none' | 'lite' | 'pro' | 'max';
 export type RasBillingCycle = 'monthly' | 'yearly';
 
 export type RasBillingPaymentStatus = 'captured' | 'refunded' | 'failed';
+/** Operational review never changes provider truth: a held duplicate remains captured until a provider refund is verified. */
+export type RasPaymentReconciliationStatus = 'clear' | 'duplicate_review';
 export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'expired';
 export type RasProvisionStatus = 'pending' | 'pending_retry' | 'provisioned' | 'failed';
 
@@ -41,6 +43,8 @@ export interface RasBillingPayment {
   paypalOrderId: string;
   transactionId: string;
   status: RasBillingPaymentStatus;
+  reconciliationStatus?: RasPaymentReconciliationStatus;
+  reconciliationReason?: 'duplicate_same_plan' | 'manual_review';
   provisionStatus: RasProvisionStatus;
   amount: string;
   currency: string;
@@ -161,6 +165,8 @@ export interface RasApiRateLimitBucket {
 
 export interface RasCustomer {
   id: string;
+  /** Global identity projection only; never a billable tenant or checkout subject. */
+  isSystemPrincipal?: boolean;
   tenantId?: string;
   name: string;
   email?: string;
