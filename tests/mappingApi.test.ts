@@ -642,6 +642,40 @@ test('account mapping rejects unknown customer and mismatched zernio profile', a
 });
 
 
+test('add-on-only checkout co-terms to active Core and rejects missing/expired Core', async () => {
+  const state = emptyState();
+  const expiry = new Date(Date.now() + 15 * 86_400_000).toISOString();
+  Object.assign(state, {
+    users: [{ id: 'user_slots', email: 'slots@example.test', role: 'owner', customerId: 'cust_slots', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 'sess_slots', token: 'token_slots', userId: 'user_slots', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() }],
+    customers: [{ id: 'cust_slots', name: 'Slots', status: 'active', createdAtIso: now, updatedAtIso: now, entitlement: { basePlan: { planId: 'lite', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: expiry }, connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 }, addOns: [] } }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const created = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers: { authorization: 'Bearer token_slots', 'content-type': 'application/json' }, body: JSON.stringify({ checkout_kind: 'connect_slot_addon', extra_connect_slots: 2 }) });
+    assert.equal(created.status, 201);
+    const intent = ((await created.json()) as { intent: { amount: string; servicePeriodEndIso: string; collectionMode: string; lineItems: Array<{ sku: string; quantity: number; proration: boolean }> } }).intent;
+    assert.equal(intent.servicePeriodEndIso, expiry);
+    assert.equal(intent.collectionMode, 'manual');
+    assert.equal(intent.lineItems.length, 1);
+    assert.equal(intent.lineItems[0]?.sku, 'zernio-connect-slot');
+    assert.equal(intent.lineItems[0]?.quantity, 2);
+    assert.equal(intent.lineItems[0]?.proration, true);
+    assert.ok(Number(intent.amount) > 0 && Number(intent.amount) < 12);
+  });
+
+  const expired = emptyState();
+  Object.assign(expired, {
+    users: [{ id: 'user_expired', email: 'expired@example.test', role: 'owner', customerId: 'cust_expired', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 'sess_expired', token: 'token_expired', userId: 'user_expired', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() }],
+    customers: [{ id: 'cust_expired', name: 'Expired', status: 'active', createdAtIso: now, updatedAtIso: now, entitlement: { basePlan: { planId: 'lite', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 1, kinds: ['ras1-hermes'] }, expiresAtIso: new Date(Date.now() - 86_400_000).toISOString() }, connectSlots: { status: 'inactive', includedSlots: 0, purchasedSlots: 0, trialSlots: 0, totalSlots: 0, activeConnectedAccounts: 0 }, addOns: [] } }],
+  });
+  await withApi(expired, async (baseUrl) => {
+    const rejected = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers: { authorization: 'Bearer token_expired', 'content-type': 'application/json' }, body: JSON.stringify({ checkout_kind: 'connect_slot_addon', extra_connect_slots: 1 }) });
+    assert.equal(rejected.status, 409);
+    assert.equal((await rejected.json() as { error: string }).error, 'active_core_plan_required');
+  });
+});
+
 test('checkout capture uses an owned bound intent rather than relay supplied price fields', async () => {
   const state = emptyState();
   Object.assign(state, {

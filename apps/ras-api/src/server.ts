@@ -5,7 +5,7 @@ import { createZernioWebhookRouter } from './webhookRouter.js';
 import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
-import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
+import type { RasBasePlanId, RasBillingCycle, RasBillingLineItem, RasEntitlement } from '../../../packages/shared/src/types.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -328,6 +328,29 @@ function basePlanField(body: Record<string, unknown>): PaidRasBasePlanId | undef
 
 function billingCycleField(body: Record<string, unknown>): RasBillingCycle {
   return stringField(body, 'billing_cycle') === 'yearly' ? 'yearly' : 'monthly';
+}
+
+function validFutureIso(value: string | undefined, nowMs: number): value is string {
+  if (!value) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp > nowMs;
+}
+
+function money(value: number): string { return String(Math.round(value * 100) / 100); }
+
+/** Canonical server catalog: supports a future add-on-only page without trusting UI pricing. */
+function checkoutLineItems(input: { plan: PaidRasBasePlanId; billingCycle: RasBillingCycle; slots: number; addOnOnly: boolean; currentExpiryIso?: string; nowIso: string }): { amount: string; lineItems: RasBillingLineItem[]; periodStartIso: string; periodEndIso: string } {
+  const nowMs = Date.parse(input.nowIso); const basePrice = RAS_PLAN_PRICES[input.plan];
+  const cycleDays = input.billingCycle === 'yearly' ? 365 : 30;
+  const periodEndIso = input.addOnOnly ? input.currentExpiryIso! : new Date(nowMs + cycleDays * 86_400_000).toISOString();
+  const periodStartIso = input.addOnOnly ? input.nowIso : input.nowIso;
+  const addOnUnit = 6 * (input.billingCycle === 'yearly' ? 12 : 1);
+  const remainingDays = input.addOnOnly ? Math.max(1, Math.ceil((Date.parse(periodEndIso) - nowMs) / 86_400_000)) : cycleDays;
+  const slotUnit = input.addOnOnly ? Number(money(addOnUnit * remainingDays / cycleDays)) : addOnUnit;
+  const lineItems: RasBillingLineItem[] = [];
+  if (!input.addOnOnly) lineItems.push({ sku: `core-vps-${input.plan}`, kind: 'core_vps', quantity: 1, unitAmount: money(input.billingCycle === 'yearly' ? basePrice.yearlyMonthly * 12 : basePrice.monthly), amount: money(input.billingCycle === 'yearly' ? basePrice.yearlyMonthly * 12 : basePrice.monthly), currency: 'USD', billingCycle: input.billingCycle, servicePeriodStartIso: periodStartIso, servicePeriodEndIso: periodEndIso, proration: false });
+  if (input.slots > 0) lineItems.push({ sku: 'zernio-connect-slot', kind: 'connect_slot', quantity: input.slots, unitAmount: money(slotUnit), amount: money(slotUnit * input.slots), currency: 'USD', billingCycle: input.billingCycle, servicePeriodStartIso: periodStartIso, servicePeriodEndIso: periodEndIso, proration: input.addOnOnly });
+  return { amount: money(lineItems.reduce((sum, item) => sum + Number(item.amount), 0)), lineItems, periodStartIso, periodEndIso };
 }
 
 function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' {
@@ -732,17 +755,25 @@ const server = createServer(async (req, res) => {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
     const body = await readJsonBody(req);
-    const plan = basePlanField(body); const billingCycle = billingCycleField(body);
+    const requestedPlan = basePlanField(body); const requestedCycle = billingCycleField(body);
     const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
-    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots)) {
+    const addOnOnly = stringField(body, 'checkout_kind') === 'connect_slot_addon';
+    if (extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots) || (addOnOnly && extraConnectSlots < 1)) {
       res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); return;
     }
-    const pricing = RAS_PLAN_PRICES[plan];
-    const amount = (billingCycle === 'yearly' ? pricing.yearlyMonthly * 12 : pricing.monthly) + (billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6);
+    const currentBase = dashboard.customer.entitlement?.basePlan;
+    const plan = addOnOnly ? currentBase?.planId : requestedPlan;
+    const billingCycle = addOnOnly ? currentBase?.billingCycle : requestedCycle;
+    const nowIso = new Date().toISOString();
+    if (!plan || plan === 'none' || !billingCycle) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'active_core_plan_required' })); return; }
+    if (addOnOnly && (currentBase?.status !== 'active' || !validFutureIso(currentBase.expiresAtIso, Date.parse(nowIso)))) {
+      res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'active_core_plan_required' })); return;
+    }
+    const quote = checkoutLineItems({ plan, billingCycle, slots: extraConnectSlots, addOnOnly, currentExpiryIso: currentBase?.expiresAtIso, nowIso });
     const ttlMinutes = Number.parseInt(process.env.RAS_CHECKOUT_INTENT_TTL_MINUTES ?? '30', 10);
     const expiresAtIso = new Date(Date.now() + (Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : 30) * 60_000).toISOString();
     try {
-      const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
+      const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, lineItems: quote.lineItems, collectionMode: 'manual', servicePeriodStartIso: quote.periodStartIso, servicePeriodEndIso: quote.periodEndIso, amount: quote.amount, currency: 'USD', expiresAtIso });
       res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent }));
     } catch (error) {
       const message = error instanceof Error ? error.message : 'checkout_intent_create_failed';
@@ -760,6 +791,16 @@ const server = createServer(async (req, res) => {
     const intent = await store.getCheckoutIntent(intentId);
     if (!intent || intent.customerId !== dashboard.customer.id) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
     res.end(JSON.stringify({ ok: true, intent })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/checkout-intents/cancel') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    const body = await readJsonBody(req); const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
+    if (!intentId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); return; }
+    const cancelled = await store.cancelCheckoutIntent({ intentId, customerId: dashboard.customer.id });
+    if (!cancelled.intent) { res.statusCode = cancelled.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${cancelled.error}` })); return; }
+    res.end(JSON.stringify({ ok: true, intent: cancelled.intent })); return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/checkout-intents/bind-paypal-order') {

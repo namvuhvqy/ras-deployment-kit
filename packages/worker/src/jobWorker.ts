@@ -155,9 +155,12 @@ export class RasJobWorker {
     // Every captured paid base plan includes one first-month Connect Slot. Older
     // pending entitlement projections may contain 0; preserve paid extras but never
     // let that stale value erase the included slot.
+    const isAddOnOnly = payment.lineItems?.every((item) => item.kind !== 'core_vps') ?? false;
     const priorIncludedSlots = customer.entitlement?.connectSlots.includedSlots ?? 0;
-    const includedSlots = Math.max(1, priorIncludedSlots);
+    const includedSlots = Math.max(isAddOnOnly ? 0 : 1, priorIncludedSlots);
     const previouslyPurchasedSlots = customer.entitlement?.connectSlots.purchasedSlots ?? Math.max(0, (customer.maxConnectedAccounts ?? includedSlots) - includedSlots);
+    // Delta provisioning: payment replay must not double grant; a captured slot purchase
+    // only adds its purchased quantity and never changes the Core service period.
     const purchasedSlots = payment.provisionStatus === 'provisioned' ? previouslyPurchasedSlots : previouslyPurchasedSlots + payment.extraConnectSlots;
     const totalSlots = includedSlots + purchasedSlots;
     const activeConnectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id && row.status === 'connected').length;
@@ -173,9 +176,12 @@ export class RasJobWorker {
       addOnStatus: { ...(customer.addOnStatus ?? {}), zernio: 'active' },
       zernioProfileId,
       entitlement: {
-        basePlan: { planId: payment.plan, status: 'active', billingCycle: payment.billingCycle, vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: new Date().toISOString() },
+        // Add-on-only payments preserve the existing Core entitlement and co-term date.
+        basePlan: isAddOnOnly && customer.entitlement?.basePlan
+          ? customer.entitlement.basePlan
+          : { planId: payment.plan, status: 'active', billingCycle: payment.billingCycle, vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: new Date().toISOString(), expiresAtIso: payment.servicePeriodEndIso },
         connectSlots: { status: 'active', includedSlots, purchasedSlots, trialSlots: 0, totalSlots, activeConnectedAccounts },
-        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'active', slots: totalSlots }],
+        addOns: [{ id: 'zernio-connect', name: 'Zernio Connect', status: 'active', slots: totalSlots, expiresAtIso: isAddOnOnly ? payment.servicePeriodEndIso : undefined }],
       },
     });
     await this.store.markBillingPaymentProvisioned(payment.id);

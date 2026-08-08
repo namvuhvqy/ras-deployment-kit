@@ -368,6 +368,26 @@ test('JsonRasStore checkout intents bind one PayPal order and consume exactly on
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('cancelled bound checkout releases retry without a payment or provision job', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-checkout-cancel-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    const now = new Date().toISOString();
+    await store.upsertCustomer({ id: 'cust_cancel', name: 'Cancel', status: 'pending', createdAtIso: now, updatedAtIso: now });
+    const input = { customerId: 'cust_cancel', plan: 'lite' as const, billingCycle: 'monthly' as const, extraConnectSlots: 0, amount: '19', currency: 'USD' as const, expiresAtIso: new Date(Date.now() + 60_000).toISOString() };
+    const intent = await store.createCheckoutIntent(input);
+    await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_cancel', paypalOrderId: 'ORDER-CANCEL' });
+    const cancelled = await store.cancelCheckoutIntent({ intentId: intent.id, customerId: 'cust_cancel' });
+    assert.equal(cancelled.intent?.status, 'cancelled');
+    const state = await store.load();
+    assert.equal(state.billingPayments.length, 0);
+    assert.equal(state.jobs.filter((job) => job.type === 'provision_entitlement').length, 0);
+    const retry = await store.createCheckoutIntent(input);
+    assert.equal(retry.status, 'created');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('checkout guard blocks in-flight/recent duplicates and system principals but permits a later renewal', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-checkout-'));
   try {

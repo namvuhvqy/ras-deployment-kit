@@ -774,6 +774,18 @@ export class JsonRasStore {
     await this.write(state); return { intent };
   }
 
+  async cancelCheckoutIntent(input: { intentId: string; customerId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'consumed' }> {
+    return this.mutate((state) => {
+      const now = input.nowIso ?? new Date().toISOString();
+      const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+      if (!intent) return { error: 'not_found' };
+      if (intent.status === 'consumed') return { error: 'consumed' };
+      if (intent.status === 'cancelled') return { intent };
+      intent.status = 'cancelled'; intent.updatedAtIso = now;
+      return { intent };
+    });
+  }
+
   async consumeCheckoutIntentAfterCapture(input: { intentId: string; customerId: string; paypalOrderId: string; transactionId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'not_bound' | 'already_consumed' }> {
     const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
     const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
@@ -803,7 +815,7 @@ export class JsonRasStore {
       const customer = state.customers.find((row) => row.id === intent.customerId);
       if (!customer) return { error: 'not_found' };
       intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
-      const payment: RasBillingPayment = { id: paymentId, provider: 'paypal', customerId: customer.id, paypalOrderId: input.paypalOrderId, transactionId: input.transactionId, status: 'captured', provisionStatus: 'pending', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: input.rawCapture, retryCount: 0, createdAtIso: now, updatedAtIso: now };
+      const payment: RasBillingPayment = { id: paymentId, provider: 'paypal', customerId: customer.id, paypalOrderId: input.paypalOrderId, transactionId: input.transactionId, status: 'captured', provisionStatus: 'pending', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, lineItems: intent.lineItems, collectionMode: intent.collectionMode, servicePeriodStartIso: intent.servicePeriodStartIso, servicePeriodEndIso: intent.servicePeriodEndIso, rawCapture: input.rawCapture, retryCount: 0, createdAtIso: now, updatedAtIso: now };
       if (existingPayment) state.billingPayments[state.billingPayments.indexOf(existingPayment)] = payment; else state.billingPayments.push(payment);
       const job: RasJob = { id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now };
       const existingJob = state.jobs.find((row) => row.id === job.id);

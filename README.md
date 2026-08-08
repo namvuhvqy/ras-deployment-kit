@@ -92,6 +92,13 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 - Production deploy, live credentials, live social publishing, and VPS mutations require explicit human approval.
 - Prefer strong local tests and smoke checks before any production action.
 
+## Billing catalog and renewal boundary
+
+- Checkout persists a server-priced immutable line-item snapshot (SKU, quantity, unit/total amount, currency and service period). Browser amounts are never authoritative.
+- Core VPS and Connect Slots are decoupled technically. A `connect_slot_addon` checkout requires an active, unexpired Core plan; slot service end is co-termed to the existing Core expiry and price is prorated by remaining cycle days.
+- Captured add-on provisioning is a worker/outbox delta (`purchasedSlots + quantity`), idempotent on payment replay, and never creates/renews/replaces Core VPS entitlement.
+- Current PayPal model is `manual` one-time collection, including monthly/yearly priced packages. Do not market it as auto-renew. Auto-renew requires a separate PayPal Subscription/consent/webhook/dunning implementation.
+
 ## Important docs
 
 - `docs/ARCHITECTURE_DECISION_LOCKED.md` — locked MVP architecture decision.

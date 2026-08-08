@@ -15,8 +15,24 @@ export type RasBillingCycle = 'monthly' | 'yearly';
 export type RasBillingPaymentStatus = 'captured' | 'refunded' | 'failed';
 /** Operational review never changes provider truth: a held duplicate remains captured until a provider refund is verified. */
 export type RasPaymentReconciliationStatus = 'clear' | 'duplicate_review';
-export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'expired';
+export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'cancelled' | 'expired';
 export type RasProvisionStatus = 'pending' | 'pending_retry' | 'provisioned' | 'failed';
+export type RasBillingCollectionMode = 'manual';
+export type RasBillingLineItemKind = 'core_vps' | 'connect_slot' | 'integration';
+
+/** Server-priced immutable catalog snapshot; clients may select SKU/quantity only. */
+export interface RasBillingLineItem {
+  sku: string;
+  kind: RasBillingLineItemKind;
+  quantity: number;
+  unitAmount: string;
+  amount: string;
+  currency: 'USD';
+  billingCycle: RasBillingCycle;
+  servicePeriodStartIso: string;
+  servicePeriodEndIso: string;
+  proration: boolean;
+}
 
 export interface RasCheckoutIntent {
   id: string;
@@ -24,6 +40,11 @@ export interface RasCheckoutIntent {
   plan: Exclude<RasBasePlanId, 'none'>;
   billingCycle: RasBillingCycle;
   extraConnectSlots: number;
+  /** Legacy fields remain during catalog migration. */
+  lineItems?: RasBillingLineItem[];
+  collectionMode?: RasBillingCollectionMode;
+  servicePeriodStartIso?: string;
+  servicePeriodEndIso?: string;
   amount: string;
   currency: 'USD';
   status: RasCheckoutIntentStatus;
@@ -51,6 +72,10 @@ export interface RasBillingPayment {
   plan: RasBasePlanId;
   billingCycle: RasBillingCycle;
   extraConnectSlots: number;
+  lineItems?: RasBillingLineItem[];
+  collectionMode?: RasBillingCollectionMode;
+  servicePeriodStartIso?: string;
+  servicePeriodEndIso?: string;
   rawCapture?: Record<string, unknown>;
   retryCount: number;
   lastError?: string;
