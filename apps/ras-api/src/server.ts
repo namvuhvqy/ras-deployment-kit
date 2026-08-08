@@ -256,6 +256,11 @@ function endInternalAccessError(res: { statusCode: number; end: (chunk: string) 
   res.end(JSON.stringify({ ok: false, error: 'missing_internal_token' }));
 }
 
+/** Explicitly opt-in and environment-bound: never available in Production. */
+function stagingE2EFixturesEnabled(): boolean {
+  return process.env.RAS_ENABLE_E2E_TEST_ENDPOINT === 'true' && process.env.RAS_DEPLOYMENT_ENV === 'staging';
+}
+
 async function exchangeGoogleCode(req: IncomingMessage, code: string): Promise<string> {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -1138,6 +1143,43 @@ const server = createServer(async (req, res) => {
         mapping: { customerId: customer.id, tenantId: customer.tenantId, zernioProfileId: customer.zernioProfileId },
       }),
     );
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/internal/e2e/fixtures/disposable-tenant') {
+    if (!stagingE2EFixturesEnabled()) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'not_found' }));
+      return;
+    }
+    if (!requireInternalAccess(req)) {
+      endInternalAccessError(res);
+      return;
+    }
+    const body = await readJsonBody(req);
+    const fixtureId = stringField(body, 'fixtureId');
+    if (!fixtureId || !/^e2e_[a-z0-9_-]{8,80}$/.test(fixtureId)) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_fixture_id' }));
+      return;
+    }
+    const ttlHours = numberField(body, 'ttlHours') ?? 4;
+    if (!Number.isInteger(ttlHours) || ttlHours < 1 || ttlHours > 8) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'invalid_fixture_ttl' }));
+      return;
+    }
+    const password = `e2e_${randomBytes(24).toString('base64url')}`;
+    const expiresAtIso = new Date(Date.now() + ttlHours * 60 * 60 * 1000).toISOString();
+    try {
+      const fixture = await store.createE2EDisposableFixture({ id: fixtureId, email: `${fixtureId}@example.test`, password, expiresAtIso });
+      // Credential material is only returned across the internal-token boundary.
+      res.statusCode = 201;
+      res.end(JSON.stringify({ ok: true, fixture: { customerId: fixture.customer.id, email: fixture.customer.email, password, sessionToken: fixture.session.token, expiresAtIso } }));
+    } catch (error) {
+      res.statusCode = error instanceof Error && error.message === 'e2e_fixture_conflict' ? 409 : 500;
+      res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'e2e_fixture_create_failed' }));
+    }
     return;
   }
 

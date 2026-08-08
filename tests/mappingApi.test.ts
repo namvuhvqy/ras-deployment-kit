@@ -7,14 +7,14 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
-async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>): Promise<T> {
+async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>, env: Record<string, string> = {}): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ras-mapping-api-'));
   const dbPath = join(dir, 'ras-store.json');
   const port = 19_080 + Math.floor(Math.random() * 1000);
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token' },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -53,6 +53,26 @@ function emptyState(): Record<string, unknown> {
     auditLogs: [],
   };
 }
+
+test('staging-only disposable fixture is hidden by default and requires internal token', async () => {
+  await withApi(emptyState(), async (baseUrl) => {
+    const hidden = await fetch(`${baseUrl}/internal/e2e/fixtures/disposable-tenant`, { method: 'POST' });
+    assert.equal(hidden.status, 404);
+  });
+  await withApi(emptyState(), async (baseUrl) => {
+    const forbidden = await fetch(`${baseUrl}/internal/e2e/fixtures/disposable-tenant`, { method: 'POST' });
+    assert.equal(forbidden.status, 401);
+    const created = await fetch(`${baseUrl}/internal/e2e/fixtures/disposable-tenant`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' }, body: JSON.stringify({ fixtureId: 'e2e_fixture_12345678', ttlHours: 2 }) });
+    assert.equal(created.status, 201);
+    const payload = await created.json() as { fixture: { customerId: string; email: string; password: string; sessionToken: string; expiresAtIso: string } };
+    assert.equal(payload.fixture.customerId, 'e2e_fixture_12345678');
+    assert.match(payload.fixture.email, /@example\.test$/);
+    assert.match(payload.fixture.password, /^e2e_/);
+    assert.match(payload.fixture.sessionToken, /^sess_/);
+    const replay = await fetch(`${baseUrl}/internal/e2e/fixtures/disposable-tenant`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' }, body: JSON.stringify({ fixtureId: 'e2e_fixture_12345678' }) });
+    assert.equal(replay.status, 409);
+  }, { RAS_ENABLE_E2E_TEST_ENDPOINT: 'true', RAS_DEPLOYMENT_ENV: 'staging' });
+});
 
 test('captured payment endpoint rejects session callers without the trusted server relay token', async () => {
   const state = emptyState();

@@ -192,6 +192,9 @@ export interface RasCustomer {
   id: string;
   /** Global identity projection only; never a billable tenant or checkout subject. */
   isSystemPrincipal?: boolean;
+  /** Staging-only disposable fixture marker; never a production tenant. */
+  e2eDisposable?: boolean;
+  e2eExpiresAtIso?: string;
   tenantId?: string;
   name: string;
   email?: string;

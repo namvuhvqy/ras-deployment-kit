@@ -627,6 +627,20 @@ export class JsonRasStore {
     return customer;
   }
 
+  async createE2EDisposableFixture(input: { id: string; email: string; password: string; expiresAtIso: string }): Promise<{ customer: RasCustomer; session: RasSession }> {
+    return this.mutate((state) => {
+      if (state.customers.some((row) => row.id === input.id) || state.users.some((row) => row.email.toLowerCase() === input.email.toLowerCase())) throw new Error('e2e_fixture_conflict');
+      const now = new Date().toISOString();
+      const entropy = randomBytes(18).toString('base64url');
+      const customer: RasCustomer = { id: input.id, name: 'E2E disposable tenant', email: input.email.toLowerCase(), e2eDisposable: true, e2eExpiresAtIso: input.expiresAtIso, status: 'pending', billingStatus: 'trial', packageStatus: 'pending', maxConnectedAccounts: 0, activeConnectedAccounts: 0, addOnStatus: {}, createdAtIso: now, updatedAtIso: now };
+      const user: RasUser = { id: `user_${input.id}`, email: customer.email!, displayName: 'E2E disposable user', role: 'owner', customerId: customer.id, status: 'active', password: input.password, createdAtIso: now, updatedAtIso: now };
+      const session: RasSession = { id: `session_${entropy}`, token: `sess_${entropy}`, userId: user.id, createdAtIso: now, expiresAtIso: input.expiresAtIso };
+      state.customers.push(customer); state.users.push(user); state.sessions.push(session);
+      state.auditLogs.push({ id: `audit_${randomBytes(12).toString('hex')}`, customerId: customer.id, action: 'e2e.fixture.created', targetType: 'customer', targetId: customer.id, metadata: { expiresAtIso: input.expiresAtIso }, createdAtIso: now });
+      return { customer, session };
+    });
+  }
+
   async createAdminCustomer(input: { id: string; name: string; email?: string; actorUserId: string }): Promise<RasCustomer> {
     return this.mutate((state) => {
       if (state.customers.some((row) => row.id === input.id)) throw new Error('admin_customer_exists');

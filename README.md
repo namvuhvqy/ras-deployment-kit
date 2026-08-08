@@ -94,6 +94,10 @@ Customers should not need to understand Zernio. Zernio is an internal/partner in
 
 ## Billing catalog and renewal boundary
 
+### Staging-only disposable E2E fixture
+
+`POST /internal/e2e/fixtures/disposable-tenant` is intentionally unavailable by default (`404`). It becomes available only when both `RAS_DEPLOYMENT_ENV=staging` and `RAS_ENABLE_E2E_TEST_ENDPOINT=true` are set, and still requires `x-ras-internal-token`. It creates a short-lived (1–8h) `.test` tenant/user/session atomically, marks it `e2eDisposable`, and appends an audit record. Do not enable this in Production; no frontend route exposes it.
+
 - Checkout persists a server-priced immutable line-item snapshot (SKU, quantity, unit/total amount, currency and service period). Browser amounts are never authoritative.
 - Core VPS and Connect Slots are decoupled technically. A `connect_slot_addon` checkout requires an active, unexpired Core plan; slot service end is co-termed to the existing Core expiry and price is prorated by remaining cycle days.
 - Captured add-on provisioning is a worker/outbox delta (`purchasedSlots + quantity`), idempotent on payment replay, and never creates/renews/replaces Core VPS entitlement.
