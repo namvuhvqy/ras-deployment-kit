@@ -106,6 +106,28 @@ test('RasJobWorker provisions a captured payment from a durable outbox job exact
   }
 });
 
+test('RasJobWorker repairs a stale zero-slot paid entitlement without double-counting purchased slots', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_zero_slot', name: 'Zero slot', email: 'zero-slot@example.test', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: { zernio: 'active' }, entitlement: { basePlan: { planId: 'lite', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes', 'ras2-openclaw'] }, activatedAtIso: '2026-08-01T00:00:00.000Z' }, connectSlots: { status: 'active', includedSlots: 0, purchasedSlots: 0, trialSlots: 0, totalSlots: 0, activeConnectedAccounts: 0 }, addOns: [] } });
+    const timestamp = new Date().toISOString();
+    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: 'cust_zero_slot', paypalOrderId: 'ORDER-ZERO-SLOT', transactionId: 'CAPTURE-ZERO-SLOT', status: 'captured', provisionStatus: 'provisioned', amount: '19', currency: 'USD', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, createdAtIso: timestamp, updatedAtIso: timestamp });
+    await store.enqueueJob({ id: 'repair_zero_slot', customerId: 'cust_zero_slot', profileId: '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: timestamp });
+    const adapter = { ...noopAdapter, async createProfile(input) { return { id: input.customerId, name: input.name, email: input.email, zernioProfileId: 'profile_zero_slot' }; } } satisfies ZernioAdapter;
+    const worker = new RasJobWorker(store, adapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const repaired = await store.load();
+    assert.equal(repaired.customers[0]?.maxConnectedAccounts, 1);
+    assert.equal(repaired.customers[0]?.entitlement?.connectSlots.includedSlots, 1);
+    assert.equal(repaired.customers[0]?.entitlement?.connectSlots.purchasedSlots, 0);
+    assert.equal(repaired.customers[0]?.entitlement?.connectSlots.totalSlots, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('RasJobWorker forwards safe draft flag into publish payload', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

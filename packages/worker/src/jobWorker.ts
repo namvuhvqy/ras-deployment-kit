@@ -143,7 +143,6 @@ export class RasJobWorker {
     if (!payment) throw new Error(`Billing payment not found: ${paymentId}`);
     if (payment.customerId !== job.customerId) throw new Error('Billing payment customer mismatch');
     if (payment.status !== 'captured') throw new Error('Billing payment is not captured');
-    if (payment.provisionStatus === 'provisioned') return { paymentId: payment.id, provisionStatus: 'provisioned', idempotent: true };
 
     const state = await this.store.load();
     const customer = state.customers.find((row) => row.id === job.customerId);
@@ -153,11 +152,20 @@ export class RasJobWorker {
       const profile = await this.adapter.createProfile({ customerId: customer.id, name: customer.name, email: customer.email });
       zernioProfileId = profile.zernioProfileId;
     }
-    const includedSlots = customer.entitlement?.connectSlots.includedSlots ?? 1;
+    // Every captured paid base plan includes one first-month Connect Slot. Older
+    // pending entitlement projections may contain 0; preserve paid extras but never
+    // let that stale value erase the included slot.
+    const priorIncludedSlots = customer.entitlement?.connectSlots.includedSlots ?? 0;
+    const includedSlots = Math.max(1, priorIncludedSlots);
     const previouslyPurchasedSlots = customer.entitlement?.connectSlots.purchasedSlots ?? Math.max(0, (customer.maxConnectedAccounts ?? includedSlots) - includedSlots);
-    const purchasedSlots = previouslyPurchasedSlots + payment.extraConnectSlots;
+    const purchasedSlots = payment.provisionStatus === 'provisioned' ? previouslyPurchasedSlots : previouslyPurchasedSlots + payment.extraConnectSlots;
     const totalSlots = includedSlots + purchasedSlots;
     const activeConnectedAccounts = state.connectedAccounts.filter((row) => row.customerId === customer.id && row.status === 'connected').length;
+    const alreadyConsistent = payment.provisionStatus === 'provisioned'
+      && priorIncludedSlots === includedSlots
+      && customer.maxConnectedAccounts === totalSlots
+      && customer.entitlement?.connectSlots.totalSlots === totalSlots;
+    if (alreadyConsistent) return { paymentId: payment.id, provisionStatus: 'provisioned', totalSlots, idempotent: true };
     await this.store.upsertCustomerEntitlement({
       customerId: customer.id,
       maxConnectedAccounts: totalSlots,
