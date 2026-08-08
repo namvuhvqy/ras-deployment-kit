@@ -696,6 +696,8 @@ export class JsonRasStore {
           customerEmail: customer?.email ?? '',
           provider: payment.provider,
           status: payment.status,
+          reconciliationStatus: payment.reconciliationStatus ?? 'clear',
+          reconciliationReason: payment.reconciliationReason,
           provisionStatus: payment.provisionStatus,
           plan: payment.plan,
           billingCycle: payment.billingCycle,
