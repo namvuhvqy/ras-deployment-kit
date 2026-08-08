@@ -466,6 +466,13 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/admin/billing-overview') {
+    const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
+    if (!admin) { endAdminAccessError(res, Boolean(session)); return; }
+    res.end(JSON.stringify({ ok: true, ...(await store.getAdminBillingOverview()) }));
+    return;
+  }
+
   if (req.method === 'GET' && req.url === '/admin/customers') {
     const session = await requireSessionPrincipal(req); const admin = await requireAdminSession(req);
     if (!admin) { endAdminAccessError(res, Boolean(session)); return; }

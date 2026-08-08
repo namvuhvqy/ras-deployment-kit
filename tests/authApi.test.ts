@@ -222,6 +222,13 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     assert.equal(servicePackagesPayload.servicePackages[0].includedAgents, 2);
     const operatorDenied = await fetch(`http://127.0.0.1:${port}/admin/customers`, { headers: { authorization: `Bearer ${operatorToken}` } });
     assert.equal(operatorDenied.status, 403);
+    const operatorBillingDenied = await fetch(`http://127.0.0.1:${port}/admin/billing-overview`, { headers: { authorization: `Bearer ${operatorToken}` } });
+    assert.equal(operatorBillingDenied.status, 403);
+    const adminBilling = await fetch(`http://127.0.0.1:${port}/admin/billing-overview`, { headers: { authorization: `Bearer ${loginPayload.token}` } });
+    assert.equal(adminBilling.status, 200);
+    const adminBillingPayload = (await adminBilling.json()) as { summary: { captured: number }; payments: Array<Record<string, unknown>> };
+    assert.equal(adminBillingPayload.summary.captured, 0);
+    assert.deepEqual(adminBillingPayload.payments, []);
 
     const assignOps = await fetch(`http://127.0.0.1:${port}/admin/customers/cust_ops/assignments`, {
       method: 'POST',

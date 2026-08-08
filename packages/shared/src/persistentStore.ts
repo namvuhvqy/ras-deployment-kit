@@ -682,6 +682,45 @@ export class JsonRasStore {
     return { customer, orders: state.orders.filter((row) => row.customerId === customerId), profileSlots: state.profileSlots.filter((row) => row.customerId === customerId), sandbox: customer.sandboxId ? state.sandboxes.find((row) => row.id === customer.sandboxId) : undefined, agents: state.agents.filter((row) => row.customerId === customerId), auditLogs: state.auditLogs.filter((row) => row.customerId === customerId).sort((a, b) => Date.parse(b.createdAtIso) - Date.parse(a.createdAtIso)) };
   }
 
+  async getAdminBillingOverview() {
+    const state = await this.load();
+    const customers = new Map(state.customers.map((customer) => [customer.id, customer]));
+    const payments = [...state.billingPayments]
+      .sort((a, b) => Date.parse(b.updatedAtIso) - Date.parse(a.updatedAtIso))
+      .map((payment) => {
+        const customer = customers.get(payment.customerId);
+        const slots = customer?.entitlement?.connectSlots;
+        return {
+          customerId: payment.customerId,
+          customerName: customer?.name ?? 'Unknown customer',
+          customerEmail: customer?.email ?? '',
+          provider: payment.provider,
+          status: payment.status,
+          provisionStatus: payment.provisionStatus,
+          plan: payment.plan,
+          billingCycle: payment.billingCycle,
+          amount: payment.amount,
+          currency: payment.currency,
+          extraConnectSlots: payment.extraConnectSlots,
+          retryCount: payment.retryCount,
+          provisionedAtIso: payment.provisionedAtIso,
+          updatedAtIso: payment.updatedAtIso,
+          quota: slots ? { includedSlots: slots.includedSlots, purchasedSlots: slots.purchasedSlots, totalSlots: slots.totalSlots, activeConnectedAccounts: slots.activeConnectedAccounts } : undefined,
+        };
+      });
+    const count = (predicate: (payment: RasBillingPayment) => boolean) => state.billingPayments.filter(predicate).length;
+    return {
+      summary: {
+        captured: count((payment) => payment.status === 'captured'),
+        provisioned: count((payment) => payment.provisionStatus === 'provisioned'),
+        pending: count((payment) => payment.provisionStatus === 'pending' || payment.provisionStatus === 'pending_retry'),
+        failed: count((payment) => payment.status === 'failed' || payment.provisionStatus === 'failed'),
+        quotaDrift: state.customers.filter((customer) => customer.entitlement?.basePlan?.status === 'active' && (customer.entitlement.connectSlots.totalSlots !== customer.maxConnectedAccounts || customer.entitlement.connectSlots.includedSlots < 1)).length,
+      },
+      payments,
+    };
+  }
+
   async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
     const state = await this.load();
     const now = new Date().toISOString();
