@@ -731,6 +731,16 @@ const server = createServer(async (req, res) => {
     res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent })); return;
   }
 
+  if (req.method === 'GET' && req.url?.startsWith('/billing/checkout-intents/')) {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    const intentId = decodeURIComponent(req.url.slice('/billing/checkout-intents/'.length));
+    if (!intentId || intentId.includes('/')) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+    const intent = await store.getCheckoutIntent(intentId);
+    if (!intent || intent.customerId !== dashboard.customer.id) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+    res.end(JSON.stringify({ ok: true, intent })); return;
+  }
+
   if (req.method === 'POST' && req.url === '/billing/checkout-intents/bind-paypal-order') {
     if (!requireInternalAccess(req)) { endInternalAccessError(res); return; }
     const body = await readJsonBody(req);
@@ -755,15 +765,9 @@ const server = createServer(async (req, res) => {
     if (!intentId || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' })); return; }
     const intentBefore = await store.getCheckoutIntent(intentId);
     if (!intentBefore) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
-    const consumed = await store.consumeCheckoutIntentAfterCapture({ intentId, customerId: intentBefore.customerId, paypalOrderId, transactionId });
-    if (!consumed.intent) { res.statusCode = consumed.error === 'expired' ? 410 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${consumed.error}` })); return; }
-    const intent = consumed.intent;
-    const customer = (await store.load()).customers.find((row) => row.id === intent.customerId);
-    if (!customer) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' })); return; }
-    const now = new Date().toISOString();
-    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body, createdAtIso: now, updatedAtIso: now });
-    const queued = await store.enqueueJobIfAbsent({ id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now });
-    res.statusCode = 202; res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } })); return;
+    const finalized = await store.finalizeCapturedPaymentAndEnqueue({ intentId, customerId: intentBefore.customerId, paypalOrderId, transactionId, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body });
+    if (!finalized.payment || !finalized.job) { res.statusCode = finalized.error === 'expired' ? 410 : finalized.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${finalized.error}` })); return; }
+    res.statusCode = 202; res.end(JSON.stringify({ ok: true, payment: { id: finalized.payment.id, provisionStatus: finalized.payment.provisionStatus, transactionId }, provisioning: { queued: finalized.job.status === 'queued', jobId: finalized.job.id } })); return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/entitlements/provision') {

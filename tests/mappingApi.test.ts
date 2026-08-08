@@ -654,6 +654,9 @@ test('checkout capture uses an owned bound intent rather than relay supplied pri
     assert.equal(created.status, 201);
     const intent = ((await created.json()) as { intent: { id: string; amount: string } }).intent;
     assert.equal(intent.amount, '25');
+    const ownedRead = await fetch(`${baseUrl}/billing/checkout-intents/${encodeURIComponent(intent.id)}`, { headers: { authorization: 'Bearer token_a' } });
+    assert.equal(ownedRead.status, 200);
+    assert.equal(((await ownedRead.json()) as { intent: { id: string } }).intent.id, intent.id);
     const bind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, customer_id: 'cust_a', paypal_order_id: 'ORDER-INTENT-1' }) });
     assert.equal(bind.status, 200);
     const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-INTENT-1', captureStatus: 'COMPLETED', total_amount: 1, plan: 'max' }) });

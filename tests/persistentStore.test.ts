@@ -333,6 +333,26 @@ test('JsonRasStore summarizes sandbox and required RAS agent lifecycle blockers'
 });
 
 
+test('JsonRasStore finalizes a capture with its durable provision outbox atomically and idempotently', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_atomic', name: 'Atomic', status: 'active', createdAtIso: '2029-01-01T00:00:00.000Z', updatedAtIso: '2029-01-01T00:00:00.000Z' });
+    const intent = await store.createCheckoutIntent({ customerId: 'cust_atomic', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, amount: '19', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_atomic', paypalOrderId: 'ORDER-ATOMIC' });
+    const first = await store.finalizeCapturedPaymentAndEnqueue({ intentId: intent.id, customerId: 'cust_atomic', paypalOrderId: 'ORDER-ATOMIC', transactionId: 'CAP-ATOMIC' });
+    assert.equal(first.payment?.transactionId, 'CAP-ATOMIC');
+    assert.equal(first.job?.id, `provision_payment_${first.payment?.id}`);
+    const replay = await store.finalizeCapturedPaymentAndEnqueue({ intentId: intent.id, customerId: 'cust_atomic', paypalOrderId: 'ORDER-ATOMIC', transactionId: 'CAP-ATOMIC' });
+    assert.equal(replay.payment?.id, first.payment?.id);
+    assert.equal(replay.job?.id, first.job?.id);
+    const persisted = await store.load();
+    assert.equal(persisted.billingPayments.filter((row) => row.id === first.payment?.id).length, 1);
+    assert.equal(persisted.jobs.filter((row) => row.id === first.job?.id).length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('JsonRasStore checkout intents bind one PayPal order and consume exactly once', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-store-'));
   try {
