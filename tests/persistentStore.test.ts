@@ -402,5 +402,7 @@ test('checkout guard blocks in-flight/recent duplicates and system principals bu
     assert.equal((await store.createCheckoutIntent(input)).status, 'created');
     await store.markCustomerSystemPrincipal('cust_checkout');
     await assert.rejects(() => store.createCheckoutIntent({ ...input, plan: 'pro', amount: '45' }), /checkout_not_available_for_system_principal/);
+    assert.equal(await store.setCustomerSystemPrincipal('cust_checkout', false), true);
+    assert.equal((await store.load()).customers.find((customer) => customer.id === 'cust_checkout')?.isSystemPrincipal, false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

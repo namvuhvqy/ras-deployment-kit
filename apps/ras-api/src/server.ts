@@ -581,8 +581,8 @@ const server = createServer(async (req, res) => {
       const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
       const principal = await store.resolvePrincipal(session.token);
       if (!principal?.userId || !principal.customerId) throw new Error('google_session_principal_missing');
-      if (systemAdminUserIds().has(principal.userId)) await store.markCustomerSystemPrincipal(principal.customerId);
-      else if (!(await store.getDashboardForSession(session.token))) throw new Error('google_session_dashboard_missing');
+      await store.setCustomerSystemPrincipal(principal.customerId, systemAdminUserIds().has(principal.userId));
+      if (!(await store.getDashboardForSession(session.token))) throw new Error('google_session_dashboard_missing');
       res.statusCode = 302;
       res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo, state.frontendOrigin));
       res.end();
@@ -639,8 +639,8 @@ const server = createServer(async (req, res) => {
       const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
       const principal = await store.resolvePrincipal(session.token);
       if (!principal?.userId || !principal.customerId) throw new Error('google_session_principal_missing');
-      if (systemAdminUserIds().has(principal.userId)) await store.markCustomerSystemPrincipal(principal.customerId);
-      else if (!(await store.getDashboardForSession(session.token))) throw new Error('google_session_dashboard_missing');
+      await store.setCustomerSystemPrincipal(principal.customerId, systemAdminUserIds().has(principal.userId));
+      if (!(await store.getDashboardForSession(session.token))) throw new Error('google_session_dashboard_missing');
       res.end(
         JSON.stringify({
           ok: true,

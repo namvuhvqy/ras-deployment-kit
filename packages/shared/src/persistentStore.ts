@@ -762,13 +762,19 @@ export class JsonRasStore {
     });
   }
 
-  async markCustomerSystemPrincipal(customerId: string): Promise<boolean> {
+  /** Mirrors the stable server allow-list after authentication; it never uses email as authority. */
+  async setCustomerSystemPrincipal(customerId: string, isSystemPrincipal: boolean): Promise<boolean> {
     return this.mutate((state) => {
       const customer = state.customers.find((row) => row.id === customerId);
       if (!customer) return false;
-      customer.isSystemPrincipal = true; customer.updatedAtIso = new Date().toISOString();
+      if (Boolean(customer.isSystemPrincipal) === isSystemPrincipal) return false;
+      customer.isSystemPrincipal = isSystemPrincipal; customer.updatedAtIso = new Date().toISOString();
       return true;
     });
+  }
+
+  async markCustomerSystemPrincipal(customerId: string): Promise<boolean> {
+    return this.setCustomerSystemPrincipal(customerId, true);
   }
 
   async getCheckoutIntent(id: string): Promise<RasCheckoutIntent | undefined> {
