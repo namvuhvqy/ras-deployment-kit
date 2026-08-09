@@ -70,30 +70,34 @@ async function verifyPaypalSandboxWebhook(rawBody: Buffer, req: IncomingMessage,
   const certUrl = firstHeader(req, 'paypal-cert-url');
   const authAlgo = firstHeader(req, 'paypal-auth-algo');
   if (!transmissionId || !transmissionTime || !transmissionSig || !certUrl || !authAlgo) return false;
-  const accessToken = await paypalSandboxAccessToken();
-  if (!accessToken) return false;
   let webhookEvent: Record<string, unknown>;
   try {
     webhookEvent = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>;
   } catch {
     return false;
   }
-  const response = await fetch(`${PAYPAL_SANDBOX_API}/v1/notifications/verify-webhook-signature`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      auth_algo: authAlgo,
-      cert_url: certUrl,
-      transmission_id: transmissionId,
-      transmission_sig: transmissionSig,
-      transmission_time: transmissionTime,
-      webhook_id: webhookId,
-      webhook_event: webhookEvent,
-    }),
-  });
-  if (!response.ok) return false;
-  const payload = (await response.json()) as { verification_status?: string };
-  return payload.verification_status === 'SUCCESS';
+  try {
+    const accessToken = await paypalSandboxAccessToken();
+    if (!accessToken) return false;
+    const response = await fetch(`${PAYPAL_SANDBOX_API}/v1/notifications/verify-webhook-signature`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        auth_algo: authAlgo,
+        cert_url: certUrl,
+        transmission_id: transmissionId,
+        transmission_sig: transmissionSig,
+        transmission_time: transmissionTime,
+        webhook_id: webhookId,
+        webhook_event: webhookEvent,
+      }),
+    });
+    if (!response.ok) return false;
+    const payload = (await response.json()) as { verification_status?: string };
+    return payload.verification_status === 'SUCCESS';
+  } catch {
+    return false;
+  }
 }
 
 function bearerToken(req: IncomingMessage): string | undefined {
