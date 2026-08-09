@@ -69,6 +69,11 @@ test('staging-only disposable fixture is hidden by default and requires internal
     assert.match(payload.fixture.email, /@example\.test$/);
     assert.match(payload.fixture.password, /^e2e_/);
     assert.match(payload.fixture.sessionToken, /^sess_/);
+    const dashboard = await fetch(`${baseUrl}/dashboard`, { headers: { authorization: `Bearer ${payload.fixture.sessionToken}` } });
+    assert.equal(dashboard.status, 200);
+    const customer = ((await dashboard.json()) as { dashboard: { customer: { entitlement?: { basePlan?: { status?: string; expiresAtIso?: string } } } } }).dashboard.customer;
+    assert.equal(customer.entitlement?.basePlan?.status, 'active');
+    assert.equal(customer.entitlement?.basePlan?.expiresAtIso, payload.fixture.expiresAtIso);
     const replay = await fetch(`${baseUrl}/internal/e2e/fixtures/disposable-tenant`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ras-internal-token': 'test-internal-token' }, body: JSON.stringify({ fixtureId: 'e2e_fixture_12345678' }) });
     assert.equal(replay.status, 409);
   }, { RAS_ENABLE_E2E_TEST_ENDPOINT: 'true', RAS_DEPLOYMENT_ENV: 'staging' });
