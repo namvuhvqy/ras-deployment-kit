@@ -1442,7 +1442,9 @@ export class JsonRasStore {
         && payment.plan === customer.entitlement?.basePlan?.planId
         && payment.billingCycle === customer.entitlement?.basePlan?.billingCycle
         && payment.extraConnectSlots === 0
-        && (!payment.lineItems || payment.lineItems.some((item) => item.kind === 'core_vps')));
+        // Legacy captures predate catalog line items; their captured plan/cycle is the
+        // only durable Core provenance. A populated catalog must explicitly include Core.
+        && (payment.lineItems === undefined || payment.lineItems.length === 0 || payment.lineItems.some((item) => item.kind === 'core_vps')));
       if (eligible.length !== 1) continue;
       const payment = eligible[0]!;
       const capturedAtIso = capturedAtIsoFromPayment(payment);
