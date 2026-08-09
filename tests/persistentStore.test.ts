@@ -15,14 +15,35 @@ test('JsonRasStore migrates an empty store with current schema metadata', async 
     const state = JSON.parse(await readFile(path, 'utf8'));
 
     assert.equal(result.created, true);
-    assert.equal(result.previousVersion, 2);
-    assert.equal(result.currentVersion, 2);
+    assert.equal(result.previousVersion, 3);
+    assert.equal(result.currentVersion, 3);
     assert.match(result.sql, /CREATE TABLE IF NOT EXISTS customers/);
     assert.deepEqual(state.customers, []);
     assert.deepEqual(state.jobs, []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('migration v3 backfills expiry only from one eligible captured core payment', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-store-expiry-'));
+  try {
+    const path = join(dir, 'ras-store.json');
+    const store = new JsonRasStore(path); await store.migrate();
+    const state = JSON.parse(await readFile(path, 'utf8'));
+    state.schemaVersion = 2;
+    const capturedAtIso = '2026-08-08T10:01:14Z';
+    state.customers.push({ id: 'cust_paid', name: 'Paid', status: 'active', updatedAtIso: capturedAtIso, entitlement: { basePlan: { planId: 'lite', status: 'active', billingCycle: 'monthly', vps: { type: 'dedicated' }, agents: { included: 2, kinds: ['ras1-hermes'] } }, connectSlots: { status: 'active', includedSlots: 1, purchasedSlots: 0, trialSlots: 0, totalSlots: 1, activeConnectedAccounts: 0 }, addOns: [] } });
+    state.billingPayments.push({ id: 'paypal:core', provider: 'paypal', customerId: 'cust_paid', paypalOrderId: 'core', transactionId: 'capture', status: 'captured', provisionStatus: 'provisioned', amount: '19', currency: 'USD', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, lineItems: [{ sku: 'core-vps-lite', kind: 'core_vps', quantity: 1, unitAmount: '19', amount: '19', currency: 'USD', billingCycle: 'monthly', servicePeriodStartIso: capturedAtIso, servicePeriodEndIso: '2026-09-08T10:01:14.000Z', proration: false }], rawCapture: { purchase_units: [{ payments: { captures: [{ status: 'COMPLETED', create_time: capturedAtIso }] } }] }, retryCount: 0, createdAtIso: capturedAtIso, updatedAtIso: capturedAtIso });
+    await writeFile(path, JSON.stringify(state));
+    await store.migrate();
+    const migrated = await store.load();
+    assert.equal(migrated.customers[0]?.entitlement?.basePlan.expiresAtIso, '2026-09-08T10:01:14.000Z');
+    assert.equal(migrated.billingPayments[0]?.servicePeriodStartIso, capturedAtIso);
+    assert.equal(migrated.auditLogs.filter((row) => row.action === 'billing.expiry.backfilled_from_captured_payment').length, 1);
+    await store.migrate();
+    assert.equal((await store.load()).auditLogs.filter((row) => row.action === 'billing.expiry.backfilled_from_captured_payment').length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('two store instances preserve concurrent schedule and audit mutations', async () => {
@@ -60,7 +81,7 @@ for (const owner of [undefined, '{malformed']) {
       const old = new Date(Date.now() - 2_000); await utimes(lockPath, old, old);
       await store.appendAuditLog({ id: 'after_orphan', action: 'recovered', targetType: 'test', metadata: {}, createdAtIso: new Date().toISOString() });
       const state = JSON.parse(await readFile(path, 'utf8'));
-      assert.equal(state.auditLogs[0]?.id, 'after_orphan'); assert.equal(state.schemaVersion, 2);
+      assert.equal(state.auditLogs[0]?.id, 'after_orphan'); assert.equal(state.schemaVersion, 3);
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 }

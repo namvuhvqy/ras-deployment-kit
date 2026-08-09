@@ -27,6 +27,33 @@ import type {
   RasUser,
 } from './types.js';
 
+function strictIso(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return undefined;
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) && new Date(instant).toISOString().replace('.000Z', 'Z') === value.replace('.000Z', 'Z') ? value : undefined;
+}
+
+function capturedAtIsoFromPayment(payment: RasBillingPayment): string | undefined {
+  const units = Array.isArray(payment.rawCapture?.purchase_units) ? payment.rawCapture.purchase_units : [];
+  for (const unit of units) {
+    if (!unit || typeof unit !== 'object') continue;
+    const payments = (unit as { payments?: unknown }).payments;
+    const captures = payments && typeof payments === 'object' && Array.isArray((payments as { captures?: unknown }).captures) ? (payments as { captures: unknown[] }).captures : [];
+    for (const capture of captures) {
+      if (!capture || typeof capture !== 'object') continue;
+      const row = capture as { status?: unknown; create_time?: unknown };
+      if (row.status === 'COMPLETED') return strictIso(row.create_time);
+    }
+  }
+  return undefined;
+}
+
+function addBillingCycle(startIso: string, cycle: 'monthly' | 'yearly'): string {
+  const end = new Date(startIso);
+  end.setUTCMonth(end.getUTCMonth() + (cycle === 'yearly' ? 12 : 1));
+  return end.toISOString();
+}
+
 export interface RasPersistentState {
   schemaVersion: number;
   migratedAtIso: string;
@@ -285,6 +312,7 @@ export class JsonRasStore {
     };
 
     const previousVersion = state.schemaVersion ?? 0;
+    this.migrateCapturedCoreExpiry(state, previousVersion, now);
     state.schemaVersion = RAS_SCHEMA_VERSION;
     state.migratedAtIso = now;
     state.users ??= [];
@@ -1400,6 +1428,41 @@ export class JsonRasStore {
 
   async appendAuditLog(log: StoredAuditLog): Promise<StoredAuditLog> {
     return this.mutate((state) => { state.auditLogs.push(log); return log; });
+  }
+
+  private migrateCapturedCoreExpiry(state: RasPersistentState, previousVersion: number, migratedAtIso: string): void {
+    if (previousVersion >= 3) return;
+    for (const customer of state.customers) {
+      const basePlan = customer.entitlement?.basePlan;
+      if (customer.e2eDisposable || !basePlan || basePlan.expiresAtIso) continue;
+      const eligible = state.billingPayments.filter((payment) => payment.customerId === customer.id
+        && payment.status === 'captured'
+        && payment.provisionStatus === 'provisioned'
+        && payment.reconciliationStatus !== 'duplicate_review'
+        && payment.plan === customer.entitlement?.basePlan?.planId
+        && payment.billingCycle === customer.entitlement?.basePlan?.billingCycle
+        && payment.extraConnectSlots === 0
+        && (!payment.lineItems || payment.lineItems.some((item) => item.kind === 'core_vps')));
+      if (eligible.length !== 1) continue;
+      const payment = eligible[0]!;
+      const capturedAtIso = capturedAtIsoFromPayment(payment);
+      if (!capturedAtIso) continue;
+      const expiresAtIso = addBillingCycle(capturedAtIso, payment.billingCycle);
+      basePlan.expiresAtIso = expiresAtIso;
+      customer.updatedAtIso = migratedAtIso;
+      payment.servicePeriodStartIso = capturedAtIso;
+      payment.servicePeriodEndIso = expiresAtIso;
+      payment.updatedAtIso = migratedAtIso;
+      state.auditLogs.push({
+        id: `audit_expiry_backfill_${payment.id}`,
+        customerId: customer.id,
+        action: 'billing.expiry.backfilled_from_captured_payment',
+        targetType: 'customer',
+        targetId: customer.id,
+        metadata: { paymentId: payment.id, capturedAtIso, expiresAtIso, billingCycle: payment.billingCycle },
+        createdAtIso: migratedAtIso,
+      });
+    }
   }
 
   private async createEmpty(): Promise<RasPersistentState> {

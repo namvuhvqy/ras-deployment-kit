@@ -1,4 +1,4 @@
-export const RAS_SCHEMA_VERSION = 2;
+export const RAS_SCHEMA_VERSION = 3;
 
 export const createTableStatements = [
   `CREATE TABLE IF NOT EXISTS customers (
