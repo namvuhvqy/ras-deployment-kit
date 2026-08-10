@@ -122,6 +122,8 @@ export interface RasSession {
   userId: string;
   expiresAtIso: string;
   createdAtIso: string;
+  revokedAtIso?: string;
+  rotatedFromSessionId?: string;
 }
 
 /** External API token. The plaintext credential is never persisted. */

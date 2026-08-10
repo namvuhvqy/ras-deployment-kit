@@ -127,10 +127,8 @@ function firstNumberField(body: Record<string, unknown>, fields: string[]): numb
 
 const GOOGLE_OAUTH_SCOPE = 'openid email profile';
 
-function publicBaseUrl(req: IncomingMessage): string {
-  const proto = firstHeader(req, 'x-forwarded-proto') ?? 'http';
-  const host = firstHeader(req, 'x-forwarded-host') ?? firstHeader(req, 'host') ?? `127.0.0.1:${port}`;
-  return `${proto}://${host}`;
+function publicBaseUrl(_req: IncomingMessage): string {
+  return process.env.RAS_CANONICAL_ORIGIN ?? process.env.GOOGLE_OAUTH_CALLBACK_URL?.replace(/\/auth\/google\/callback$/, '') ?? `http://127.0.0.1:${port}`;
 }
 
 function googleCallbackUrl(req: IncomingMessage): string {
@@ -147,22 +145,15 @@ function safeRedirectPath(value: string | undefined): string {
 
 function allowedFrontendOrigin(value: string | undefined): string {
   const canonical = new URL(frontendBaseUrl()).origin;
+  const allowed = new Set([canonical, ...(process.env.RAS_FRONTEND_ORIGINS ?? '').split(',').map((origin) => origin.trim()).filter(Boolean)]);
   if (!value) return canonical;
-  try {
-    const candidate = new URL(value);
-    if (candidate.protocol !== 'https:' || candidate.pathname !== '/' || candidate.search || candidate.hash) return canonical;
-    if (candidate.origin === canonical) return canonical;
-    return /^https:\/\/landingpage-ban-hang-[a-z0-9-]+-namvuhvqys-projects\.vercel\.app$/.test(candidate.origin)
-      ? candidate.origin
-      : canonical;
-  } catch {
-    return canonical;
-  }
+  try { const candidate = new URL(value); return candidate.protocol === 'https:' && candidate.pathname === '/' && !candidate.search && !candidate.hash && allowed.has(candidate.origin) ? candidate.origin : canonical; }
+  catch { return canonical; }
 }
 
-function frontendOAuthCallbackUrl(token: string, redirectTo: string, frontendOrigin: string): string {
+function frontendOAuthCallbackUrl(code: string, redirectTo: string, frontendOrigin: string): string {
   const callback = new URL('/api/auth/google/callback', frontendOrigin);
-  callback.searchParams.set('token', token);
+  callback.searchParams.set('code', code);
   callback.searchParams.set('redirectTo', safeRedirectPath(redirectTo));
   return callback.toString();
 }
@@ -243,9 +234,10 @@ function endCustomerAccessError(res: { statusCode: number; setHeader: (name: str
 }
 
 function requireInternalAccess(req: IncomingMessage): boolean {
-  const token = process.env.RAS_INTERNAL_API_TOKEN;
-  if (!token) return false;
-  return firstHeader(req, 'x-ras-internal-token') === token;
+  const configured = (process.env.RAS_INTERNAL_API_TOKENS ?? process.env.RAS_INTERNAL_API_TOKEN ?? '').split(',').map((token) => token.trim()).filter(Boolean);
+  const supplied = firstHeader(req, 'x-ras-internal-token') ?? '';
+  const suppliedBytes = Buffer.from(supplied);
+  return configured.some((token) => { const expected = Buffer.from(token); return expected.length === suppliedBytes.length && timingSafeEqual(expected, suppliedBytes); });
 }
 
 function endInternalAccessError(res: { statusCode: number; end: (chunk: string) => void }) {
@@ -299,6 +291,15 @@ function mediaUrlsField(body: Record<string, unknown>): string[] | undefined {
 
 function isHttpUrl(value: string): boolean {
   try { const protocol = new URL(value).protocol; return protocol === 'http:' || protocol === 'https:'; } catch { return false; }
+}
+
+function sanitizedPaypalCapture(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = JSON.stringify(value); if (Buffer.byteLength(raw) > 16_384) return undefined;
+  const capture = value as Record<string, unknown>;
+  const allowed = ['id', 'status', 'create_time', 'update_time', 'amount', 'final_capture', 'seller_receivable_breakdown'];
+  const result = Object.fromEntries(allowed.filter((key) => capture[key] !== undefined).map((key) => [key, capture[key]]));
+  return typeof result.id === 'string' && typeof result.status === 'string' ? result : undefined;
 }
 
 function canonicalPostHash(value: Record<string, unknown>): string {
@@ -507,6 +508,25 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/auth/google/exchange') {
+    const origin = firstHeader(req, 'origin'); const body = await readJsonBody(req);
+    if (!origin || allowedFrontendOrigin(origin) !== origin) { res.statusCode = 403; res.end(JSON.stringify({ ok: false, error: 'untrusted_frontend_origin' })); return; }
+    const handoff = await store.consumeOAuthHandoff(stringField(body, 'code'), origin);
+    if (!handoff) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_or_expired_oauth_handoff' })); return; }
+    res.end(JSON.stringify({ ok: true, token: handoff.sessionToken, redirectTo: handoff.redirectTo })); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/auth/logout') {
+    if (!await store.revokeSession(bearerToken(req) ?? '')) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    res.statusCode = 204; res.end(); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/auth/session/rotate') {
+    const session = await store.rotateSession(bearerToken(req) ?? '');
+    if (!session) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    res.end(JSON.stringify({ ok: true, token: session.token, expiresAtIso: session.expiresAtIso })); return;
+  }
+
   if (req.method === 'POST' && req.url === '/auth/login') {
     const body = await readJsonBody(req);
     const session = await store.login({ email: String(body.email ?? ''), password: String(body.password ?? '') });
@@ -543,8 +563,9 @@ const server = createServer(async (req, res) => {
       const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
       const dashboard = await store.getDashboardForSession(session.token);
       if (!dashboard) throw new Error('google_session_dashboard_missing');
+      const handoff = await store.createOAuthHandoff({ sessionToken: session.token, frontendOrigin: state.frontendOrigin, redirectTo: state.redirectTo });
       res.statusCode = 302;
-      res.setHeader('location', frontendOAuthCallbackUrl(session.token, state.redirectTo, state.frontendOrigin));
+      res.setHeader('location', frontendOAuthCallbackUrl(handoff, state.redirectTo, state.frontendOrigin));
       res.end();
     } catch (error) {
       const failed = new URL('/login', frontendBaseUrl());
@@ -599,15 +620,8 @@ const server = createServer(async (req, res) => {
       const session = await store.createSessionForGoogleUser({ email: profile.email, displayName: profile.displayName });
       const dashboard = await store.getDashboardForSession(session.token);
       if (!dashboard) throw new Error('google_session_dashboard_missing');
-      res.end(
-        JSON.stringify({
-          ok: true,
-          token: session.token,
-          expiresAtIso: session.expiresAtIso,
-          customerId: dashboard.customer.id,
-          redirectTo: state.redirectTo,
-        }),
-      );
+      const handoff = await store.createOAuthHandoff({ sessionToken: session.token, frontendOrigin: state.frontendOrigin, redirectTo: state.redirectTo });
+      res.end(JSON.stringify({ ok: true, code: handoff, customerId: dashboard.customer.id, redirectTo: state.redirectTo }));
     } catch (error) {
       res.statusCode = 502;
       res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
@@ -777,8 +791,10 @@ const server = createServer(async (req, res) => {
     const intent = consumed.intent;
     const customer = (await store.load()).customers.find((row) => row.id === intent.customerId);
     if (!customer) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' })); return; }
+    const rawCapture = sanitizedPaypalCapture(body.rawCapture);
+    if (body.rawCapture !== undefined && (!rawCapture || rawCapture.id !== transactionId || rawCapture.status !== 'COMPLETED')) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_raw_capture' })); return; }
     const now = new Date().toISOString();
-    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture: typeof body.rawCapture === 'object' && body.rawCapture !== null && !Array.isArray(body.rawCapture) ? body.rawCapture as Record<string, unknown> : body, createdAtIso: now, updatedAtIso: now });
+    const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture, createdAtIso: now, updatedAtIso: now });
     const queued = await store.enqueueJobIfAbsent({ id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now });
     res.statusCode = 202; res.end(JSON.stringify({ ok: true, payment: { id: payment.id, provisionStatus: payment.provisionStatus, transactionId }, provisioning: { queued: queued.inserted, jobId: queued.job.id } })); return;
   }
