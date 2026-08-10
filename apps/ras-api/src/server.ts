@@ -696,6 +696,23 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  const analyticsAvailabilityMatch = req.url ? /^\/customers\/([^/]+)\/analytics\/availability$/.exec(new URL(req.url, 'http://localhost').pathname) : null;
+  if (analyticsAvailabilityMatch) {
+    const customerId = decodeURIComponent(analyticsAvailabilityMatch[1]);
+    const access = await requireCustomerAccess(req, customerId, 'analytics:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    if (req.method !== 'GET') { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    const availability = await store.getAnalyticsAvailability(customerId);
+    if (!availability) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'customer_not_found' })); return; }
+    if (!availability.available) {
+      res.statusCode = 501;
+      res.end(JSON.stringify({ ok: false, error: 'analytics_not_available', reason: availability.reason }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, availability: { feature: 'analytics', mode: 'read_only', permittedAccounts: availability.permittedAccounts } }));
+    return;
+  }
+
   if (req.method === 'POST' && req.url === '/billing/entitlements/activate-trial') {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) {

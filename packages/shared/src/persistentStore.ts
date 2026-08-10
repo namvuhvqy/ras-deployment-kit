@@ -775,6 +775,33 @@ export class JsonRasStore {
     return updated;
   }
 
+  async getAnalyticsAvailability(customerId: string): Promise<{
+    available: boolean;
+    reason?: 'analytics_entitlement_inactive' | 'verified_account_required' | 'permitted_profile_mapping_required';
+    permittedAccounts: Array<{ id: string; platform: ConnectedAccount['platform'] }>;
+  } | undefined> {
+    const state = await this.load();
+    const customer = state.customers.find((row) => row.id === customerId);
+    if (!customer) return undefined;
+    if (customer.addOnStatus?.analytics !== 'active') {
+      return { available: false, reason: 'analytics_entitlement_inactive', permittedAccounts: [] };
+    }
+    const permittedProfiles = new Set([...(customer.zernioProfileIds ?? []), customer.zernioProfileId].filter(Boolean));
+    const verifiedAccounts = state.connectedAccounts.filter((account) =>
+      account.customerId === customer.id && account.status === 'connected' && Boolean(account.lastVerifiedAtIso),
+    );
+    if (verifiedAccounts.length === 0) {
+      return { available: false, reason: 'verified_account_required', permittedAccounts: [] };
+    }
+    const permittedAccounts = verifiedAccounts
+      .filter((account) => permittedProfiles.has(account.zernioProfileId ?? account.profileId))
+      .map((account) => ({ id: account.id, platform: account.platform }));
+    if (permittedAccounts.length === 0) {
+      return { available: false, reason: 'permitted_profile_mapping_required', permittedAccounts: [] };
+    }
+    return { available: true, permittedAccounts };
+  }
+
   async getCustomerMapping(customerId: string): Promise<CustomerMapping | undefined> {
     const state = await this.load();
     const customer = state.customers.find((row) => row.id === customerId);
