@@ -784,6 +784,10 @@ const server = createServer(async (req, res) => {
     const transactionId = stringField(body, 'transaction_id') ?? stringField(body, 'transactionId');
     const captureStatus = stringField(body, 'capture_status') ?? stringField(body, 'captureStatus') ?? stringField(body, 'status');
     if (!intentId || !paypalOrderId || !transactionId || captureStatus !== 'COMPLETED') { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_captured_payment' })); return; }
+    // Validate untrusted provider evidence before changing the single-use intent.
+    // A malformed relay payload must be safely retryable with the same bound order.
+    const rawCapture = sanitizedPaypalCapture(body.rawCapture);
+    if (body.rawCapture !== undefined && (!rawCapture || rawCapture.id !== transactionId || rawCapture.status !== 'COMPLETED')) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_raw_capture' })); return; }
     const intentBefore = await store.getCheckoutIntent(intentId);
     if (!intentBefore) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
     const consumed = await store.consumeCheckoutIntentAfterCapture({ intentId, customerId: intentBefore.customerId, paypalOrderId, transactionId });
@@ -791,8 +795,6 @@ const server = createServer(async (req, res) => {
     const intent = consumed.intent;
     const customer = (await store.load()).customers.find((row) => row.id === intent.customerId);
     if (!customer) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_payment_customer' })); return; }
-    const rawCapture = sanitizedPaypalCapture(body.rawCapture);
-    if (body.rawCapture !== undefined && (!rawCapture || rawCapture.id !== transactionId || rawCapture.status !== 'COMPLETED')) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_raw_capture' })); return; }
     const now = new Date().toISOString();
     const payment = await store.recordBillingPaymentCapture({ provider: 'paypal', customerId: customer.id, paypalOrderId, transactionId, status: 'captured', amount: intent.amount, currency: intent.currency, plan: intent.plan, billingCycle: intent.billingCycle, extraConnectSlots: intent.extraConnectSlots, rawCapture, createdAtIso: now, updatedAtIso: now });
     const queued = await store.enqueueJobIfAbsent({ id: `provision_payment_${payment.id}`, customerId: customer.id, profileId: customer.zernioProfileId ?? '', type: 'provision_entitlement', priority: 'P0', status: 'queued', retryCount: 0, payload: { paymentId: payment.id }, createdAtIso: now });
