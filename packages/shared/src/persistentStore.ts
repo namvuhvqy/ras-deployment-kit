@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -53,12 +53,21 @@ export interface RasPersistentState {
   billingPayments: RasBillingPayment[];
   checkoutIntents: RasCheckoutIntent[];
   googleOAuthStates: StoredGoogleOAuthState[];
+  oauthHandoffs: StoredOAuthHandoff[];
 }
 
 export interface StoredGoogleOAuthState {
   state: string;
   redirectTo: string;
   frontendOrigin: string;
+  createdAtMs: number;
+}
+
+export interface StoredOAuthHandoff {
+  codeHash: string;
+  sessionToken: string;
+  frontendOrigin: string;
+  redirectTo: string;
   createdAtMs: number;
 }
 
@@ -282,6 +291,7 @@ export class JsonRasStore {
       billingPayments: [],
       checkoutIntents: [],
       googleOAuthStates: [],
+      oauthHandoffs: [],
     };
 
     const previousVersion = state.schemaVersion ?? 0;
@@ -310,6 +320,7 @@ export class JsonRasStore {
     state.billingPayments ??= [];
     state.checkoutIntents ??= [];
     state.googleOAuthStates ??= [];
+    state.oauthHandoffs ??= [];
     this.pruneWebhookLogs(state, now);
     await this.write(state);
 
@@ -345,6 +356,25 @@ export class JsonRasStore {
     });
   }
 
+  async createOAuthHandoff(input: { sessionToken: string; frontendOrigin: string; redirectTo: string }): Promise<string> {
+    const code = `handoff_${randomBytes(32).toString('base64url')}`;
+    await this.mutate((state) => { const now = Date.now(); state.oauthHandoffs = (state.oauthHandoffs ?? []).filter((row) => now - row.createdAtMs <= 5 * 60_000); state.oauthHandoffs.push({ ...input, codeHash: hashPat(code), createdAtMs: now }); });
+    return code;
+  }
+
+  async consumeOAuthHandoff(code: string | undefined, frontendOrigin: string): Promise<StoredOAuthHandoff | undefined> {
+    if (!code) return undefined;
+    return this.mutate((state) => { const rows = state.oauthHandoffs ?? []; const index = rows.findIndex((row) => secureEqual(row.codeHash, hashPat(code)) && row.frontendOrigin === frontendOrigin); if (index < 0) return undefined; const [row] = rows.splice(index, 1); return Date.now() - row.createdAtMs <= 5 * 60_000 ? row : undefined; });
+  }
+
+  async revokeSession(token: string): Promise<boolean> {
+    return this.mutate((state) => { const session = state.sessions.find((row) => secureEqual(row.token, token) && !row.revokedAtIso); if (!session) return false; session.revokedAtIso = new Date().toISOString(); return true; });
+  }
+
+  async rotateSession(token: string): Promise<RasSession | undefined> {
+    return this.mutate((state) => { const old = state.sessions.find((row) => secureEqual(row.token, token) && !row.revokedAtIso && Date.parse(row.expiresAtIso) > Date.now()); if (!old) return undefined; old.revokedAtIso = new Date().toISOString(); const entropy = randomBytes(32).toString('base64url'); const next: RasSession = { id: `session_${entropy}`, token: `sess_${entropy}`, userId: old.userId, createdAtIso: new Date().toISOString(), expiresAtIso: old.expiresAtIso, rotatedFromSessionId: old.id }; state.sessions.push(next); return next; });
+  }
+
   async upsertUser(user: RasUser): Promise<RasUser> {
     const state = await this.load();
     const normalized = { ...user, email: user.email.toLowerCase() };
@@ -358,7 +388,7 @@ export class JsonRasStore {
   async createSession(input: { userId: string; ttlMs?: number; nowIso?: string }): Promise<RasSession> {
     const now = input.nowIso ?? new Date().toISOString();
     const ttlMs = input.ttlMs ?? 24 * 60 * 60 * 1000;
-    const entropy = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+    const entropy = randomBytes(32).toString('base64url');
     const session: RasSession = {
       id: `session_${entropy}`,
       token: `sess_${entropy}`,
@@ -474,7 +504,7 @@ export class JsonRasStore {
 
   async getDashboardForSession(token: string, nowIso: string = new Date().toISOString()): Promise<RasDashboard | undefined> {
     const state = await this.load();
-    const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
+    const session = state.sessions.find((row) => secureEqual(row.token, token) && !row.revokedAtIso && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
     if (!session) return undefined;
     const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
     if (!user) return undefined;
@@ -529,7 +559,7 @@ export class JsonRasStore {
 
   async resolvePrincipal(token: string, nowIso: string = new Date().toISOString()): Promise<RasPrincipal | undefined> {
     const state = await this.load();
-    const session = state.sessions.find((row) => row.token === token && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
+    const session = state.sessions.find((row) => secureEqual(row.token, token) && !row.revokedAtIso && Date.parse(row.expiresAtIso) > Date.parse(nowIso));
     if (session) {
       const user = state.users.find((row) => row.id === session.userId && row.status === 'active');
       if (user) return { authType: 'session', customerId: user.customerId, userId: user.id, role: user.role, scopes: ['*'] };
@@ -1357,7 +1387,7 @@ export class JsonRasStore {
 
   private async emptyState(): Promise<RasPersistentState> {
     const now = new Date().toISOString();
-    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], orders: [], profileSlots: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], googleOAuthStates: [] };
+    return { schemaVersion: RAS_SCHEMA_VERSION, migratedAtIso: now, users: [], sessions: [], personalAccessTokens: [], apiRateLimitBuckets: [], customers: [], sandboxes: [], agents: [], servicePackages: [], orders: [], profileSlots: [], connectedAccounts: [], socialPosts: [], inboxConversations: [], inboxMessages: [], inboxDraftReplies: [], jobs: [], webhookEvents: [], webhookFailures: [], webhookStatus: { enabled: true, consecutiveFailures: 0 }, auditLogs: [], billingPayments: [], checkoutIntents: [], googleOAuthStates: [], oauthHandoffs: [] };
   }
 
   private pruneWebhookLogs(state: RasPersistentState, nowIso: string = new Date().toISOString()): void {
@@ -1393,6 +1423,11 @@ function processingLeaseExpired(job: RasJob, nowMs: number, leaseMs: number): bo
 
 function hashPat(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function secureEqual(left: string, right: string): boolean {
+  const a = Buffer.from(left); const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export function createStoreFromEnv(env: NodeJS.ProcessEnv = process.env): JsonRasStore {

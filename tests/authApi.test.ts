@@ -468,6 +468,7 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
       GOOGLE_OAUTH_CLIENT_ID: 'client_test',
       GOOGLE_OAUTH_CLIENT_SECRET: 'secret_test',
       GOOGLE_OAUTH_CALLBACK_URL: 'http://127.0.0.1/callback',
+      RAS_FRONTEND_ORIGINS: 'https://landingpage-ban-hang-preview-namvuhvqys-projects.vercel.app',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -503,8 +504,8 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
       body: JSON.stringify({ code: 'google_code_test', state: oauthState }),
     });
     assert.equal(callback.status, 200);
-    const callbackPayload = (await callback.json()) as { token: string; customerId: string; redirectTo: string };
-    assert.ok(callbackPayload.token.startsWith('sess_'));
+    const callbackPayload = (await callback.json()) as { code: string; customerId: string; redirectTo: string };
+    assert.ok(callbackPayload.code.startsWith('handoff_'));
     assert.equal(callbackPayload.redirectTo, '/dashboard');
     assert.ok(callbackPayload.customerId.startsWith('cust_owner_example_com'));
 
@@ -516,8 +517,13 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     assert.equal(reusedState.status, 400);
     assert.deepEqual((JSON.parse(await readFile(dbPath, 'utf8')) as { googleOAuthStates: unknown[] }).googleOAuthStates, []);
 
+    const exchanged = await fetch(`http://127.0.0.1:${port}/auth/google/exchange`, {
+      method: 'POST', headers: { 'content-type': 'application/json', origin: previewOrigin }, body: JSON.stringify({ code: callbackPayload.code }),
+    });
+    assert.equal(exchanged.status, 200);
+    const exchangedPayload = (await exchanged.json()) as { token: string };
     const dashboard = await fetch(`http://127.0.0.1:${port}/dashboard`, {
-      headers: { authorization: `Bearer ${callbackPayload.token}` },
+      headers: { authorization: `Bearer ${exchangedPayload.token}` },
     });
     assert.equal(dashboard.status, 200);
     const dashboardPayload = (await dashboard.json()) as { dashboard: { customer: { id: string; email: string } } };
@@ -536,7 +542,8 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     const handoffUrl = new URL(location);
     assert.equal(handoffUrl.origin, previewOrigin);
     assert.equal(handoffUrl.pathname, '/api/auth/google/callback');
-    assert.ok(handoffUrl.searchParams.get('token')?.startsWith('sess_'));
+    assert.ok(handoffUrl.searchParams.get('code')?.startsWith('handoff_'));
+    assert.equal(handoffUrl.searchParams.get('token'), null);
     assert.equal(handoffUrl.searchParams.get('redirectTo'), '/dashboard');
   } finally {
     child.kill();
