@@ -487,7 +487,7 @@ test('connect endpoint enforces RAS quota before returning Zernio OAuth URL', as
   ];
 
   await withApi(state, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/customers/cust_quota/connect/instagram`, { headers: { authorization: 'Bearer token_quota' } });
+    const response = await fetch(`${baseUrl}/customers/cust_quota/connect/instagram`, { method: 'POST', headers: { authorization: 'Bearer token_quota' } });
     assert.equal(response.status, 409);
     const payload = (await response.json()) as { error: string; entitlement: { maxConnectedAccounts: number; activeConnectedAccounts: number } };
     assert.equal(payload.error, 'connection_quota_exceeded');
@@ -580,7 +580,7 @@ test('connect endpoint creates another Zernio profile for a second account on th
   ];
 
   await withApi(state, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`, { headers: { authorization: 'Bearer token_same' } });
+    const response = await fetch(`${baseUrl}/customers/cust_same_platform/connect/facebook?redirectUrl=https://runagentsys.com/dashboard`, { method: 'POST', headers: { authorization: 'Bearer token_same' } });
     assert.equal(response.status, 200);
     const payload = (await response.json()) as {
       authUrl: string;
