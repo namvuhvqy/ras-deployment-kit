@@ -330,7 +330,7 @@ test('API login returns a bearer token that unlocks dashboard payload', async ()
     const rateLimited = await fetch(`http://127.0.0.1:${port}/customers/cust_1/mapping`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(rateLimited.status, 429);
     assert.ok(Number(rateLimited.headers.get('retry-after')) > 0);
-    const insufficientScope = await fetch(`http://127.0.0.1:${port}/customers/cust_1/connect/facebook`, { headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
+    const insufficientScope = await fetch(`http://127.0.0.1:${port}/customers/cust_1/connect/facebook`, { method: 'POST', headers: { authorization: `Bearer ${rotatedPat.plaintextToken}` } });
     assert.equal(insufficientScope.status, 403);
 
     const createInboxPat = await fetch(`http://127.0.0.1:${port}/api/v1/personal-access-tokens`, {

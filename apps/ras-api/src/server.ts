@@ -976,6 +976,13 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url?.startsWith('/customers/') && req.url.includes('/connect/')) {
+    res.statusCode = 405;
+    res.setHeader('allow', 'POST');
+    res.end(JSON.stringify({ ok: false, error: 'connect_initiation_requires_post' }));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url?.startsWith('/customers/') && req.url.includes('/connect/')) {
     const url = new URL(req.url, 'http://localhost');
     const parts = url.pathname.split('/');
     const customerId = decodeURIComponent(parts[2] ?? '');
