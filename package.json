@@ -19,5 +19,8 @@
   },
   "devDependencies": {
     "tsx": "^4.19.2"
+  },
+  "overrides": {
+    "fast-uri": "3.1.5"
   }
 }
