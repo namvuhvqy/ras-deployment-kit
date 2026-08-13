@@ -121,6 +121,7 @@ export class DryRunZernioAdapter implements ZernioAdapter {
   async getConnectUrl(input: ConnectUrlInput): Promise<string> {
     const params = new URLSearchParams({
       profileId: input.profileId,
+      platform: input.platform,
       redirectUrl: input.redirectUrl,
       dry_run: 'true',
     });
