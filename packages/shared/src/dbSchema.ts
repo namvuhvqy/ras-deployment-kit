@@ -1,4 +1,4 @@
-export const RAS_SCHEMA_VERSION = 1;
+export const RAS_SCHEMA_VERSION = 2;
 
 export const createTableStatements = [
   `CREATE TABLE IF NOT EXISTS customers (
@@ -7,6 +7,23 @@ export const createTableStatements = [
     email TEXT,
     zernio_profile_id TEXT UNIQUE,
     status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS checkout_intents (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(id),
+    plan TEXT NOT NULL,
+    billing_cycle TEXT NOT NULL,
+    extra_connect_slots INTEGER NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL,
+    paypal_order_id TEXT UNIQUE,
+    bound_at TEXT,
+    consumed_at TEXT,
+    transaction_id TEXT,
+    expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
@@ -106,6 +123,7 @@ export const createTableStatements = [
 ];
 
 export const createIndexStatements = [
+  `CREATE INDEX IF NOT EXISTS idx_checkout_intents_customer_status_expiry ON checkout_intents(customer_id, status, expires_at)`,
   `CREATE INDEX IF NOT EXISTS idx_customers_zernio_profile_id ON customers(zernio_profile_id)`,
   `CREATE INDEX IF NOT EXISTS idx_connected_accounts_customer_platform ON connected_accounts(customer_id, platform)`,
   `CREATE INDEX IF NOT EXISTS idx_social_posts_customer_status ON social_posts(customer_id, status)`,
