@@ -468,6 +468,7 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
       GOOGLE_OAUTH_CLIENT_ID: 'client_test',
       GOOGLE_OAUTH_CLIENT_SECRET: 'secret_test',
       GOOGLE_OAUTH_CALLBACK_URL: 'http://127.0.0.1/callback',
+      RAS_ALLOWED_FRONTEND_ORIGINS: 'https://landingpage-ban-hang-preview-namvuhvqys-projects.vercel.app',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -485,6 +486,14 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     });
 
     const previewOrigin = 'https://landingpage-ban-hang-preview-namvuhvqys-projects.vercel.app';
+    const missingOrigin = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard`);
+    assert.equal(missingOrigin.status, 400);
+    assert.deepEqual(await missingOrigin.json(), { ok: false, error: 'frontend_origin_not_allowed' });
+
+    const foreignOrigin = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard&frontendOrigin=${encodeURIComponent('https://landingpage-ban-hang-foreign-namvuhvqys-projects.vercel.app')}`);
+    assert.equal(foreignOrigin.status, 400);
+    assert.deepEqual(await foreignOrigin.json(), { ok: false, error: 'frontend_origin_not_allowed' });
+
     const authStart = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard&frontendOrigin=${encodeURIComponent(previewOrigin)}`);
     assert.equal(authStart.status, 200);
     const authStartPayload = (await authStart.json()) as { authUrl: string };
@@ -515,6 +524,19 @@ test('Google OAuth callback upserts user/customer and returns a session token', 
     });
     assert.equal(reusedState.status, 400);
     assert.deepEqual((JSON.parse(await readFile(dbPath, 'utf8')) as { googleOAuthStates: unknown[] }).googleOAuthStates, []);
+
+    const expiredStart = await fetch(`http://127.0.0.1:${port}/auth/google?redirectTo=/dashboard&frontendOrigin=${encodeURIComponent(previewOrigin)}`);
+    const expiredAuthUrl = new URL(((await expiredStart.json()) as { authUrl: string }).authUrl);
+    const expiredState = expiredAuthUrl.searchParams.get('state');
+    assert.ok(expiredState);
+    const storedBeforeExpiry = JSON.parse(await readFile(dbPath, 'utf8')) as { googleOAuthStates: Array<{ state: string; createdAtMs: number }> };
+    storedBeforeExpiry.googleOAuthStates = storedBeforeExpiry.googleOAuthStates.map((row) => row.state === expiredState ? { ...row, createdAtMs: Date.now() - 10 * 60 * 1000 - 1 } : row);
+    await writeFile(dbPath, `${JSON.stringify(storedBeforeExpiry, null, 2)}\n`);
+    const expiredCallback = await fetch(`http://127.0.0.1:${port}/auth/google/callback`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'google_code_test', state: expiredState }),
+    });
+    assert.equal(expiredCallback.status, 400);
+    assert.deepEqual(await expiredCallback.json(), { ok: false, error: 'invalid_google_oauth_callback' });
 
     const dashboard = await fetch(`http://127.0.0.1:${port}/dashboard`, {
       headers: { authorization: `Bearer ${callbackPayload.token}` },
