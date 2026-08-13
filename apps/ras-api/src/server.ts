@@ -145,18 +145,20 @@ function safeRedirectPath(value: string | undefined): string {
   return value && value.startsWith('/') && !value.startsWith('//') ? value : '/dashboard';
 }
 
-function allowedFrontendOrigin(value: string | undefined): string {
-  const canonical = new URL(frontendBaseUrl()).origin;
-  if (!value) return canonical;
+function allowedFrontendOrigin(value: string | undefined): string | undefined {
+  if (!value) return undefined;
   try {
     const candidate = new URL(value);
-    if (candidate.protocol !== 'https:' || candidate.pathname !== '/' || candidate.search || candidate.hash) return canonical;
-    if (candidate.origin === canonical) return canonical;
-    return /^https:\/\/landingpage-ban-hang-[a-z0-9-]+-namvuhvqys-projects\.vercel\.app$/.test(candidate.origin)
-      ? candidate.origin
-      : canonical;
+    if (candidate.protocol !== 'https:' || candidate.pathname !== '/' || candidate.search || candidate.hash) return undefined;
+    const allowed = new Set(
+      (process.env.RAS_ALLOWED_FRONTEND_ORIGINS ?? '')
+        .split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    );
+    return allowed.has(candidate.origin) ? candidate.origin : undefined;
   } catch {
-    return canonical;
+    return undefined;
   }
 }
 
@@ -571,6 +573,11 @@ const server = createServer(async (req, res) => {
     }
     const redirectTo = safeRedirectPath(url.searchParams.get('redirectTo') ?? undefined);
     const frontendOrigin = allowedFrontendOrigin(url.searchParams.get('frontendOrigin') ?? undefined);
+    if (!frontendOrigin) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ ok: false, error: 'frontend_origin_not_allowed' }));
+      return;
+    }
     const state = await createOAuthState(redirectTo, frontendOrigin);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('client_id', clientId);
