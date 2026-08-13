@@ -12,6 +12,10 @@ const store = createStoreFromEnv();
 const zernioWebhookRouter = createZernioWebhookRouter({ store, secret: process.env.ZERNIO_WEBHOOK_SECRET });
 const port = Number(process.env.PORT ?? 8080);
 
+/** Conservative five-minute in-process freshness window for connection-summary provider reads. */
+const CONNECTION_SUMMARY_REFRESH_TTL_MS = 5 * 60 * 1_000;
+const successfulConnectionSummaryRefreshes = new Map<string, { expiresAtMs: number; accountCount: number }>();
+
 const ready = store.migrate();
 
 async function readRawBody(req: IncomingMessage): Promise<Buffer> {
@@ -342,11 +346,18 @@ function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | '
   );
 }
 
-async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ refreshed: boolean; reason?: string; accountCount?: number }> {
+async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ refreshed: boolean; cached: boolean; reason?: string; accountCount?: number }> {
   const state = await store.load();
   const customer = state.customers.find((row) => row.id === customerId);
-  if (!customer) return { refreshed: false, reason: 'customer_not_found' };
-  if (!customer.zernioProfileId) return { refreshed: false, reason: 'missing_zernio_profile_id' };
+  if (!customer) return { refreshed: false, cached: false, reason: 'customer_not_found' };
+  if (!customer.zernioProfileId) return { refreshed: false, cached: false, reason: 'missing_zernio_profile_id' };
+
+  const cacheKey = `${customer.id}:${customer.zernioProfileId}`;
+  const cachedRefresh = successfulConnectionSummaryRefreshes.get(cacheKey);
+  if (cachedRefresh && cachedRefresh.expiresAtMs > Date.now()) {
+    return { refreshed: false, cached: true, accountCount: cachedRefresh.accountCount };
+  }
+  successfulConnectionSummaryRefreshes.delete(cacheKey);
 
   const nowIso = new Date().toISOString();
   try {
@@ -363,11 +374,13 @@ async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ r
         lastVerifiedAtIso: nowIso,
       });
     }
-    return { refreshed: true, accountCount: accounts.length };
+    successfulConnectionSummaryRefreshes.set(cacheKey, { expiresAtMs: Date.now() + CONNECTION_SUMMARY_REFRESH_TTL_MS, accountCount: accounts.length });
+    return { refreshed: true, cached: false, accountCount: accounts.length };
   } catch (error) {
     const status = typeof error === 'object' && error !== null && 'status' in error ? Number((error as { status?: unknown }).status) : undefined;
     return {
       refreshed: false,
+      cached: false,
       reason: status ? `zernio_sync_failed_${status}` : 'zernio_sync_failed',
     };
   }
