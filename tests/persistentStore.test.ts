@@ -304,10 +304,11 @@ test('checkout sidecar isolates intents, migrates idempotently, and recovers saf
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('staging compose mounts checkout sidecar only into ras-api', async () => {
+test('staging compose maps checkout sidecar to its approved physical volume and mounts it only into ras-api', async () => {
   const compose = await readFile(join(process.cwd(), 'docker-compose.staging.yml'), 'utf8');
   assert.match(compose, /RAS_CHECKOUT_INTENTS_PATH: \/checkout-intents\/checkout-intents\.json/);
   assert.match(compose, /ras-api:[\s\S]*?- ras-checkout-intents:\/checkout-intents/);
+  assert.match(compose, /volumes:\s*[\s\S]*?ras-checkout-intents:\s*\n\s*name: ras-deployment-kit_ras-checkout-intents-staging/);
   assert.equal(/ras-worker:[\s\S]*?- ras-checkout-intents:\/checkout-intents/.test(compose), false);
 });
 

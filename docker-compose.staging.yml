@@ -76,6 +76,7 @@ services:
 volumes:
   ras-data:
   ras-checkout-intents:
+    name: ras-deployment-kit_ras-checkout-intents-staging
   ras-redis-data:
 
 networks:
