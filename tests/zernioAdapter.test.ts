@@ -12,6 +12,20 @@ test('createZernioAdapterFromEnv creates live adapter only when requested', () =
   assert.ok(adapter instanceof LiveZernioAdapter);
 });
 
+test('DryRunZernioAdapter exposes the platform as a top-level connect URL query parameter', async () => {
+  const adapter = new DryRunZernioAdapter();
+  const url = new URL(await adapter.getConnectUrl({
+    profileId: 'profile_1',
+    platform: 'instagram',
+    redirectUrl: 'https://preview.example.test/connect/callback?platform=instagram',
+  }));
+
+  assert.equal(url.hostname, 'zernio.local');
+  assert.equal(url.pathname, '/connect/instagram');
+  assert.equal(url.searchParams.get('platform'), 'instagram');
+  assert.equal(url.searchParams.get('dry_run'), 'true');
+});
+
 test('LiveZernioAdapter createProfile sends only documented Zernio fields', async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const originalFetch = globalThis.fetch;
