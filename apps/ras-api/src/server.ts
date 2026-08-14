@@ -193,8 +193,8 @@ async function requireCustomerAccess(req: IncomingMessage, customerId: string, r
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   if (!principal) return { status: 'unauthorized' };
   if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden', principal };
-  // Explicitly marked master/system customer identities never access customer surfaces.
-  if ((await store.load()).customers.find((row) => row.id === customerId)?.isSystemPrincipal) return { status: 'forbidden', principal };
+  const principalUser = principal.userId ? (await store.load()).users.find((row) => row.id === principal.userId) : undefined;
+  if (principal.role === 'admin' || principalUser?.role === 'admin') return { status: 'forbidden', principal };
   if (principal.authType === 'pat' && principal.tokenId) {
     const configuredLimit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
     const limit = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 120;
@@ -215,6 +215,15 @@ async function requireCustomerAccess(req: IncomingMessage, customerId: string, r
     return { status: 'ok', remaining: result.remaining, principal };
   }
   return { status: 'ok', principal };
+}
+
+async function requirePostPrincipal(req: IncomingMessage, requiredScope: 'posts:read' | 'posts:write') {
+  const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+  if (!principal) return { status: 'unauthorized' as const };
+  // Customer API access is bound to the authenticated identity, never a route/body selector.
+  if (principal.role === 'admin' || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden' as const };
+  const access = await requireCustomerAccess(req, principal.customerId, requiredScope);
+  return access.status === 'ok' ? { status: 'ok' as const, principal } : access;
 }
 
 async function requireSessionPrincipal(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
@@ -319,6 +328,10 @@ const POST_TEXT_LIMITS: Record<SocialPlatform, number> = {
   tiktok: 4_000, threads: 500, bluesky: 300, telegram: 4_096, whatsapp: 4_096, reddit: 40_000,
 };
 
+function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
+  return { monitorId: post.id, accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
+}
+
 function postCapability(account: import('../../../packages/shared/src/types.js').ConnectedAccount) {
   const allowed = account.status === 'connected' && !account.capabilities?.includes('posts:disabled');
   return {
@@ -334,18 +347,23 @@ function postCapability(account: import('../../../packages/shared/src/types.js')
 }
 
 function publicPostCore(post: SocialPost) {
+  const createdAtIso = post.createdAtIso ?? post.updatedAtIso;
   return {
     postId: post.id,
-    connectionId: post.connectionId,
+    connectionId: post.connectionId!,
     platform: post.platform,
     text: post.content ?? '',
     media: [],
-    status: post.status,
+    status: 'draft' as const,
     revision: post.revision ?? 1,
-    createdAt: post.createdAtIso,
-    updatedAt: post.updatedAtIso,
-    history: post.history ?? [],
+    createdAtIso,
+    updatedAtIso: post.updatedAtIso,
+    events: [{ type: 'draft_created' as const, atIso: createdAtIso }],
   };
+}
+
+function isV1Draft(post: SocialPost): boolean {
+  return post.status === 'draft' && post.isDraft === true && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
 }
 
 type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
@@ -990,25 +1008,57 @@ const server = createServer(async (req, res) => {
     */
   }
 
-  const postsPath = req.url ? new URL(req.url, 'http://localhost').pathname : '';
-  const postsMatch = /^\/customers\/([^/]+)\/posts(?:\/(capabilities|drafts|([^/]+)))?$/.exec(postsPath);
-  if (postsMatch) {
-    const customerId = decodeURIComponent(postsMatch[1]);
-    const operation = postsMatch[2];
-    const postId = postsMatch[3] ? decodeURIComponent(postsMatch[3]) : undefined;
-    const access = await requireCustomerAccess(req, customerId, req.method === 'POST' ? 'posts:write' : 'posts:read');
+  // Legacy internal scheduling surface remains intact for existing consumers.
+  const legacyPostsMatch = req.url ? /^\/customers\/([^/]+)\/posts(?:\/(drafts|schedules))?$/.exec(new URL(req.url, 'http://localhost').pathname) : null;
+  if (legacyPostsMatch) {
+    const customerId = decodeURIComponent(legacyPostsMatch[1]);
+    const operation = legacyPostsMatch[2];
+    const access = await requireCustomerAccess(req, customerId, req.method === 'GET' && !operation ? 'posts:read' : 'posts:write');
     if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    if (req.method === 'GET' && !operation) { res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicSocialPost) })); return; }
+    if (req.method !== 'POST' || !operation) { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    const idempotencyKey = firstHeader(req, 'idempotency-key')?.trim();
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req); } catch { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_json' })); return; }
+    const accountId = stringField(body, 'accountId');
+    const content = stringField(body, 'content')?.trim();
+    const mediaUrls = mediaUrlsField(body);
+    const scheduleInput = operation === 'schedules' ? stringField(body, 'scheduleAtIso') : undefined;
+    const scheduleAtIso = scheduleInput && Number.isFinite(Date.parse(scheduleInput)) ? new Date(scheduleInput).toISOString() : undefined;
+    if (!idempotencyKey || idempotencyKey.length > 256 || !accountId || !content || content.length > 10_000 || mediaUrls === undefined || 'publishNow' in body || (operation === 'schedules' && (!scheduleAtIso || Date.parse(scheduleAtIso) <= Date.now()))) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_post_request' })); return; }
+    const account = await store.getConnectedAccount(accountId);
+    if (!account || account.customerId !== customerId) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connected_account_not_found' })); return; }
+    if (account.status !== 'connected') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_inactive' })); return; }
+    const profileId = account.zernioProfileId ?? account.profileId;
+    if (!profileId) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_profile_missing' })); return; }
+    const payloadHash = canonicalPostHash({ operation, accountId, content, mediaUrls, ...(scheduleAtIso ? { scheduleAtIso } : {}) });
+    const id = `post_${randomUUID()}`; const jobId = `publish_${randomUUID()}`; const createdAtIso = new Date().toISOString();
+    const post: SocialPost = { id, jobId, customerId, accountId, profileId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', scheduleAtIso, status: operation === 'drafts' ? 'draft' : 'scheduled', idempotencyKey, idempotencyPayloadHash: payloadHash, createdAtIso, updatedAtIso: createdAtIso };
+    const job: import('../../../packages/shared/src/types.js').RasJob = { id: jobId, customerId, profileId, accountId, platform: account.platform, type: 'publish_post', priority: 'P2', status: 'queued', retryCount: 0, payload: { postId: id, accountId, providerAccountId: account.zernioAccountId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', ...(scheduleAtIso ? { scheduleAtIso } : {}) }, createdAtIso };
+    const result = await store.createPostAndJobIdempotently({ post, job });
+    if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
+    res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicSocialPost(result.post), job: { id: result.job.id, type: result.job.type, status: result.job.status } })); return;
+  }
+
+  const postV1Path = req.url ? new URL(req.url, 'http://localhost').pathname : '';
+  const postV1Match = /^\/api\/v1\/posts(?:\/(capabilities|drafts|([^/]+)))?$/.exec(postV1Path);
+  if (postV1Match) {
+    const operation = postV1Match[1];
+    const postId = postV1Match[2] ? decodeURIComponent(postV1Match[2]) : undefined;
+    const access = await requirePostPrincipal(req, req.method === 'POST' ? 'posts:write' : 'posts:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    const customerId = access.principal!.customerId;
     if (req.method === 'GET' && operation === 'capabilities') {
       const state = await store.load();
       res.end(JSON.stringify({ ok: true, connections: state.connectedAccounts.filter((account) => account.customerId === customerId).map(postCapability) }));
       return;
     }
     if (req.method === 'GET' && !operation) {
-      res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicPostCore) })); return;
+      res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).filter(isV1Draft).map(publicPostCore) })); return;
     }
     if (req.method === 'GET' && postId) {
       const post = await store.getPostCore(customerId, postId);
-      if (!post) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'post_not_found' })); return; }
+      if (!post || !isV1Draft(post)) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'post_not_found' })); return; }
       res.end(JSON.stringify({ ok: true, post: publicPostCore(post) })); return;
     }
     if (req.method !== 'POST' || operation !== 'drafts') { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
@@ -1032,6 +1082,7 @@ const server = createServer(async (req, res) => {
     const post: SocialPost = { id: `post_${randomUUID()}`, customerId, accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: true, status: 'draft', idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history: [{ atIso: createdAtIso, event: 'created' }], createdAtIso, updatedAtIso: createdAtIso };
     const result = await store.createDraftIdempotently({ post });
     if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
+    if (!isV1Draft(result.post)) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
     res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicPostCore(result.post) })); return;
   }
 
