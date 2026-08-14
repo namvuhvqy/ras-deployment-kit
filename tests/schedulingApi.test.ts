@@ -18,8 +18,12 @@ function state() {
     schemaVersion: 1, migratedAtIso: now,
     users: [
       { id: 'user_system', email: 'system@test.invalid', role: 'owner', customerId: 'cust_system', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'user_tenant_admin', email: 'tenant-admin@test.invalid', role: 'admin', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now },
     ],
-    sessions: [{ id: 'system_session', token: 'system-token', userId: 'user_system', createdAtIso: now, expiresAtIso: future }], apiRateLimitBuckets: [],
+    sessions: [
+      { id: 'system_session', token: 'system-token', userId: 'user_system', createdAtIso: now, expiresAtIso: future },
+      { id: 'tenant_admin_session', token: 'tenant-admin-token', userId: 'user_tenant_admin', createdAtIso: now, expiresAtIso: future },
+    ], apiRateLimitBuckets: [],
     personalAccessTokens: [
       { id: 'pat_write', customerId: 'cust_a', createdByUserId: 'user_a', name: 'writer', tokenPrefix: 'writer', tokenHash: hash('writer-token'), scopes: ['posts:write'], createdAtIso: now },
       { id: 'pat_read', customerId: 'cust_a', createdByUserId: 'user_a', name: 'reader', tokenPrefix: 'reader', tokenHash: hash('reader-token'), scopes: ['posts:read'], createdAtIso: now },
@@ -63,7 +67,10 @@ async function post(baseUrl: string, path: string, token: string, key: string | 
 
 test('Post V1 public contract is session/PAT-derived, opaque, and excludes legacy rows', async () => {
   await withApi(async (baseUrl, dbPath) => {
-    const adminOrdinary = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer system-token' } }); assert.equal(adminOrdinary.status, 403);
+    const systemPostDenied = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer system-token' } }); assert.equal(systemPostDenied.status, 403);
+    const tenantAdminGlobalDenied = await fetch(`${baseUrl}/admin/customers`, { headers: { authorization: 'Bearer tenant-admin-token' } }); assert.equal(tenantAdminGlobalDenied.status, 403);
+    const tenantAdminPostDenied = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer tenant-admin-token' } }); assert.equal(tenantAdminPostDenied.status, 403);
+    const legacyTenantAdmin = await fetch(`${baseUrl}/customers/cust_a/posts`, { headers: { authorization: 'Bearer tenant-admin-token' } }); assert.equal(legacyTenantAdmin.status, 200);
     const legacy = await post(baseUrl, '/customers/cust_a/posts/drafts', 'writer-token', 'legacy-v1-isolation', { accountId: 'acct_a', content: 'legacy', mediaUrls: [] });
     assert.equal(legacy.status, 201);
     const unauth = await fetch(`${baseUrl}/api/v1/posts/capabilities`); assert.equal(unauth.status, 401);
