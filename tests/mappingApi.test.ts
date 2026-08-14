@@ -7,14 +7,14 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
-async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>): Promise<T> {
+async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>, envOverrides: NodeJS.ProcessEnv = {}): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ras-mapping-api-'));
   const dbPath = join(dir, 'ras-store.json');
   const port = 19_080 + Math.floor(Math.random() * 1000);
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token' },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', ...envOverrides },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -653,7 +653,7 @@ test('checkout capture uses an owned bound intent rather than relay supplied pri
     const created = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers: { authorization: 'Bearer token_a', 'content-type': 'application/json' }, body: JSON.stringify({ plan: 'lite', billing_cycle: 'monthly', extra_connect_slots: 1 }) });
     assert.equal(created.status, 201);
     const intent = ((await created.json()) as { intent: { id: string; amount: string } }).intent;
-    assert.equal(intent.amount, '25');
+    assert.equal(intent.amount, '25.00');
     const bind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, customer_id: 'cust_a', paypal_order_id: 'ORDER-INTENT-1' }) });
     assert.equal(bind.status, 200);
     const captured = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-INTENT-1', captureStatus: 'COMPLETED', total_amount: 1, plan: 'max' }) });
@@ -661,4 +661,60 @@ test('checkout capture uses an owned bound intent rather than relay supplied pri
     const repeated = await fetch(`${baseUrl}/billing/payments/captured`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: intent.id, paypal_order_id: 'ORDER-INTENT-1', transaction_id: 'CAP-OTHER', capture_status: 'COMPLETED' }) });
     assert.equal(repeated.status, 409);
   });
+});
+
+// Slice A contract gates: HTTP auth, opaque tenant isolation, one-open replay, expiry, and attestation.
+test('checkout intent HTTP routes fail closed for auth, opaque cross-tenant access, replay, expiry, and attestation prerequisites', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [
+      { id: 'u_a', email: 'a@test.invalid', role: 'owner', customerId: 'cust_a', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'u_b', email: 'b@test.invalid', role: 'owner', customerId: 'cust_b', status: 'active', createdAtIso: now, updatedAtIso: now },
+    ],
+    sessions: [
+      { id: 's_a', token: 'token_a', userId: 'u_a', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() },
+      { id: 's_b', token: 'token_b', userId: 'u_b', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() },
+    ],
+    customers: [
+      { id: 'cust_a', name: 'A', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} },
+      { id: 'cust_b', name: 'B', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} },
+    ],
+  });
+  const contractEnv = { RAS_BUILD_SHA: 'test-build', RAS_CHECKOUT_CONTRACT_VERSION: 'checkout-intent-v1', RAS_RELAY_KEY_ID: 'public-relay-test', PAYPAL_MODE: 'sandbox', ZERNIO_MODE: 'dry-run' };
+  await withApi(state, async (baseUrl) => {
+    const unauth = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST' }); assert.equal(unauth.status, 401);
+    const create = () => fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers: { authorization: 'Bearer token_a', 'content-type': 'application/json' }, body: JSON.stringify({ plan: 'lite', billing_cycle: 'monthly', extra_connect_slots: 0 }) });
+    const [first, concurrent] = await Promise.all([create(), create()]);
+    assert.deepEqual([first.status, concurrent.status].sort(), [201, 409]);
+    const winner = first.status === 201 ? first : concurrent;
+    const id = ((await winner.json()) as { intent: { id: string } }).intent.id;
+    const foreignGet = await fetch(`${baseUrl}/billing/checkout-intents/${encodeURIComponent(id)}`, { headers: { authorization: 'Bearer token_b' } }); assert.equal(foreignGet.status, 404);
+    const foreignCancel = await fetch(`${baseUrl}/billing/checkout-intents/cancel`, { method: 'POST', headers: { authorization: 'Bearer token_b', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: id }) }); assert.equal(foreignCancel.status, 404);
+  }, contractEnv);
+  await withApi(state, async (baseUrl) => {
+    const unavailable = await fetch(`${baseUrl}/meta/checkout-contract`); assert.equal(unavailable.status, 503);
+    assert.deepEqual(await unavailable.json(), { ok: false, error: 'checkout_contract_attestation_unavailable' });
+  });
+  await withApi(state, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/meta/checkout-contract`); assert.equal(response.status, 200);
+    assert.deepEqual(Object.keys(await response.json() as object).sort(), ['backendBuildSha', 'contractVersion', 'ok', 'paypalMode', 'relayKeyId', 'zernioMode'].sort());
+  }, contractEnv);
+});
+
+test('PAT rate limit returns 429 and retry-after through the public customer route', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [{ id: 'u_pat', email: 'pat@test.invalid', role: 'owner', customerId: 'cust_pat', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 's_pat', token: 'session_pat', userId: 'u_pat', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() }],
+    customers: [{ id: 'cust_pat', name: 'PAT', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} }],
+  });
+  await withApi(state, async (baseUrl) => {
+    const create = await fetch(`${baseUrl}/api/v1/personal-access-tokens`, { method: 'POST', headers: { authorization: 'Bearer session_pat', 'content-type': 'application/json' }, body: JSON.stringify({ name: 'rate-test', scopes: ['inbox:read'] }) });
+    assert.equal(create.status, 201);
+    const pat = ((await create.json()) as { plaintextToken: string }).plaintextToken;
+    const headers = { authorization: `Bearer ${pat}` };
+    assert.equal((await fetch(`${baseUrl}/customers/cust_pat/inbox/conversations`, { headers })).status, 200);
+    const limited = await fetch(`${baseUrl}/customers/cust_pat/inbox/conversations`, { headers });
+    assert.equal(limited.status, 429); assert.match(limited.headers.get('retry-after') ?? '', /^[1-9]/);
+  }, { RAS_PAT_RATE_LIMIT_PER_MINUTE: '1' });
 });
