@@ -5,7 +5,7 @@ import { createZernioWebhookRouter } from './webhookRouter.js';
 import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
-import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
+import type { RasBasePlanId, RasBillingCycle, RasEntitlement, SocialPlatform, SocialPost } from '../../../packages/shared/src/types.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -189,6 +189,14 @@ function hasScope(scopes: string[], requiredScope?: string): boolean {
 
 type CustomerAccess = 'ok' | 'unauthorized' | 'forbidden' | 'rate_limited' | 'rate_limit_unavailable';
 
+function systemAdminUserIds(): Set<string> {
+  return new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
+}
+
+function isPostDeniedPrincipal(principal: import('../../../packages/shared/src/types.js').RasPrincipal): boolean {
+  return principal.role === 'admin' || (principal.userId !== undefined && systemAdminUserIds().has(principal.userId));
+}
+
 async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<{ status: CustomerAccess; retryAfterSeconds?: number; remaining?: number; principal?: import('../../../packages/shared/src/types.js').RasPrincipal }> {
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   if (!principal) return { status: 'unauthorized' };
@@ -215,6 +223,15 @@ async function requireCustomerAccess(req: IncomingMessage, customerId: string, r
   return { status: 'ok', principal };
 }
 
+async function requirePostPrincipal(req: IncomingMessage, requiredScope: 'posts:read' | 'posts:write') {
+  const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
+  if (!principal) return { status: 'unauthorized' as const };
+  // Customer API access is bound to the authenticated identity, never a route/body selector.
+  if (isPostDeniedPrincipal(principal) || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden' as const };
+  const access = await requireCustomerAccess(req, principal.customerId, requiredScope);
+  return access.status === 'ok' ? { status: 'ok' as const, principal } : access;
+}
+
 async function requireSessionPrincipal(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   return principal?.authType === 'session' ? principal : undefined;
@@ -223,8 +240,7 @@ async function requireSessionPrincipal(req: IncomingMessage): Promise<import('..
 async function requireAdminSession(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
   const principal = await requireSessionPrincipal(req);
   // Global operations access is deliberately separate from tenant-local roles.
-  const systemAdminIds = new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
-  return principal?.userId && systemAdminIds.has(principal.userId) ? principal : undefined;
+  return principal?.userId && systemAdminUserIds().has(principal.userId) ? principal : undefined;
 }
 
 function endAdminAccessError(res: { statusCode: number; end: (chunk?: string) => void }, authenticated: boolean): void {
@@ -312,8 +328,47 @@ function canonicalPostHash(value: Record<string, unknown>): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+const POST_TEXT_LIMITS: Record<SocialPlatform, number> = {
+  facebook: 63_206, instagram: 2_200, youtube: 5_000, twitter: 280, linkedin: 3_000,
+  tiktok: 4_000, threads: 500, bluesky: 300, telegram: 4_096, whatsapp: 4_096, reddit: 40_000,
+};
+
 function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
   return { monitorId: post.id, accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
+}
+
+function postCapability(account: import('../../../packages/shared/src/types.js').ConnectedAccount) {
+  const allowed = account.status === 'connected' && !account.capabilities?.includes('posts:disabled');
+  return {
+    connectionId: account.publicConnectionId!,
+    displayLabel: account.handle ?? account.username ?? `${account.platform} account`,
+    platform: account.platform,
+    availability: allowed,
+    contentLimit: POST_TEXT_LIMITS[account.platform],
+    allowedModes: allowed ? ['draft'] : [],
+    media: { supported: false },
+    ...(allowed ? {} : { reasonCode: account.status === 'connected' ? 'posting_unavailable' : 'connection_unavailable' }),
+  };
+}
+
+function publicPostCore(post: SocialPost) {
+  const createdAtIso = post.createdAtIso ?? post.updatedAtIso;
+  return {
+    postId: post.id,
+    connectionId: post.connectionId!,
+    platform: post.platform,
+    text: post.content ?? '',
+    media: [],
+    status: 'draft' as const,
+    revision: post.revision ?? 1,
+    createdAtIso,
+    updatedAtIso: post.updatedAtIso,
+    events: [{ type: 'draft_created' as const, atIso: createdAtIso }],
+  };
+}
+
+function isV1Draft(post: SocialPost): boolean {
+  return post.status === 'draft' && post.isDraft === true && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
 }
 
 type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
@@ -958,10 +1013,11 @@ const server = createServer(async (req, res) => {
     */
   }
 
-  const postsMatch = req.url ? /^\/customers\/([^/]+)\/posts(?:\/(drafts|schedules))?$/.exec(new URL(req.url, 'http://localhost').pathname) : null;
-  if (postsMatch) {
-    const customerId = decodeURIComponent(postsMatch[1]);
-    const operation = postsMatch[2];
+  // Legacy internal scheduling surface remains intact for existing consumers.
+  const legacyPostsMatch = req.url ? /^\/customers\/([^/]+)\/posts(?:\/(drafts|schedules))?$/.exec(new URL(req.url, 'http://localhost').pathname) : null;
+  if (legacyPostsMatch) {
+    const customerId = decodeURIComponent(legacyPostsMatch[1]);
+    const operation = legacyPostsMatch[2];
     const access = await requireCustomerAccess(req, customerId, req.method === 'GET' && !operation ? 'posts:read' : 'posts:write');
     if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
     if (req.method === 'GET' && !operation) { res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicSocialPost) })); return; }
@@ -974,9 +1030,7 @@ const server = createServer(async (req, res) => {
     const mediaUrls = mediaUrlsField(body);
     const scheduleInput = operation === 'schedules' ? stringField(body, 'scheduleAtIso') : undefined;
     const scheduleAtIso = scheduleInput && Number.isFinite(Date.parse(scheduleInput)) ? new Date(scheduleInput).toISOString() : undefined;
-    if (!idempotencyKey || idempotencyKey.length > 256 || !accountId || !content || content.length > 10_000 || mediaUrls === undefined || 'publishNow' in body || (operation === 'schedules' && (!scheduleAtIso || Date.parse(scheduleAtIso) <= Date.now()))) {
-      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_post_request' })); return;
-    }
+    if (!idempotencyKey || idempotencyKey.length > 256 || !accountId || !content || content.length > 10_000 || mediaUrls === undefined || 'publishNow' in body || (operation === 'schedules' && (!scheduleAtIso || Date.parse(scheduleAtIso) <= Date.now()))) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_post_request' })); return; }
     const account = await store.getConnectedAccount(accountId);
     if (!account || account.customerId !== customerId) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connected_account_not_found' })); return; }
     if (account.status !== 'connected') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_inactive' })); return; }
@@ -984,11 +1038,57 @@ const server = createServer(async (req, res) => {
     if (!profileId) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_profile_missing' })); return; }
     const payloadHash = canonicalPostHash({ operation, accountId, content, mediaUrls, ...(scheduleAtIso ? { scheduleAtIso } : {}) });
     const id = `post_${randomUUID()}`; const jobId = `publish_${randomUUID()}`; const createdAtIso = new Date().toISOString();
-    const post: import('../../../packages/shared/src/types.js').SocialPost = { id, jobId, customerId, accountId, profileId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', scheduleAtIso, status: operation === 'drafts' ? 'draft' : 'scheduled', idempotencyKey, idempotencyPayloadHash: payloadHash, createdAtIso, updatedAtIso: createdAtIso };
+    const post: SocialPost = { id, jobId, customerId, accountId, profileId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', scheduleAtIso, status: operation === 'drafts' ? 'draft' : 'scheduled', idempotencyKey, idempotencyPayloadHash: payloadHash, createdAtIso, updatedAtIso: createdAtIso };
     const job: import('../../../packages/shared/src/types.js').RasJob = { id: jobId, customerId, profileId, accountId, platform: account.platform, type: 'publish_post', priority: 'P2', status: 'queued', retryCount: 0, payload: { postId: id, accountId, providerAccountId: account.zernioAccountId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', ...(scheduleAtIso ? { scheduleAtIso } : {}) }, createdAtIso };
     const result = await store.createPostAndJobIdempotently({ post, job });
     if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
     res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicSocialPost(result.post), job: { id: result.job.id, type: result.job.type, status: result.job.status } })); return;
+  }
+
+  const postV1Path = req.url ? new URL(req.url, 'http://localhost').pathname : '';
+  const postV1Match = /^\/api\/v1\/posts(?:\/(capabilities|drafts|([^/]+)))?$/.exec(postV1Path);
+  if (postV1Match) {
+    const operation = postV1Match[1];
+    const postId = postV1Match[2] ? decodeURIComponent(postV1Match[2]) : undefined;
+    const access = await requirePostPrincipal(req, req.method === 'POST' ? 'posts:write' : 'posts:read');
+    if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
+    const customerId = access.principal!.customerId;
+    if (req.method === 'GET' && operation === 'capabilities') {
+      const state = await store.load();
+      res.end(JSON.stringify({ ok: true, connections: state.connectedAccounts.filter((account) => account.customerId === customerId).map(postCapability) }));
+      return;
+    }
+    if (req.method === 'GET' && !operation) {
+      res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).filter(isV1Draft).map(publicPostCore) })); return;
+    }
+    if (req.method === 'GET' && postId) {
+      const post = await store.getPostCore(customerId, postId);
+      if (!post || !isV1Draft(post)) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'post_not_found' })); return; }
+      res.end(JSON.stringify({ ok: true, post: publicPostCore(post) })); return;
+    }
+    if (req.method !== 'POST' || operation !== 'drafts') { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    const idempotencyKey = firstHeader(req, 'idempotency-key')?.trim();
+    let body: Record<string, unknown>;
+    try { body = await readJsonBody(req); } catch { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_json' })); return; }
+    const connectionId = stringField(body, 'connectionId');
+    const text = stringField(body, 'text')?.trim();
+    const media = body.media;
+    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || text.length === 0 || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || 'publishNow' in body || 'scheduleAtIso' in body) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_draft_request' })); return;
+    }
+    const state = await store.load();
+    const account = state.connectedAccounts.find((row) => row.customerId === customerId && row.publicConnectionId === connectionId);
+    if (!account) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connection_not_found' })); return; }
+    const capability = postCapability(account);
+    if (!capability.availability) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: capability.reasonCode ?? 'posting_unavailable' })); return; }
+    if (text.length > capability.contentLimit) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'text_limit_exceeded' })); return; }
+    const payloadHash = canonicalPostHash({ connectionId, text, media: [] });
+    const createdAtIso = new Date().toISOString();
+    const post: SocialPost = { id: `post_${randomUUID()}`, customerId, accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: true, status: 'draft', idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history: [{ atIso: createdAtIso, event: 'created' }], createdAtIso, updatedAtIso: createdAtIso };
+    const result = await store.createDraftIdempotently({ post });
+    if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
+    if (!isV1Draft(result.post)) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
+    res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicPostCore(result.post) })); return;
   }
 
   if (req.url?.startsWith('/customers/') && req.url.includes('/connect/facebook/pages')) {

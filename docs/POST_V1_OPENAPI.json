@@ -1,0 +1,552 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RAS Post V1",
+    "version": "1.0.0",
+    "description": "Tenant is derived only from the authenticated session or PAT principal."
+  },
+  "paths": {
+    "/api/v1/posts/capabilities": {
+      "get": {
+        "operationId": "listPostCapabilities",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Capabilities"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/posts/drafts": {
+      "post": {
+        "operationId": "createDraft",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Post"
+          },
+          "201": {
+            "$ref": "#/components/responses/Post"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidDraft"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectionNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/posts": {
+      "get": {
+        "operationId": "listDrafts",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:read"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PostList"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/posts/{postId}": {
+      "get": {
+        "operationId": "getDraft",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:read"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "postId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Post"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PostNotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "error"
+        ],
+        "properties": {
+          "ok": {
+            "const": false
+          },
+          "error": {
+            "type": "string",
+            "enum": [
+              "unauthorized",
+              "forbidden",
+              "invalid_draft_request",
+              "invalid_json",
+              "connection_not_found",
+              "posting_unavailable",
+              "connection_unavailable",
+              "text_limit_exceeded",
+              "idempotency_conflict",
+              "post_not_found",
+              "method_not_allowed",
+              "rate_limited",
+              "rate_limit_unavailable"
+            ]
+          },
+          "retryAfterSeconds": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "Connection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connectionId",
+          "displayLabel",
+          "platform",
+          "availability",
+          "contentLimit",
+          "allowedModes",
+          "media"
+        ],
+        "properties": {
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "availability": {
+            "type": "boolean"
+          },
+          "contentLimit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "allowedModes": {
+            "type": "array",
+            "items": {
+              "const": "draft"
+            },
+            "maxItems": 1
+          },
+          "media": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "supported"
+            ],
+            "properties": {
+              "supported": {
+                "const": false
+              }
+            }
+          },
+          "reasonCode": {
+            "type": "string",
+            "enum": [
+              "connection_unavailable",
+              "posting_unavailable"
+            ]
+          },
+          "displayLabel": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "atIso"
+        ],
+        "properties": {
+          "type": {
+            "const": "draft_created"
+          },
+          "atIso": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Post": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "postId",
+          "connectionId",
+          "platform",
+          "text",
+          "media",
+          "status",
+          "revision",
+          "createdAtIso",
+          "updatedAtIso",
+          "events"
+        ],
+        "properties": {
+          "postId": {
+            "type": "string",
+            "pattern": "^post_"
+          },
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "status": {
+            "const": "draft"
+          },
+          "revision": {
+            "const": 1
+          },
+          "createdAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "minItems": 1,
+            "maxItems": 1
+          }
+        }
+      },
+      "DraftCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connectionId",
+          "text",
+          "media"
+        ],
+        "properties": {
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "PostEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "post"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "post": {
+            "$ref": "#/components/schemas/Post"
+          }
+        }
+      },
+      "PostListEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "posts"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "posts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Post"
+            }
+          }
+        }
+      },
+      "CapabilitiesEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "connections"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Connection"
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Capabilities": {
+        "description": "Customer-safe capabilities",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CapabilitiesEnvelope"
+            }
+          }
+        }
+      },
+      "Post": {
+        "description": "Draft",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PostEnvelope"
+            }
+          }
+        }
+      },
+      "PostList": {
+        "description": "Draft list",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PostListEnvelope"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Authentication required",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Principal or scope denied",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "InvalidDraft": {
+        "description": "Request rejected",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "ConnectionNotFound": {
+        "description": "Opaque connection not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "PostNotFound": {
+        "description": "Opaque post not found",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Idempotency or connection conflict",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "PAT rate limit enforced",
+        "headers": {
+          "Retry-After": {
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimitUnavailable": {
+        "description": "PAT rate-limit backend unavailable; fail closed",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

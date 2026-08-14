@@ -313,6 +313,10 @@ export class JsonRasStore {
     state.orders ??= [];
     state.profileSlots ??= [];
     state.connectedAccounts ??= [];
+    for (const account of state.connectedAccounts) {
+      // Persist once; never derive the public reference from provider or tenant IDs.
+      account.publicConnectionId ??= `conn_${randomBytes(18).toString('base64url')}`;
+    }
     state.socialPosts ??= [];
     state.inboxConversations ??= [];
     state.inboxMessages ??= [];
@@ -927,10 +931,14 @@ export class JsonRasStore {
     const index = state.connectedAccounts.findIndex(
       (row) => row.customerId === account.customerId && row.zernioAccountId === account.zernioAccountId,
     );
-    if (index >= 0) state.connectedAccounts[index] = account;
-    else state.connectedAccounts.push(account);
+    const saved: ConnectedAccount = {
+      ...account,
+      publicConnectionId: account.publicConnectionId ?? state.connectedAccounts[index]?.publicConnectionId ?? `conn_${randomBytes(18).toString('base64url')}`,
+    };
+    if (index >= 0) state.connectedAccounts[index] = saved;
+    else state.connectedAccounts.push(saved);
     await this.write(state);
-    return account;
+    return saved;
   }
 
   async upsertAccountMapping(account: ConnectedAccount): Promise<AccountMapping> {
@@ -990,6 +998,20 @@ export class JsonRasStore {
     const state = await this.load();
     return state.socialPosts.filter((row) => row.customerId === customerId)
       .sort((left, right) => Date.parse(right.createdAtIso ?? right.updatedAtIso) - Date.parse(left.createdAtIso ?? left.updatedAtIso));
+  }
+
+  async getPostCore(customerId: string, postId: string): Promise<SocialPost | undefined> {
+    const state = await this.load();
+    return state.socialPosts.find((row) => row.customerId === customerId && row.id === postId);
+  }
+
+  async createDraftIdempotently(input: { post: SocialPost }): Promise<{ created: boolean; conflict: boolean; post: SocialPost }> {
+    return this.mutate((state) => {
+      const existing = state.socialPosts.find((row) => row.customerId === input.post.customerId && row.idempotencyKey === input.post.idempotencyKey);
+      if (existing) return { created: false, conflict: existing.idempotencyPayloadHash !== input.post.idempotencyPayloadHash, post: existing };
+      state.socialPosts.push(input.post);
+      return { created: true, conflict: false, post: input.post };
+    });
   }
 
   async attachZernioPostId(jobId: string, zernioPostId: string): Promise<SocialPost> {
