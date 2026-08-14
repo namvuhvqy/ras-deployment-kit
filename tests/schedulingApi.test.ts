@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { readFile as readTextFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import AjvModule from 'ajv';
 import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 
 const now = new Date().toISOString();
@@ -16,7 +17,7 @@ function state() {
   return {
     schemaVersion: 1, migratedAtIso: now,
     users: [
-      { id: 'user_system', email: 'system@test.invalid', role: 'admin', customerId: 'cust_system', status: 'active', createdAtIso: now, updatedAtIso: now },
+      { id: 'user_system', email: 'system@test.invalid', role: 'owner', customerId: 'cust_system', status: 'active', createdAtIso: now, updatedAtIso: now },
     ],
     sessions: [{ id: 'system_session', token: 'system-token', userId: 'user_system', createdAtIso: now, expiresAtIso: future }], apiRateLimitBuckets: [],
     personalAccessTokens: [
@@ -36,12 +37,12 @@ function state() {
   };
 }
 
-async function withApi(run: (baseUrl: string, dbPath: string) => Promise<void>) {
+async function withApi(run: (baseUrl: string, dbPath: string) => Promise<void>, env: NodeJS.ProcessEnv = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'ras-scheduling-api-'));
   const dbPath = join(dir, 'store.json');
   const port = 20_080 + Math.floor(Math.random() * 1000);
   await writeFile(dbPath, JSON.stringify(state()));
-  const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], { cwd: process.cwd(), env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], { cwd: process.cwd(), env: { ...process.env, ...env, PORT: String(port), RAS_DB_PATH: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('server did not start')), 5000);
@@ -62,28 +63,51 @@ async function post(baseUrl: string, path: string, token: string, key: string | 
 
 test('Post V1 public contract is session/PAT-derived, opaque, and excludes legacy rows', async () => {
   await withApi(async (baseUrl, dbPath) => {
+    const adminOrdinary = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer system-token' } }); assert.equal(adminOrdinary.status, 403);
     const legacy = await post(baseUrl, '/customers/cust_a/posts/drafts', 'writer-token', 'legacy-v1-isolation', { accountId: 'acct_a', content: 'legacy', mediaUrls: [] });
     assert.equal(legacy.status, 201);
     const unauth = await fetch(`${baseUrl}/api/v1/posts/capabilities`); assert.equal(unauth.status, 401);
-    const adminOrdinary = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer system-token' } }); assert.equal(adminOrdinary.status, 403);
     const caps = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } }); assert.equal(caps.status, 200);
-    const capBody = await caps.json() as { connections: Array<{ connectionId: string }> }; const connectionId = capBody.connections[0]!.connectionId;
+    const capBody = await caps.json() as { connections: Array<{ connectionId: string; displayLabel: string }> }; const connectionId = capBody.connections[0]!.connectionId;
+    assert.equal(capBody.connections[0]!.displayLabel, 'facebook account');
     assert.equal(JSON.stringify(capBody).match(/customerId|accountId|profileId|zernio|provider|token|url/i), null);
+    const omittedMedia = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'omitted-media', { connectionId, text: 'safe' }); assert.equal(omittedMedia.status, 400);
     const created = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'public-draft', { connectionId, text: 'safe', media: [] }); assert.equal(created.status, 201);
     const draft = await created.json() as { post: { postId: string } };
     const list = await fetch(`${baseUrl}/api/v1/posts`, { headers: { authorization: 'Bearer reader-token' } }); assert.equal(list.status, 200); assert.equal((await list.json() as { posts: unknown[] }).posts.length, 1);
     const cross = await fetch(`${baseUrl}/api/v1/posts/${encodeURIComponent(draft.post.postId)}`, { headers: { authorization: 'Bearer other-token' } }); assert.equal(cross.status, 404);
     const raw = JSON.parse(await readFile(dbPath, 'utf8')) as { jobs: unknown[] }; assert.equal(raw.jobs.length, 1); // legacy only
-  });
+  }, { RAS_SYSTEM_ADMIN_USER_IDS: 'user_system' });
 });
 
-test('Post V1 schemas are exact, strict, and cannot contain caller customer identifiers', async () => {
+test('Post V1 OpenAPI validates runtime responses and covers all emitted statuses', async () => {
   const openapi = JSON.parse(await readTextFile(join(process.cwd(), 'docs/POST_V1_OPENAPI.json'), 'utf8'));
   const tools = JSON.parse(await readTextFile(join(process.cwd(), 'docs/POST_V1_AGENT_TOOLS.json'), 'utf8'));
   assert.deepEqual(Object.keys(openapi.paths).sort(), ['/api/v1/posts', '/api/v1/posts/capabilities', '/api/v1/posts/drafts', '/api/v1/posts/{postId}']);
   const serialized = JSON.stringify({ openapi, tools });
   assert.equal(/customerId|tenantId|accountId|profileId|zernio|provider|internal.*url|raw.*error/i.test(serialized), false);
   for (const schema of Object.values(openapi.components.schemas) as Array<Record<string, unknown>>) assert.equal(schema.additionalProperties, false);
+  const Ajv = (AjvModule as unknown as { default?: new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } }; }).default ?? AjvModule as unknown as new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } };
+  const ajv = new Ajv({ strict: false }); ajv.addSchema({ ...openapi, $id: 'post-v1' }, 'post-v1');
+  const validateCapability = ajv.compile({ $ref: 'post-v1#/components/schemas/CapabilitiesEnvelope' });
+  const validateDraft = ajv.compile({ $ref: 'post-v1#/components/schemas/PostEnvelope' });
+  await withApi(async (baseUrl) => {
+    const caps = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
+    const capBody = await caps.json(); assert.equal(caps.status, 200); assert.equal(validateCapability(capBody), true, JSON.stringify(validateCapability.errors));
+    const connectionId = capBody.connections[0].connectionId;
+    const created = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'schema-draft', { connectionId, text: 'safe', media: [] });
+    const postBody = await created.json(); assert.equal(created.status, 201); assert.equal(validateDraft(postBody), true, JSON.stringify(validateDraft.errors));
+  });
+  const expectedStatuses: Record<string, string[]> = {
+    listPostCapabilities: ['200', '401', '403', '429', '503'],
+    createDraft: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
+    listDrafts: ['200', '401', '403', '429', '503'],
+    getDraft: ['200', '401', '403', '404', '429', '503'],
+  };
+  for (const operation of Object.values(openapi.paths).flatMap((path: any) => Object.values(path) as any[])) assert.deepEqual(Object.keys(operation.responses).sort(), expectedStatuses[operation.operationId]);
+  assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media']);
+  assert.deepEqual(openapi.components.schemas.Connection.properties.reasonCode.enum, ['connection_unavailable', 'posting_unavailable']);
+  assert.deepEqual(openapi.components.schemas.DraftCreateRequest.required, ['connectionId', 'text', 'media']);
 });
 
 test('scheduling API creates drafts/schedules atomically, idempotently, and tenant-scoped without accepting publishNow', async () => {

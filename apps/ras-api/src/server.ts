@@ -189,12 +189,21 @@ function hasScope(scopes: string[], requiredScope?: string): boolean {
 
 type CustomerAccess = 'ok' | 'unauthorized' | 'forbidden' | 'rate_limited' | 'rate_limit_unavailable';
 
+function systemAdminUserIds(): Set<string> {
+  return new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
+}
+
+function isSystemAdminPrincipal(principal: import('../../../packages/shared/src/types.js').RasPrincipal): boolean {
+  return principal.role === 'admin' || (principal.userId !== undefined && systemAdminUserIds().has(principal.userId));
+}
+
 async function requireCustomerAccess(req: IncomingMessage, customerId: string, requiredScope?: string): Promise<{ status: CustomerAccess; retryAfterSeconds?: number; remaining?: number; principal?: import('../../../packages/shared/src/types.js').RasPrincipal }> {
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   if (!principal) return { status: 'unauthorized' };
   if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden', principal };
   const principalUser = principal.userId ? (await store.load()).users.find((row) => row.id === principal.userId) : undefined;
-  if (principal.role === 'admin' || principalUser?.role === 'admin') return { status: 'forbidden', principal };
+  // Tenant-local routes retain existing role semantics; Post V1 applies the global system-admin deny in requirePostPrincipal.
+  if (principalUser?.role === 'admin') return { status: 'forbidden', principal };
   if (principal.authType === 'pat' && principal.tokenId) {
     const configuredLimit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
     const limit = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 120;
@@ -221,7 +230,7 @@ async function requirePostPrincipal(req: IncomingMessage, requiredScope: 'posts:
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   if (!principal) return { status: 'unauthorized' as const };
   // Customer API access is bound to the authenticated identity, never a route/body selector.
-  if (principal.role === 'admin' || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden' as const };
+  if (isSystemAdminPrincipal(principal) || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden' as const };
   const access = await requireCustomerAccess(req, principal.customerId, requiredScope);
   return access.status === 'ok' ? { status: 'ok' as const, principal } : access;
 }
@@ -234,8 +243,7 @@ async function requireSessionPrincipal(req: IncomingMessage): Promise<import('..
 async function requireAdminSession(req: IncomingMessage): Promise<import('../../../packages/shared/src/types.js').RasPrincipal | undefined> {
   const principal = await requireSessionPrincipal(req);
   // Global operations access is deliberately separate from tenant-local roles.
-  const systemAdminIds = new Set((process.env.RAS_SYSTEM_ADMIN_USER_IDS ?? '').split(',').map((id) => id.trim()).filter(Boolean));
-  return principal?.userId && systemAdminIds.has(principal.userId) ? principal : undefined;
+  return principal && isSystemAdminPrincipal(principal) ? principal : undefined;
 }
 
 function endAdminAccessError(res: { statusCode: number; end: (chunk?: string) => void }, authenticated: boolean): void {
@@ -1068,7 +1076,7 @@ const server = createServer(async (req, res) => {
     const connectionId = stringField(body, 'connectionId');
     const text = stringField(body, 'text')?.trim();
     const media = body.media;
-    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || text.length === 0 || media !== undefined && (!Array.isArray(media) || media.length !== 0) || 'publishNow' in body || 'scheduleAtIso' in body) {
+    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || text.length === 0 || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || 'publishNow' in body || 'scheduleAtIso' in body) {
       res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_draft_request' })); return;
     }
     const state = await store.load();
