@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { renderSqlMigration, RAS_SCHEMA_VERSION } from './dbSchema.js';
 import type {
@@ -54,6 +54,20 @@ export interface RasPersistentState {
   checkoutIntents: RasCheckoutIntent[];
   googleOAuthStates: StoredGoogleOAuthState[];
 }
+
+
+interface CheckoutIntentSidecarDocument {
+  formatVersion: 1;
+  generation: number;
+  legacyMigrationComplete: boolean;
+  intents: RasCheckoutIntent[];
+  checksum: string;
+}
+
+function checkoutIntentChecksum(formatVersion: number, generation: number, legacyMigrationComplete: boolean, intents: RasCheckoutIntent[]): string {
+  return createHash('sha256').update(JSON.stringify({ formatVersion, generation, legacyMigrationComplete, intents })).digest('hex');
+}
+function checkoutIntentDocumentsEqual(left: RasCheckoutIntent, right: RasCheckoutIntent): boolean { return JSON.stringify(left) === JSON.stringify(right); }
 
 export interface StoredGoogleOAuthState {
   state: string;
@@ -243,11 +257,12 @@ function normalizeEntitlement(customer: RasCustomer, activeConnectedAccounts: nu
 export class JsonRasStore {
   private static readonly lockContext = new AsyncLocalStorage<Set<string>>();
 
-  constructor(private readonly path: string) {
+  constructor(private readonly path: string, private readonly checkoutIntentsPath: string = `${path}.checkout-intents`) {
     return new Proxy(this, {
       get(target, property, receiver) {
         const value = Reflect.get(target, property, receiver);
-        if (typeof value !== 'function' || property === 'acquireLock' || property === 'withLock') return value;
+        // Internal helpers must not be proxied: private calls carry typed arguments (e.g. expiry timestamp).
+        if (typeof value !== 'function' || ['acquireLock', 'withLock', 'expireCheckoutIntent', 'checkoutIntentDocuments', 'selectCheckoutIntentDocument', 'loadCheckoutIntents', 'writeCheckoutIntents', 'readCheckoutIntentDocument', 'fileExists', 'readIfExists', 'write', 'load', 'mutate'].includes(String(property))) return value;
         return (...args: unknown[]) => target.withLock(() => Reflect.apply(value, receiver, args));
       },
     });
@@ -682,41 +697,47 @@ export class JsonRasStore {
     return { customer, orders: state.orders.filter((row) => row.customerId === customerId), profileSlots: state.profileSlots.filter((row) => row.customerId === customerId), sandbox: customer.sandboxId ? state.sandboxes.find((row) => row.id === customer.sandboxId) : undefined, agents: state.agents.filter((row) => row.customerId === customerId), auditLogs: state.auditLogs.filter((row) => row.customerId === customerId).sort((a, b) => Date.parse(b.createdAtIso) - Date.parse(a.createdAtIso)) };
   }
 
-  async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & Partial<Pick<RasCheckoutIntent, 'id' | 'createdAtIso' | 'updatedAtIso'>>): Promise<RasCheckoutIntent> {
-    const state = await this.load();
-    const now = new Date().toISOString();
-    const intent: RasCheckoutIntent = { ...input, id: input.id ?? `checkout_${randomBytes(16).toString('hex')}`, status: 'created', createdAtIso: input.createdAtIso ?? now, updatedAtIso: input.updatedAtIso ?? now };
-    state.checkoutIntents.push(intent);
-    await this.write(state);
-    return intent;
+  async createCheckoutIntent(input: Omit<RasCheckoutIntent, 'id' | 'status' | 'createdAtIso' | 'updatedAtIso'> & { nowIso?: string }): Promise<RasCheckoutIntent> {
+    const main = await this.load(); const intents = await this.loadCheckoutIntents(main); const now = input.nowIso ?? new Date().toISOString();
+    const customer = main.customers.find((row) => row.id === input.customerId);
+    if (!customer || customer.isSystemPrincipal) throw new Error('checkout_not_available');
+    const samePurchase = (row: Pick<RasCheckoutIntent, 'customerId' | 'plan' | 'billingCycle' | 'extraConnectSlots'>) => row.customerId === input.customerId && row.plan === input.plan && row.billingCycle === input.billingCycle && row.extraConnectSlots === input.extraConnectSlots;
+    if (intents.some((row) => samePurchase(row) && (row.status === 'created' || row.status === 'bound') && Date.parse(row.expiresAtIso) > Date.parse(now))) throw new Error('checkout_already_in_progress');
+    const { nowIso: _nowIso, ...intentInput } = input;
+    const intent: RasCheckoutIntent = { ...intentInput, id: `checkout_${randomBytes(16).toString('hex')}`, status: 'created', createdAtIso: now, updatedAtIso: now };
+    intents.push(intent); await this.writeCheckoutIntents(intents); return intent;
   }
-
-  async getCheckoutIntent(id: string): Promise<RasCheckoutIntent | undefined> {
-    const state = await this.load();
-    return state.checkoutIntents.find((row) => row.id === id);
+  private expireCheckoutIntent(intent: RasCheckoutIntent, nowIso: string): boolean {
+    if ((intent.status === 'created' || intent.status === 'bound') && Date.parse(intent.expiresAtIso) <= Date.parse(nowIso)) { intent.status = 'expired'; intent.updatedAtIso = nowIso; return true; } return false;
   }
-
+  async getCheckoutIntent(id: string, nowIso = new Date().toISOString()): Promise<RasCheckoutIntent | undefined> {
+    const intents = await this.loadCheckoutIntents(await this.load()); const intent = intents.find((row) => row.id === id); if (!intent) return undefined;
+    if (this.expireCheckoutIntent(intent, nowIso)) await this.writeCheckoutIntents(intents); return intent;
+  }
   async bindCheckoutIntentPaypalOrder(input: { intentId: string; customerId: string; paypalOrderId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'consumed' | 'already_bound' | 'paypal_order_bound' }> {
-    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
-    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
-    if (!intent) return { error: 'not_found' };
-    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
-    if (intent.status === 'consumed') return { error: 'consumed' };
-    if (intent.paypalOrderId && intent.paypalOrderId !== input.paypalOrderId) return { error: 'already_bound' };
-    if (state.checkoutIntents.some((row) => row.id !== intent.id && row.paypalOrderId === input.paypalOrderId)) return { error: 'paypal_order_bound' };
-    intent.paypalOrderId = input.paypalOrderId; intent.status = 'bound'; intent.boundAtIso ??= now; intent.updatedAtIso = now;
-    await this.write(state); return { intent };
+    const intents = await this.loadCheckoutIntents(await this.load()); const now = input.nowIso ?? new Date().toISOString(); const intent = intents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    if (!intent) return { error: 'not_found' }; if (this.expireCheckoutIntent(intent, now)) { await this.writeCheckoutIntents(intents); return { error: 'expired' }; }
+    if (intent.status === 'consumed') return { error: 'consumed' }; if (intent.status === 'cancelled' || intent.status === 'expired') return { error: 'not_found' };
+    if (intent.paypalOrderId && intent.paypalOrderId !== input.paypalOrderId) return { error: 'already_bound' }; if (intents.some((row) => row.id !== intent.id && row.paypalOrderId === input.paypalOrderId)) return { error: 'paypal_order_bound' };
+    intent.paypalOrderId = input.paypalOrderId; intent.status = 'bound'; intent.boundAtIso ??= now; intent.updatedAtIso = now; await this.writeCheckoutIntents(intents); return { intent };
+  }
+  async cancelCheckoutIntent(input: { intentId: string; customerId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'consumed' }> {
+    const intents = await this.loadCheckoutIntents(await this.load()); const now = input.nowIso ?? new Date().toISOString(); const intent = intents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    if (!intent) return { error: 'not_found' }; if (this.expireCheckoutIntent(intent, now)) { await this.writeCheckoutIntents(intents); return { error: 'not_found' }; }
+    if (intent.status === 'expired') return { error: 'not_found' }; if (intent.status === 'consumed') return { error: 'consumed' };
+    if (intent.status !== 'cancelled') { intent.status = 'cancelled'; intent.updatedAtIso = now; await this.writeCheckoutIntents(intents); } return { intent };
   }
 
   async consumeCheckoutIntentAfterCapture(input: { intentId: string; customerId: string; paypalOrderId: string; transactionId: string; nowIso?: string }): Promise<{ intent?: RasCheckoutIntent; error?: 'not_found' | 'expired' | 'not_bound' | 'already_consumed' }> {
-    const state = await this.load(); const now = input.nowIso ?? new Date().toISOString();
-    const intent = state.checkoutIntents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
+    const intents = await this.loadCheckoutIntents(await this.load());
+    const now = input.nowIso ?? new Date().toISOString();
+    const intent = intents.find((row) => row.id === input.intentId && row.customerId === input.customerId);
     if (!intent) return { error: 'not_found' };
     if (intent.status === 'consumed') return intent.transactionId === input.transactionId ? { intent } : { error: 'already_consumed' };
-    if (Date.parse(intent.expiresAtIso) <= Date.parse(now)) { intent.status = 'expired'; intent.updatedAtIso = now; await this.write(state); return { error: 'expired' }; }
+    if (this.expireCheckoutIntent(intent, now)) { await this.writeCheckoutIntents(intents); return { error: 'expired' }; }
     if (intent.status !== 'bound' || intent.paypalOrderId !== input.paypalOrderId) return { error: 'not_bound' };
     intent.status = 'consumed'; intent.transactionId = input.transactionId; intent.consumedAtIso = now; intent.updatedAtIso = now;
-    await this.write(state); return { intent };
+    await this.writeCheckoutIntents(intents); return { intent };
   }
 
   async recordBillingPaymentCapture(input: Omit<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'> & Partial<Pick<RasBillingPayment, 'id' | 'provisionStatus' | 'retryCount'>>): Promise<RasBillingPayment> {
@@ -1366,6 +1387,33 @@ export class JsonRasStore {
     state.webhookFailures = (state.webhookFailures ?? []).filter((row) => Date.parse(row.createdAtIso) >= cutoff);
   }
 
+  private async checkoutIntentDocuments(): Promise<Array<{ path: string; document: CheckoutIntentSidecarDocument }>> {
+    const paths = [this.checkoutIntentsPath, `${this.checkoutIntentsPath}.tmp`, `${this.checkoutIntentsPath}.bak`];
+    const documents = await Promise.all(paths.map(async (path) => ({ path, document: await this.readCheckoutIntentDocument(path) })));
+    return documents.filter((entry): entry is { path: string; document: CheckoutIntentSidecarDocument } => entry.document !== undefined);
+  }
+  private selectCheckoutIntentDocument(documents: Array<{ path: string; document: CheckoutIntentSidecarDocument }>): { path: string; document: CheckoutIntentSidecarDocument } | undefined {
+    if (!documents.length) return undefined;
+    const generation = Math.max(...documents.map((entry) => entry.document.generation));
+    const candidates = documents.filter((entry) => entry.document.generation === generation);
+    if (candidates.some((entry) => JSON.stringify(entry.document) !== JSON.stringify(candidates[0]!.document))) throw new Error('checkout_intent_store_unavailable');
+    return candidates[0];
+  }
+  private async loadCheckoutIntents(main: RasPersistentState): Promise<RasCheckoutIntent[]> {
+    const documents = await this.checkoutIntentDocuments(); let selected = this.selectCheckoutIntentDocument(documents);
+    if (!selected) { const paths = [this.checkoutIntentsPath, `${this.checkoutIntentsPath}.tmp`, `${this.checkoutIntentsPath}.bak`]; const exists = await Promise.all(paths.map((path) => this.fileExists(path))); if (exists.some(Boolean)) throw new Error('checkout_intent_store_unavailable'); selected = { path: this.checkoutIntentsPath, document: { formatVersion: 1, generation: 0, legacyMigrationComplete: false, intents: [], checksum: checkoutIntentChecksum(1, 0, false, []) } }; }
+    const document = selected.document;
+    if (!document.legacyMigrationComplete) { const byId = new Map(document.intents.map((intent) => [intent.id, intent])); for (const legacy of main.checkoutIntents ?? []) { const existing = byId.get(legacy.id); if (existing && !checkoutIntentDocumentsEqual(existing, legacy)) throw new Error('checkout_intent_legacy_conflict'); if (!existing) { document.intents.push(legacy); byId.set(legacy.id, legacy); } } await this.writeCheckoutIntents(document.intents, document.generation, true); }
+    else if (selected.path !== this.checkoutIntentsPath) await this.writeCheckoutIntents(document.intents, document.generation, true);
+    return document.intents;
+  }
+  private async writeCheckoutIntents(intents: RasCheckoutIntent[], priorGeneration?: number, legacyMigrationComplete: boolean = true): Promise<void> {
+    const selected = this.selectCheckoutIntentDocument(await this.checkoutIntentDocuments()); const generation = Math.max(priorGeneration ?? 0, selected?.document.generation ?? 0) + 1; const document: CheckoutIntentSidecarDocument = { formatVersion: 1, generation, legacyMigrationComplete, intents, checksum: checkoutIntentChecksum(1, generation, legacyMigrationComplete, intents) };
+    await mkdir(dirname(this.checkoutIntentsPath), { recursive: true }); const tempPath = `${this.checkoutIntentsPath}.tmp`; const handle = await open(tempPath, 'w', 0o600); try { await handle.writeFile(`${JSON.stringify(document)}\n`); await handle.sync(); } finally { await handle.close(); } if (await this.fileExists(this.checkoutIntentsPath)) await rename(this.checkoutIntentsPath, `${this.checkoutIntentsPath}.bak`); await rename(tempPath, this.checkoutIntentsPath); const directory = await open(dirname(this.checkoutIntentsPath), 'r'); try { await directory.sync(); } finally { await directory.close(); }
+  }
+  private async readCheckoutIntentDocument(path: string): Promise<CheckoutIntentSidecarDocument | undefined> { try { const parsed = JSON.parse(await readFile(path, 'utf8')) as CheckoutIntentSidecarDocument; if (parsed.formatVersion !== 1 || !Number.isInteger(parsed.generation) || typeof parsed.legacyMigrationComplete !== 'boolean' || !Array.isArray(parsed.intents) || parsed.checksum !== checkoutIntentChecksum(parsed.formatVersion, parsed.generation, parsed.legacyMigrationComplete, parsed.intents)) return undefined; return parsed; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; return undefined; } }
+  private async fileExists(path: string): Promise<boolean> { try { await readFile(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; } }
+
   private async readIfExists(): Promise<RasPersistentState | undefined> {
     try {
       const raw = await readFile(this.path, 'utf8');
@@ -1396,5 +1444,5 @@ function hashPat(token: string): string {
 }
 
 export function createStoreFromEnv(env: NodeJS.ProcessEnv = process.env): JsonRasStore {
-  return new JsonRasStore(env.RAS_DB_PATH ?? '/data/ras-store.json');
+  const mainPath = env.RAS_DB_PATH ?? '/data/ras-store.json'; return new JsonRasStore(mainPath, env.RAS_CHECKOUT_INTENTS_PATH ?? `${mainPath}.checkout-intents`);
 }

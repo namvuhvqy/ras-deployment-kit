@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 
 test('JsonRasStore migrates an empty store with current schema metadata', async () => {
@@ -338,11 +339,86 @@ test('JsonRasStore checkout intents bind one PayPal order and consume exactly on
   try {
     const store = new JsonRasStore(join(dir, 'ras-store.json'));
     await store.migrate();
-    const intent = await store.createCheckoutIntent({ customerId: 'cust_a', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, amount: '25', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    await store.upsertCustomer({ id: 'cust_a', name: 'A', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+    const intent = await store.createCheckoutIntent({ customerId: 'cust_a', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 1, amount: '25', currency: 'USD', expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() });
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_b', paypalOrderId: 'ORDER-1' })).error, 'not_found');
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1' })).intent?.status, 'bound');
     assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-2' })).error, 'already_bound');
     assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-1' })).intent?.status, 'consumed');
     assert.equal((await store.consumeCheckoutIntentAfterCapture({ intentId: intent.id, customerId: 'cust_a', paypalOrderId: 'ORDER-1', transactionId: 'CAP-2' })).error, 'already_consumed');
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('checkout intent TTL expires fail-closed and releases the one-open invariant', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-checkout-ttl-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'main.json'), join(dir, 'checkout.json'));
+    await store.migrate();
+    await store.upsertCustomer({ id: 'cust_ttl', name: 'TTL', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+    const intent = await store.createCheckoutIntent({ customerId: 'cust_ttl', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, amount: '19.00', currency: 'USD', expiresAtIso: '2020-01-01T00:00:00.000Z', nowIso: '2019-12-31T23:00:00.000Z' });
+    assert.equal((await store.bindCheckoutIntentPaypalOrder({ intentId: intent.id, customerId: 'cust_ttl', paypalOrderId: 'ORDER-TTL', nowIso: '2020-01-01T00:00:00.000Z' })).error, 'expired');
+    assert.equal((await store.cancelCheckoutIntent({ intentId: intent.id, customerId: 'cust_ttl', nowIso: '2020-01-01T00:00:00.000Z' })).error, 'not_found');
+    const replacement = await store.createCheckoutIntent({ customerId: 'cust_ttl', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, amount: '19.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z', nowIso: '2020-01-01T00:00:01.000Z' });
+    assert.equal(replacement.status, 'created');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('checkout sidecar checksum recovery, total-invalid fail-closed, and legacy migration marker are deterministic', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-checkout-sidecar-'));
+  try {
+    const main = join(dir, 'main.json'); const sidecar = join(dir, 'checkout.json');
+    const store = new JsonRasStore(main, sidecar); await store.migrate();
+    await store.upsertCustomer({ id: 'cust_sidecar', name: 'Sidecar', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+    await store.createCheckoutIntent({ customerId: 'cust_sidecar', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, amount: '19.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    const primary = await readFile(sidecar, 'utf8'); const valid = JSON.parse(primary) as { legacyMigrationComplete: boolean; checksum: string };
+    assert.equal(valid.legacyMigrationComplete, true);
+    const intentId = (JSON.parse(primary) as { intents: Array<{ id: string }> }).intents[0]!.id;
+    await writeFile(`${sidecar}.tmp`, primary); await writeFile(sidecar, JSON.stringify({ ...valid, checksum: 'corrupt' }));
+    assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent(intentId))?.customerId, 'cust_sidecar');
+    await writeFile(`${sidecar}.bak`, primary); await writeFile(sidecar, 'bad'); await writeFile(`${sidecar}.tmp`, 'bad');
+    assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent(intentId))?.customerId, 'cust_sidecar');
+    await writeFile(sidecar, 'bad'); await writeFile(`${sidecar}.tmp`, 'bad'); await writeFile(`${sidecar}.bak`, 'bad');
+    await assert.rejects(() => new JsonRasStore(main, sidecar).getCheckoutIntent('opaque-intent-id'), /checkout_intent_store_unavailable/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('checkout sidecar selects and promotes the highest generation and rejects equal-generation divergence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-checkout-generation-'));
+  try {
+    const main = join(dir, 'main.json'); const sidecar = join(dir, 'checkout.json');
+    const store = new JsonRasStore(main, sidecar); await store.migrate();
+    await store.upsertCustomer({ id: 'cust_generation', name: 'Generation', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+    await store.createCheckoutIntent({ customerId: 'cust_generation', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, amount: '19.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    const olderPrimary = await readFile(sidecar, 'utf8');
+    await store.createCheckoutIntent({ customerId: 'cust_generation', plan: 'pro', billingCycle: 'monthly', extraConnectSlots: 0, amount: '39.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    const newerTemp = await readFile(sidecar, 'utf8');
+    await writeFile(sidecar, olderPrimary); await writeFile(`${sidecar}.tmp`, newerTemp);
+    assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent((JSON.parse(newerTemp) as { intents: Array<{ id: string }> }).intents[1]!.id))?.plan, 'pro');
+    assert.equal((JSON.parse(await readFile(sidecar, 'utf8')) as { generation: number }).generation >= (JSON.parse(newerTemp) as { generation: number }).generation, true);
+    await writeFile(`${sidecar}.tmp`, olderPrimary);
+    assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent((JSON.parse(newerTemp) as { intents: Array<{ id: string }> }).intents[1]!.id))?.plan, 'pro');
+
+    const otherDir = await mkdtemp(join(tmpdir(), 'ras-checkout-generation-other-'));
+    try {
+      const other = new JsonRasStore(join(otherDir, 'main.json'), join(otherDir, 'checkout.json')); await other.migrate();
+      await other.upsertCustomer({ id: 'cust_generation', name: 'Generation', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+      await other.createCheckoutIntent({ customerId: 'cust_generation', plan: 'max', billingCycle: 'monthly', extraConnectSlots: 0, amount: '79.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+      const divergent = JSON.parse(await readFile(join(otherDir, 'checkout.json'), 'utf8')) as { formatVersion: number; generation: number; legacyMigrationComplete: boolean; intents: unknown[]; checksum: string };
+      const selected = JSON.parse(await readFile(sidecar, 'utf8')) as { formatVersion: number; generation: number; legacyMigrationComplete: boolean; intents: unknown[]; checksum: string };
+      divergent.generation = selected.generation;
+      divergent.checksum = createHash('sha256').update(JSON.stringify({ formatVersion: divergent.formatVersion, generation: divergent.generation, legacyMigrationComplete: divergent.legacyMigrationComplete, intents: divergent.intents })).digest('hex');
+      await writeFile(sidecar, JSON.stringify(selected)); await writeFile(`${sidecar}.tmp`, JSON.stringify(divergent));
+      await assert.rejects(() => new JsonRasStore(main, sidecar).getCheckoutIntent('opaque-intent-id'), /checkout_intent_store_unavailable/);
+    } finally { await rm(otherDir, { recursive: true, force: true }); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('staging compose mounts exact checkout sidecar only into API', async () => {
+  const compose = await readFile(join(process.cwd(), 'docker-compose.staging.yml'), 'utf8');
+  const api = compose.split('\n  ras-api:')[1]?.split('\n  ras-worker:')[0] ?? '';
+  const worker = compose.split('\n  ras-worker:')[1]?.split('\n# Explicit environment-qualified volumes')[0] ?? '';
+  assert.match(compose, /name: ras-deployment-kit_ras-checkout-intents-staging/);
+  assert.match(api, /RAS_CHECKOUT_INTENTS_PATH: \/checkout-intents\/checkout-intents\.json/);
+  assert.match(api, /ras-checkout-intents:\/checkout-intents/);
+  assert.doesNotMatch(worker, /checkout-intents|RAS_CHECKOUT_INTENTS_PATH/);
 });

@@ -13,9 +13,10 @@ export type RasBasePlanId = 'none' | 'lite' | 'pro' | 'max';
 export type RasBillingCycle = 'monthly' | 'yearly';
 
 export type RasBillingPaymentStatus = 'captured' | 'refunded' | 'failed';
-export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'expired';
 export type RasProvisionStatus = 'pending' | 'pending_retry' | 'provisioned' | 'failed';
+export type RasCheckoutIntentStatus = 'created' | 'bound' | 'consumed' | 'cancelled' | 'expired';
 
+/** Server-priced checkout authorization; browser inputs select SKU/cycle/quantity only. */
 export interface RasCheckoutIntent {
   id: string;
   customerId: string;
@@ -162,6 +163,8 @@ export interface RasApiRateLimitBucket {
 export interface RasCustomer {
   id: string;
   tenantId?: string;
+  /** System administration identity; never a checkout customer. */
+  isSystemPrincipal?: boolean;
   name: string;
   email?: string;
   zernioProfileId?: string;

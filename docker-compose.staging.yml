@@ -29,11 +29,13 @@ services:
       NODE_ENV: production
       PORT: 8080
       RAS_DB_PATH: /data/ras-store.json
+      RAS_CHECKOUT_INTENTS_PATH: /checkout-intents/checkout-intents.json
       ZERNIO_MODE: ${ZERNIO_MODE:-dry-run}
       ZERNIO_BASE_URL: ${ZERNIO_BASE_URL:-https://zernio.com/api/v1}
       RAS_REDIS_HOST: ras-redis
     volumes:
       - ras-data:/data
+      - ras-checkout-intents:/checkout-intents
     networks:
       - default
       - ras-internal
@@ -76,6 +78,8 @@ services:
 volumes:
   ras-data:
     name: ras-deployment-kit_ras-data-staging
+  ras-checkout-intents:
+    name: ras-deployment-kit_ras-checkout-intents-staging
   ras-redis-data:
     name: ras-deployment-kit_ras-redis-data-staging
 

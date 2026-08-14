@@ -107,6 +107,10 @@ function stringField(body: Record<string, unknown>, field: string): string | und
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function checkoutIntentStoreFailure(message: string): boolean {
+  return message === 'checkout_intent_store_unavailable' || message === 'checkout_intent_legacy_conflict';
+}
+
 function numberField(body: Record<string, unknown>, field: string): number | undefined {
   const value = body[field];
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -329,6 +333,14 @@ function billingCycleField(body: Record<string, unknown>): RasBillingCycle {
   return stringField(body, 'billing_cycle') === 'yearly' ? 'yearly' : 'monthly';
 }
 
+
+const MAX_EXTRA_CONNECT_SLOTS = 100;
+/** Slice-A-only strict parser; existing billing routes retain their legacy parser. */
+function checkoutBillingCycleField(body: Record<string, unknown>): RasBillingCycle | undefined {
+  const value = stringField(body, 'billing_cycle');
+  return value === 'monthly' || value === 'yearly' ? value : undefined;
+}
+
 function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' {
   return (
     value === 'facebook' ||
@@ -378,6 +390,21 @@ const server = createServer(async (req, res) => {
   res.setHeader('content-type', 'application/json; charset=utf-8');
 
   if (await zernioWebhookRouter(req, res)) return;
+
+  if (req.method === 'GET' && req.url === '/meta/checkout-contract') {
+    const backendBuildSha = process.env.RAS_BUILD_SHA;
+    const contractVersion = process.env.RAS_CHECKOUT_CONTRACT_VERSION;
+    const relayKeyId = process.env.RAS_RELAY_KEY_ID;
+    const paypalMode = process.env.PAYPAL_MODE;
+    const zernioMode = process.env.ZERNIO_MODE;
+    if (!backendBuildSha || !relayKeyId || contractVersion !== 'checkout-intent-v1' || paypalMode !== 'sandbox' || zernioMode !== 'dry-run') {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'checkout_contract_attestation_unavailable' }));
+      return;
+    }
+    res.end(JSON.stringify({ ok: true, backendBuildSha, contractVersion, relayKeyId, paypalMode, zernioMode }));
+    return;
+  }
 
   if (req.url === '/health') {
     const state = await store.load();
@@ -742,17 +769,71 @@ const server = createServer(async (req, res) => {
     const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
     if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
     const body = await readJsonBody(req);
-    const plan = basePlanField(body); const billingCycle = billingCycleField(body);
-    const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']);
-    if (!plan || extraConnectSlots === undefined || extraConnectSlots < 0 || !Number.isInteger(extraConnectSlots)) {
-      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); return;
+    const plan = basePlanField(body);
+    const extraConnectSlots = firstNumberField(body, ['extra_connect_slots', 'connect_slots', 'extraConnectSlots']) ?? 0;
+    const billingCycle = checkoutBillingCycleField(body);
+    if (!plan || !billingCycle || !Number.isInteger(extraConnectSlots) || extraConnectSlots < 0 || extraConnectSlots > MAX_EXTRA_CONNECT_SLOTS) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_selection' })); return;
     }
-    const pricing = RAS_PLAN_PRICES[plan];
-    const amount = (billingCycle === 'yearly' ? pricing.yearlyMonthly * 12 : pricing.monthly) + (billingCycle === 'yearly' ? extraConnectSlots * 6 * 12 : extraConnectSlots * 6);
-    const ttlMinutes = Number.parseInt(process.env.RAS_CHECKOUT_INTENT_TTL_MINUTES ?? '30', 10);
-    const expiresAtIso = new Date(Date.now() + (Number.isFinite(ttlMinutes) && ttlMinutes > 0 ? ttlMinutes : 30) * 60_000).toISOString();
-    const intent = await store.createCheckoutIntent({ customerId: dashboard.customer.id, plan, billingCycle, extraConnectSlots, amount: String(amount), currency: 'USD', expiresAtIso });
-    res.statusCode = 201; res.end(JSON.stringify({ ok: true, intent })); return;
+    const price = RAS_PLAN_PRICES[plan];
+    const amount = billingCycle === 'yearly' ? price.yearlyMonthly * 12 + extraConnectSlots * 6 * 12 : price.monthly + extraConnectSlots * 6;
+    try {
+      const intent = await store.createCheckoutIntent({
+        customerId: dashboard.customer.id,
+        plan,
+        billingCycle,
+        extraConnectSlots,
+        amount: amount.toFixed(2),
+        currency: 'USD',
+        expiresAtIso: new Date(Date.now() + 30 * 60_000).toISOString(),
+      });
+      res.statusCode = 201;
+      res.end(JSON.stringify({ ok: true, intent }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (message === 'checkout_already_in_progress') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: message })); }
+      else if (checkoutIntentStoreFailure(message)) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); }
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && req.url?.startsWith('/billing/checkout-intents/')) {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    let intentId: string;
+    try {
+      intentId = decodeURIComponent(req.url.slice('/billing/checkout-intents/'.length));
+    } catch {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_id' })); return;
+    }
+    try {
+      const intent = await store.getCheckoutIntent(intentId);
+      if (!intent || intent.customerId !== dashboard.customer.id) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+      res.end(JSON.stringify({ ok: true, intent }));
+    } catch (error) {
+      if (checkoutIntentStoreFailure(error instanceof Error ? error.message : '')) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_unavailable' })); }
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/billing/checkout-intents/cancel') {
+    const dashboard = await store.getDashboardForSession(bearerToken(req) ?? '');
+    if (!dashboard) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    const body = await readJsonBody(req);
+    const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
+    if (!intentId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'missing_intent_id' })); return; }
+    try {
+      const cancelled = await store.cancelCheckoutIntent({ intentId, customerId: dashboard.customer.id });
+      if (cancelled.error === 'not_found') { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+      if (cancelled.error === 'consumed') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_consumed' })); return; }
+      res.end(JSON.stringify({ ok: true, intent: cancelled.intent }));
+    } catch (error) {
+      if (checkoutIntentStoreFailure(error instanceof Error ? error.message : '')) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_unavailable' })); }
+    }
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/checkout-intents/bind-paypal-order') {
@@ -761,10 +842,16 @@ const server = createServer(async (req, res) => {
     const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
-    if (!intentId || !customerId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_binding' })); return; }
-    const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
-    if (!bound.intent) { res.statusCode = bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: `checkout_intent_${bound.error}` })); return; }
-    res.end(JSON.stringify({ ok: true, intent: bound.intent })); return;
+    if (!intentId || !customerId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_bind' })); return; }
+    try {
+      const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
+      if (bound.error) { res.statusCode = bound.error === 'expired' ? 410 : bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: bound.error })); return; }
+      res.end(JSON.stringify({ ok: true, intent: bound.intent }));
+    } catch (error) {
+      if (checkoutIntentStoreFailure(error instanceof Error ? error.message : '')) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_unavailable' })); }
+    }
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/billing/payments/captured') {
