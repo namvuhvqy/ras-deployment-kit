@@ -1,0 +1,9 @@
+{
+  "version": "post-v1-slice1",
+  "tools": [
+    { "name": "ras_posts_list_capabilities", "description": "List customer-safe eligible post connections. Requires posts:read.", "input_schema": { "type": "object", "additionalProperties": false, "required": ["customerId"], "properties": { "customerId": { "type": "string" } } } },
+    { "name": "ras_posts_list_drafts", "description": "List customer-safe draft projections. Requires posts:read.", "input_schema": { "type": "object", "additionalProperties": false, "required": ["customerId"], "properties": { "customerId": { "type": "string" } } } },
+    { "name": "ras_posts_get_draft", "description": "Read one opaque draft projection. Cross-tenant access returns opaque not-found. Requires posts:read.", "input_schema": { "type": "object", "additionalProperties": false, "required": ["customerId", "postId"], "properties": { "customerId": { "type": "string" }, "postId": { "type": "string" } } } },
+    { "name": "ras_posts_create_draft", "description": "Create or safely replay a draft only. Requires posts:write and Idempotency-Key. Media must be []. Scheduling and publish are unsupported.", "input_schema": { "type": "object", "additionalProperties": false, "required": ["customerId", "connectionId", "text", "idempotencyKey"], "properties": { "customerId": { "type": "string" }, "connectionId": { "type": "string", "pattern": "^conn_" }, "text": { "type": "string", "minLength": 1 }, "media": { "type": "array", "maxItems": 0 }, "idempotencyKey": { "type": "string", "maxLength": 256 } } } }
+  ]
+}

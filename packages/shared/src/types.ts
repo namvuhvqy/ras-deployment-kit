@@ -252,6 +252,8 @@ export interface RasServicePackage {
 export interface ConnectedAccount {
   id: string;
   customerId: string;
+  /** Opaque customer-safe reference, generated once at the durable mapping boundary. */
+  publicConnectionId?: string;
   platform: SocialPlatform;
   zernioAccountId: string;
   zernioProfileId?: string;
@@ -266,12 +268,16 @@ export interface ConnectedAccount {
 
 export type SocialPostStatus = 'draft' | 'queued' | 'scheduled' | 'published' | 'failed';
 
+/** Durable provider-agnostic post core. Provider references remain internal-only. */
 export interface SocialPost {
   id: string;
   customerId: string;
-  jobId: string;
+  /** Slice 1 drafts never enqueue jobs; retained for later scheduling compatibility. */
+  jobId?: string;
   accountId?: string;
   profileId?: string;
+  /** Opaque connection reference copied from the durable account mapping. */
+  connectionId?: string;
   platform: SocialPlatform;
   content?: string;
   mediaUrls?: string[];
@@ -282,6 +288,8 @@ export interface SocialPost {
   zernioPostId?: string;
   platformPostId?: string;
   status: SocialPostStatus;
+  revision?: number;
+  history?: Array<{ atIso: string; event: 'created' }>;
   publishedAtIso?: string;
   errorMessage?: string;
   updatedAtIso: string;

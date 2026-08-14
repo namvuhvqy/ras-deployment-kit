@@ -5,7 +5,7 @@ import { createZernioWebhookRouter } from './webhookRouter.js';
 import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
-import type { RasBasePlanId, RasBillingCycle, RasEntitlement } from '../../../packages/shared/src/types.js';
+import type { RasBasePlanId, RasBillingCycle, RasEntitlement, SocialPlatform, SocialPost } from '../../../packages/shared/src/types.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -193,6 +193,8 @@ async function requireCustomerAccess(req: IncomingMessage, customerId: string, r
   const principal = await store.resolvePrincipal(bearerToken(req) ?? '');
   if (!principal) return { status: 'unauthorized' };
   if (principal.customerId !== customerId || !hasScope(principal.scopes, requiredScope)) return { status: 'forbidden', principal };
+  // Explicitly marked master/system customer identities never access customer surfaces.
+  if ((await store.load()).customers.find((row) => row.id === customerId)?.isSystemPrincipal) return { status: 'forbidden', principal };
   if (principal.authType === 'pat' && principal.tokenId) {
     const configuredLimit = Number.parseInt(process.env.RAS_PAT_RATE_LIMIT_PER_MINUTE ?? '120', 10);
     const limit = Number.isFinite(configuredLimit) && configuredLimit > 0 ? configuredLimit : 120;
@@ -312,8 +314,38 @@ function canonicalPostHash(value: Record<string, unknown>): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
-function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
-  return { monitorId: post.id, accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
+const POST_TEXT_LIMITS: Record<SocialPlatform, number> = {
+  facebook: 63_206, instagram: 2_200, youtube: 5_000, twitter: 280, linkedin: 3_000,
+  tiktok: 4_000, threads: 500, bluesky: 300, telegram: 4_096, whatsapp: 4_096, reddit: 40_000,
+};
+
+function postCapability(account: import('../../../packages/shared/src/types.js').ConnectedAccount) {
+  const allowed = account.status === 'connected' && !account.capabilities?.includes('posts:disabled');
+  return {
+    connectionId: account.publicConnectionId!,
+    displayLabel: account.handle ?? account.username ?? `${account.platform} account`,
+    platform: account.platform,
+    availability: allowed,
+    contentLimit: POST_TEXT_LIMITS[account.platform],
+    allowedModes: allowed ? ['draft'] : [],
+    media: { supported: false },
+    ...(allowed ? {} : { reasonCode: account.status === 'connected' ? 'posting_unavailable' : 'connection_unavailable' }),
+  };
+}
+
+function publicPostCore(post: SocialPost) {
+  return {
+    postId: post.id,
+    connectionId: post.connectionId,
+    platform: post.platform,
+    text: post.content ?? '',
+    media: [],
+    status: post.status,
+    revision: post.revision ?? 1,
+    createdAt: post.createdAtIso,
+    updatedAt: post.updatedAtIso,
+    history: post.history ?? [],
+  };
 }
 
 type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
@@ -958,37 +990,49 @@ const server = createServer(async (req, res) => {
     */
   }
 
-  const postsMatch = req.url ? /^\/customers\/([^/]+)\/posts(?:\/(drafts|schedules))?$/.exec(new URL(req.url, 'http://localhost').pathname) : null;
+  const postsPath = req.url ? new URL(req.url, 'http://localhost').pathname : '';
+  const postsMatch = /^\/customers\/([^/]+)\/posts(?:\/(capabilities|drafts|([^/]+)))?$/.exec(postsPath);
   if (postsMatch) {
     const customerId = decodeURIComponent(postsMatch[1]);
     const operation = postsMatch[2];
-    const access = await requireCustomerAccess(req, customerId, req.method === 'GET' && !operation ? 'posts:read' : 'posts:write');
+    const postId = postsMatch[3] ? decodeURIComponent(postsMatch[3]) : undefined;
+    const access = await requireCustomerAccess(req, customerId, req.method === 'POST' ? 'posts:write' : 'posts:read');
     if (access.status !== 'ok') { endCustomerAccessError(res, access); return; }
-    if (req.method === 'GET' && !operation) { res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicSocialPost) })); return; }
-    if (req.method !== 'POST' || !operation) { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    if (req.method === 'GET' && operation === 'capabilities') {
+      const state = await store.load();
+      res.end(JSON.stringify({ ok: true, connections: state.connectedAccounts.filter((account) => account.customerId === customerId).map(postCapability) }));
+      return;
+    }
+    if (req.method === 'GET' && !operation) {
+      res.end(JSON.stringify({ ok: true, posts: (await store.listSocialPosts(customerId)).map(publicPostCore) })); return;
+    }
+    if (req.method === 'GET' && postId) {
+      const post = await store.getPostCore(customerId, postId);
+      if (!post) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'post_not_found' })); return; }
+      res.end(JSON.stringify({ ok: true, post: publicPostCore(post) })); return;
+    }
+    if (req.method !== 'POST' || operation !== 'drafts') { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
     const idempotencyKey = firstHeader(req, 'idempotency-key')?.trim();
     let body: Record<string, unknown>;
     try { body = await readJsonBody(req); } catch { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_json' })); return; }
-    const accountId = stringField(body, 'accountId');
-    const content = stringField(body, 'content')?.trim();
-    const mediaUrls = mediaUrlsField(body);
-    const scheduleInput = operation === 'schedules' ? stringField(body, 'scheduleAtIso') : undefined;
-    const scheduleAtIso = scheduleInput && Number.isFinite(Date.parse(scheduleInput)) ? new Date(scheduleInput).toISOString() : undefined;
-    if (!idempotencyKey || idempotencyKey.length > 256 || !accountId || !content || content.length > 10_000 || mediaUrls === undefined || 'publishNow' in body || (operation === 'schedules' && (!scheduleAtIso || Date.parse(scheduleAtIso) <= Date.now()))) {
-      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_post_request' })); return;
+    const connectionId = stringField(body, 'connectionId');
+    const text = stringField(body, 'text')?.trim();
+    const media = body.media;
+    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || text.length === 0 || media !== undefined && (!Array.isArray(media) || media.length !== 0) || 'publishNow' in body || 'scheduleAtIso' in body) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_draft_request' })); return;
     }
-    const account = await store.getConnectedAccount(accountId);
-    if (!account || account.customerId !== customerId) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connected_account_not_found' })); return; }
-    if (account.status !== 'connected') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_inactive' })); return; }
-    const profileId = account.zernioProfileId ?? account.profileId;
-    if (!profileId) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'connected_account_profile_missing' })); return; }
-    const payloadHash = canonicalPostHash({ operation, accountId, content, mediaUrls, ...(scheduleAtIso ? { scheduleAtIso } : {}) });
-    const id = `post_${randomUUID()}`; const jobId = `publish_${randomUUID()}`; const createdAtIso = new Date().toISOString();
-    const post: import('../../../packages/shared/src/types.js').SocialPost = { id, jobId, customerId, accountId, profileId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', scheduleAtIso, status: operation === 'drafts' ? 'draft' : 'scheduled', idempotencyKey, idempotencyPayloadHash: payloadHash, createdAtIso, updatedAtIso: createdAtIso };
-    const job: import('../../../packages/shared/src/types.js').RasJob = { id: jobId, customerId, profileId, accountId, platform: account.platform, type: 'publish_post', priority: 'P2', status: 'queued', retryCount: 0, payload: { postId: id, accountId, providerAccountId: account.zernioAccountId, platform: account.platform, content, mediaUrls, isDraft: operation === 'drafts', ...(scheduleAtIso ? { scheduleAtIso } : {}) }, createdAtIso };
-    const result = await store.createPostAndJobIdempotently({ post, job });
+    const state = await store.load();
+    const account = state.connectedAccounts.find((row) => row.customerId === customerId && row.publicConnectionId === connectionId);
+    if (!account) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connection_not_found' })); return; }
+    const capability = postCapability(account);
+    if (!capability.availability) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: capability.reasonCode ?? 'posting_unavailable' })); return; }
+    if (text.length > capability.contentLimit) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'text_limit_exceeded' })); return; }
+    const payloadHash = canonicalPostHash({ connectionId, text, media: [] });
+    const createdAtIso = new Date().toISOString();
+    const post: SocialPost = { id: `post_${randomUUID()}`, customerId, accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: true, status: 'draft', idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history: [{ atIso: createdAtIso, event: 'created' }], createdAtIso, updatedAtIso: createdAtIso };
+    const result = await store.createDraftIdempotently({ post });
     if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
-    res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicSocialPost(result.post), job: { id: result.job.id, type: result.job.type, status: result.job.status } })); return;
+    res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicPostCore(result.post) })); return;
   }
 
   if (req.url?.startsWith('/customers/') && req.url.includes('/connect/facebook/pages')) {

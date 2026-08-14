@@ -1,0 +1,18 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "RAS Post V1 Slice 1", "version": "1.0.0-slice1" },
+  "paths": {
+    "/customers/{customerId}/posts/capabilities": { "get": { "operationId": "listPostCapabilities", "security": [{ "bearerAuth": ["posts:read"] }], "responses": { "200": { "description": "Customer-safe eligible connections" } } } },
+    "/customers/{customerId}/posts": { "get": { "operationId": "listDraftPosts", "security": [{ "bearerAuth": ["posts:read"] }], "responses": { "200": { "description": "Draft projection list" } } } },
+    "/customers/{customerId}/posts/{postId}": { "get": { "operationId": "getDraftPost", "security": [{ "bearerAuth": ["posts:read"] }], "responses": { "200": { "description": "Draft projection" }, "404": { "description": "Opaque post_not_found" } } } },
+    "/customers/{customerId}/posts/drafts": { "post": { "operationId": "createDraftPost", "security": [{ "bearerAuth": ["posts:write"] }], "parameters": [{ "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "maxLength": 256 } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateDraftRequest" } } } }, "responses": { "201": { "description": "Created" }, "200": { "description": "Idempotent replay" }, "409": { "description": "Idempotency conflict or unavailable connection" } } } }
+  },
+  "components": {
+    "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
+    "schemas": {
+      "CreateDraftRequest": { "type": "object", "additionalProperties": false, "required": ["connectionId", "text"], "properties": { "connectionId": { "type": "string", "pattern": "^conn_" }, "text": { "type": "string", "minLength": 1 }, "media": { "type": "array", "maxItems": 0 } } },
+      "PostCapability": { "type": "object", "required": ["connectionId", "platform", "availability", "contentLimit", "allowedModes", "media"], "properties": { "connectionId": { "type": "string" }, "displayLabel": { "type": "string" }, "platform": { "type": "string" }, "availability": { "type": "boolean" }, "reasonCode": { "type": "string" }, "contentLimit": { "type": "integer" }, "allowedModes": { "type": "array", "items": { "const": "draft" } }, "media": { "type": "object", "properties": { "supported": { "const": false } } } } },
+      "DraftPost": { "type": "object", "required": ["postId", "connectionId", "platform", "text", "media", "status", "revision", "createdAtIso", "updatedAtIso", "history"], "properties": { "postId": { "type": "string" }, "connectionId": { "type": "string" }, "platform": { "type": "string" }, "text": { "type": "string" }, "media": { "type": "array", "maxItems": 0 }, "status": { "const": "draft" }, "revision": { "const": 1 }, "createdAtIso": { "type": "string", "format": "date-time" }, "updatedAtIso": { "type": "string", "format": "date-time" }, "history": { "type": "array" } } }
+    }
+  }
+}
