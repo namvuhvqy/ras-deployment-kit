@@ -7,14 +7,15 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
-async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string) => Promise<T>, envOverrides: NodeJS.ProcessEnv = {}): Promise<T> {
+async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string, checkoutIntentsPath?: string) => Promise<T>, envOverrides: NodeJS.ProcessEnv = {}): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ras-mapping-api-'));
   const dbPath = join(dir, 'ras-store.json');
   const port = 19_080 + Math.floor(Math.random() * 1000);
   await writeFile(dbPath, `${JSON.stringify(state, null, 2)}\n`);
+  const checkoutIntentsPath = join(dir, 'checkout-intents.json');
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', ...envOverrides },
+    env: { ...process.env, PORT: String(port), RAS_DB_PATH: dbPath, RAS_CHECKOUT_INTENTS_PATH: checkoutIntentsPath, RAS_INTERNAL_API_TOKEN: 'test-internal-token', ...envOverrides },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -29,7 +30,7 @@ async function withApi<T>(state: Record<string, unknown>, run: (baseUrl: string)
       });
       child.on('error', reject);
     });
-    return await run(`http://127.0.0.1:${port}`);
+    return await run(`http://127.0.0.1:${port}`, checkoutIntentsPath);
   } finally {
     child.kill();
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
@@ -699,6 +700,29 @@ test('checkout intent HTTP routes fail closed for auth, opaque cross-tenant acce
     const response = await fetch(`${baseUrl}/meta/checkout-contract`); assert.equal(response.status, 200);
     assert.deepEqual(Object.keys(await response.json() as object).sort(), ['backendBuildSha', 'contractVersion', 'ok', 'paypalMode', 'relayKeyId', 'zernioMode'].sort());
   }, contractEnv);
+});
+
+test('checkout intent all-invalid sidecar artifacts return stable 503 and preserve health', async () => {
+  const state = emptyState();
+  Object.assign(state, {
+    users: [{ id: 'u_store', email: 'store@test.invalid', role: 'owner', customerId: 'cust_store', status: 'active', createdAtIso: now, updatedAtIso: now }],
+    sessions: [{ id: 's_store', token: 'token_store', userId: 'u_store', createdAtIso: now, expiresAtIso: new Date(Date.now() + 3_600_000).toISOString() }],
+    customers: [{ id: 'cust_store', name: 'Store', status: 'active', createdAtIso: now, updatedAtIso: now, maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} }],
+  });
+  await withApi(state, async (baseUrl, checkoutIntentsPath) => {
+    assert.ok(checkoutIntentsPath);
+    await Promise.all([writeFile(checkoutIntentsPath!, 'bad'), writeFile(`${checkoutIntentsPath}.tmp`, 'bad'), writeFile(`${checkoutIntentsPath}.bak`, 'bad')]);
+    const headers = { authorization: 'Bearer token_store', 'content-type': 'application/json' };
+    const create = await fetch(`${baseUrl}/billing/checkout-intents`, { method: 'POST', headers, body: JSON.stringify({ plan: 'lite', billing_cycle: 'monthly', extra_connect_slots: 0 }) });
+    assert.equal(create.status, 503); assert.deepEqual(await create.json(), { ok: false, error: 'checkout_intent_store_unavailable' });
+    const get = await fetch(`${baseUrl}/billing/checkout-intents/opaque-intent-id`, { headers: { authorization: 'Bearer token_store' } });
+    assert.equal(get.status, 503); assert.deepEqual(await get.json(), { ok: false, error: 'checkout_intent_store_unavailable' });
+    const cancel = await fetch(`${baseUrl}/billing/checkout-intents/cancel`, { method: 'POST', headers, body: JSON.stringify({ intent_id: 'opaque-intent-id' }) });
+    assert.equal(cancel.status, 503); assert.deepEqual(await cancel.json(), { ok: false, error: 'checkout_intent_store_unavailable' });
+    const bind = await fetch(`${baseUrl}/billing/checkout-intents/bind-paypal-order`, { method: 'POST', headers: { 'x-ras-internal-token': 'test-internal-token', 'content-type': 'application/json' }, body: JSON.stringify({ intent_id: 'opaque-intent-id', customer_id: 'cust_store', paypal_order_id: 'ORDER-FAIL-CLOSED' }) });
+    assert.equal(bind.status, 503); assert.deepEqual(await bind.json(), { ok: false, error: 'checkout_intent_store_unavailable' });
+    assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+  });
 });
 
 test('PAT rate limit returns 429 and retry-after through the public customer route', async () => {

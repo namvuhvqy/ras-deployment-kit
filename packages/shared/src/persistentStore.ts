@@ -262,7 +262,7 @@ export class JsonRasStore {
       get(target, property, receiver) {
         const value = Reflect.get(target, property, receiver);
         // Internal helpers must not be proxied: private calls carry typed arguments (e.g. expiry timestamp).
-        if (typeof value !== 'function' || ['acquireLock', 'withLock', 'expireCheckoutIntent', 'loadCheckoutIntents', 'writeCheckoutIntents', 'readCheckoutIntentDocument', 'fileExists', 'readIfExists', 'write', 'load', 'mutate'].includes(String(property))) return value;
+        if (typeof value !== 'function' || ['acquireLock', 'withLock', 'expireCheckoutIntent', 'checkoutIntentDocuments', 'selectCheckoutIntentDocument', 'loadCheckoutIntents', 'writeCheckoutIntents', 'readCheckoutIntentDocument', 'fileExists', 'readIfExists', 'write', 'load', 'mutate'].includes(String(property))) return value;
         return (...args: unknown[]) => target.withLock(() => Reflect.apply(value, receiver, args));
       },
     });
@@ -1387,15 +1387,28 @@ export class JsonRasStore {
     state.webhookFailures = (state.webhookFailures ?? []).filter((row) => Date.parse(row.createdAtIso) >= cutoff);
   }
 
+  private async checkoutIntentDocuments(): Promise<Array<{ path: string; document: CheckoutIntentSidecarDocument }>> {
+    const paths = [this.checkoutIntentsPath, `${this.checkoutIntentsPath}.tmp`, `${this.checkoutIntentsPath}.bak`];
+    const documents = await Promise.all(paths.map(async (path) => ({ path, document: await this.readCheckoutIntentDocument(path) })));
+    return documents.filter((entry): entry is { path: string; document: CheckoutIntentSidecarDocument } => entry.document !== undefined);
+  }
+  private selectCheckoutIntentDocument(documents: Array<{ path: string; document: CheckoutIntentSidecarDocument }>): { path: string; document: CheckoutIntentSidecarDocument } | undefined {
+    if (!documents.length) return undefined;
+    const generation = Math.max(...documents.map((entry) => entry.document.generation));
+    const candidates = documents.filter((entry) => entry.document.generation === generation);
+    if (candidates.some((entry) => JSON.stringify(entry.document) !== JSON.stringify(candidates[0]!.document))) throw new Error('checkout_intent_store_unavailable');
+    return candidates[0];
+  }
   private async loadCheckoutIntents(main: RasPersistentState): Promise<RasCheckoutIntent[]> {
-    const primary = await this.readCheckoutIntentDocument(this.checkoutIntentsPath); const temp = await this.readCheckoutIntentDocument(`${this.checkoutIntentsPath}.tmp`); const backup = await this.readCheckoutIntentDocument(`${this.checkoutIntentsPath}.bak`); let document = primary ?? temp ?? backup;
-    if (!document) { const exists = await Promise.all([this.fileExists(this.checkoutIntentsPath), this.fileExists(`${this.checkoutIntentsPath}.tmp`), this.fileExists(`${this.checkoutIntentsPath}.bak`)]); if (exists.some(Boolean)) throw new Error('checkout_intent_store_unavailable'); document = { formatVersion: 1, generation: 0, legacyMigrationComplete: false, intents: [], checksum: checkoutIntentChecksum(1, 0, false, []) }; }
+    const documents = await this.checkoutIntentDocuments(); let selected = this.selectCheckoutIntentDocument(documents);
+    if (!selected) { const paths = [this.checkoutIntentsPath, `${this.checkoutIntentsPath}.tmp`, `${this.checkoutIntentsPath}.bak`]; const exists = await Promise.all(paths.map((path) => this.fileExists(path))); if (exists.some(Boolean)) throw new Error('checkout_intent_store_unavailable'); selected = { path: this.checkoutIntentsPath, document: { formatVersion: 1, generation: 0, legacyMigrationComplete: false, intents: [], checksum: checkoutIntentChecksum(1, 0, false, []) } }; }
+    const document = selected.document;
     if (!document.legacyMigrationComplete) { const byId = new Map(document.intents.map((intent) => [intent.id, intent])); for (const legacy of main.checkoutIntents ?? []) { const existing = byId.get(legacy.id); if (existing && !checkoutIntentDocumentsEqual(existing, legacy)) throw new Error('checkout_intent_legacy_conflict'); if (!existing) { document.intents.push(legacy); byId.set(legacy.id, legacy); } } await this.writeCheckoutIntents(document.intents, document.generation, true); }
-    else if (!primary) await this.writeCheckoutIntents(document.intents, document.generation, true);
+    else if (selected.path !== this.checkoutIntentsPath) await this.writeCheckoutIntents(document.intents, document.generation, true);
     return document.intents;
   }
   private async writeCheckoutIntents(intents: RasCheckoutIntent[], priorGeneration?: number, legacyMigrationComplete: boolean = true): Promise<void> {
-    const current = priorGeneration === undefined ? await this.readCheckoutIntentDocument(this.checkoutIntentsPath) : undefined; const generation = (priorGeneration ?? current?.generation ?? 0) + 1; const document: CheckoutIntentSidecarDocument = { formatVersion: 1, generation, legacyMigrationComplete, intents, checksum: checkoutIntentChecksum(1, generation, legacyMigrationComplete, intents) };
+    const selected = this.selectCheckoutIntentDocument(await this.checkoutIntentDocuments()); const generation = Math.max(priorGeneration ?? 0, selected?.document.generation ?? 0) + 1; const document: CheckoutIntentSidecarDocument = { formatVersion: 1, generation, legacyMigrationComplete, intents, checksum: checkoutIntentChecksum(1, generation, legacyMigrationComplete, intents) };
     await mkdir(dirname(this.checkoutIntentsPath), { recursive: true }); const tempPath = `${this.checkoutIntentsPath}.tmp`; const handle = await open(tempPath, 'w', 0o600); try { await handle.writeFile(`${JSON.stringify(document)}\n`); await handle.sync(); } finally { await handle.close(); } if (await this.fileExists(this.checkoutIntentsPath)) await rename(this.checkoutIntentsPath, `${this.checkoutIntentsPath}.bak`); await rename(tempPath, this.checkoutIntentsPath); const directory = await open(dirname(this.checkoutIntentsPath), 'r'); try { await directory.sync(); } finally { await directory.close(); }
   }
   private async readCheckoutIntentDocument(path: string): Promise<CheckoutIntentSidecarDocument | undefined> { try { const parsed = JSON.parse(await readFile(path, 'utf8')) as CheckoutIntentSidecarDocument; if (parsed.formatVersion !== 1 || !Number.isInteger(parsed.generation) || typeof parsed.legacyMigrationComplete !== 'boolean' || !Array.isArray(parsed.intents) || parsed.checksum !== checkoutIntentChecksum(parsed.formatVersion, parsed.generation, parsed.legacyMigrationComplete, parsed.intents)) return undefined; return parsed; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; return undefined; } }

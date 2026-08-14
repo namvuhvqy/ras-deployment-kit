@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 
 test('JsonRasStore migrates an empty store with current schema metadata', async () => {
@@ -378,6 +379,37 @@ test('checkout sidecar checksum recovery, total-invalid fail-closed, and legacy 
     assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent(intentId))?.customerId, 'cust_sidecar');
     await writeFile(sidecar, 'bad'); await writeFile(`${sidecar}.tmp`, 'bad'); await writeFile(`${sidecar}.bak`, 'bad');
     await assert.rejects(() => new JsonRasStore(main, sidecar).getCheckoutIntent('opaque-intent-id'), /checkout_intent_store_unavailable/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('checkout sidecar selects and promotes the highest generation and rejects equal-generation divergence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-checkout-generation-'));
+  try {
+    const main = join(dir, 'main.json'); const sidecar = join(dir, 'checkout.json');
+    const store = new JsonRasStore(main, sidecar); await store.migrate();
+    await store.upsertCustomer({ id: 'cust_generation', name: 'Generation', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+    await store.createCheckoutIntent({ customerId: 'cust_generation', plan: 'lite', billingCycle: 'monthly', extraConnectSlots: 0, amount: '19.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    const olderPrimary = await readFile(sidecar, 'utf8');
+    await store.createCheckoutIntent({ customerId: 'cust_generation', plan: 'pro', billingCycle: 'monthly', extraConnectSlots: 0, amount: '39.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+    const newerTemp = await readFile(sidecar, 'utf8');
+    await writeFile(sidecar, olderPrimary); await writeFile(`${sidecar}.tmp`, newerTemp);
+    assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent((JSON.parse(newerTemp) as { intents: Array<{ id: string }> }).intents[1]!.id))?.plan, 'pro');
+    assert.equal((JSON.parse(await readFile(sidecar, 'utf8')) as { generation: number }).generation >= (JSON.parse(newerTemp) as { generation: number }).generation, true);
+    await writeFile(`${sidecar}.tmp`, olderPrimary);
+    assert.equal((await new JsonRasStore(main, sidecar).getCheckoutIntent((JSON.parse(newerTemp) as { intents: Array<{ id: string }> }).intents[1]!.id))?.plan, 'pro');
+
+    const otherDir = await mkdtemp(join(tmpdir(), 'ras-checkout-generation-other-'));
+    try {
+      const other = new JsonRasStore(join(otherDir, 'main.json'), join(otherDir, 'checkout.json')); await other.migrate();
+      await other.upsertCustomer({ id: 'cust_generation', name: 'Generation', status: 'active', maxConnectedAccounts: 0, packageStatus: 'active', addOnStatus: {} });
+      await other.createCheckoutIntent({ customerId: 'cust_generation', plan: 'max', billingCycle: 'monthly', extraConnectSlots: 0, amount: '79.00', currency: 'USD', expiresAtIso: '2030-01-01T00:00:00.000Z' });
+      const divergent = JSON.parse(await readFile(join(otherDir, 'checkout.json'), 'utf8')) as { formatVersion: number; generation: number; legacyMigrationComplete: boolean; intents: unknown[]; checksum: string };
+      const selected = JSON.parse(await readFile(sidecar, 'utf8')) as { formatVersion: number; generation: number; legacyMigrationComplete: boolean; intents: unknown[]; checksum: string };
+      divergent.generation = selected.generation;
+      divergent.checksum = createHash('sha256').update(JSON.stringify({ formatVersion: divergent.formatVersion, generation: divergent.generation, legacyMigrationComplete: divergent.legacyMigrationComplete, intents: divergent.intents })).digest('hex');
+      await writeFile(sidecar, JSON.stringify(selected)); await writeFile(`${sidecar}.tmp`, JSON.stringify(divergent));
+      await assert.rejects(() => new JsonRasStore(main, sidecar).getCheckoutIntent('opaque-intent-id'), /checkout_intent_store_unavailable/);
+    } finally { await rm(otherDir, { recursive: true, force: true }); }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

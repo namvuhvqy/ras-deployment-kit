@@ -107,6 +107,10 @@ function stringField(body: Record<string, unknown>, field: string): string | und
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function checkoutIntentStoreFailure(message: string): boolean {
+  return message === 'checkout_intent_store_unavailable' || message === 'checkout_intent_legacy_conflict';
+}
+
 function numberField(body: Record<string, unknown>, field: string): number | undefined {
   const value = body[field];
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -401,85 +405,6 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true, backendBuildSha, contractVersion, relayKeyId, paypalMode, zernioMode }));
     return;
   }
-
-  if (req.url === '/health') {
-    const state = await store.load();
-    res.end(
-      JSON.stringify({
-        ok: true,
-        service: 'ras-api',
-        product: 'RAS Sandbox Agent Environment',
-        schemaVersion: state.schemaVersion,
-        counts: {
-          customers: state.customers.length,
-          sandboxes: state.sandboxes.length,
-          agents: state.agents.length,
-          servicePackages: state.servicePackages.length,
-          connectedAccounts: state.connectedAccounts.length,
-          jobs: state.jobs.length,
-        },
-      }),
-    );
-    return;
-  }
-
-  if (req.method === 'GET' && req.url === '/webhooks/zernio/status') {
-    const status = await store.getWebhookStatus();
-    res.end(JSON.stringify({ ok: true, status }));
-    return;
-  }
-
-
-  if (req.method === 'POST' && req.url === '/webhooks/paypal/sandbox') {
-    // Intentionally Sandbox-only: this process has no PayPal Live webhook route.
-    const webhookId = process.env.PAYPAL_WEBHOOK_ID_SANDBOX;
-    if (process.env.PAYPAL_MODE !== 'sandbox' || !webhookId || !process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
-      res.statusCode = 503;
-      res.end(JSON.stringify({ ok: false, error: 'paypal_sandbox_webhook_not_configured' }));
-      return;
-    }
-    const requiredHeaders = ['paypal-transmission-id', 'paypal-transmission-time', 'paypal-transmission-sig', 'paypal-cert-url', 'paypal-auth-algo'];
-    if (requiredHeaders.some((header) => !firstHeader(req, header))) {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'missing_paypal_transmission_headers' }));
-      return;
-    }
-    const rawBody = await readRawBody(req);
-    let payload: Record<string, unknown>;
-    try {
-      payload = rawBody.length ? (JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>) : {};
-    } catch {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_json' }));
-      return;
-    }
-    const eventId = stringField(payload, 'id');
-    if (!eventId) {
-      res.statusCode = 400;
-      res.end(JSON.stringify({ ok: false, error: 'missing_paypal_event_id' }));
-      return;
-    }
-    const verified = await verifyPaypalSandboxWebhook(rawBody, req, webhookId);
-    if (!verified) {
-      res.statusCode = 401;
-      res.end(JSON.stringify({ ok: false, error: 'invalid_paypal_webhook_signature' }));
-      return;
-    }
-    const eventType = stringField(payload, 'event_type') ?? 'unknown';
-    const result = await store.recordWebhookEvent({
-      id: eventId,
-      source: 'paypal_sandbox',
-      eventType,
-      payload,
-      processedAtIso: new Date().toISOString(),
-      createdAtIso: new Date().toISOString(),
-      signatureStatus: 'verified',
-    });
-    res.statusCode = result.inserted ? 202 : 200;
-    res.end(JSON.stringify({ ok: true, deduped: !result.inserted, eventId, signature: 'verified' }));
-    return;
-  }
-
 
   if (req.url === '/health') {
     const state = await store.load();
@@ -865,8 +790,10 @@ const server = createServer(async (req, res) => {
       res.statusCode = 201;
       res.end(JSON.stringify({ ok: true, intent }));
     } catch (error) {
-      res.statusCode = (error as Error).message === 'checkout_already_in_progress' ? 409 : 403;
-      res.end(JSON.stringify({ ok: false, error: (error as Error).message }));
+      const message = error instanceof Error ? error.message : '';
+      if (message === 'checkout_already_in_progress') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: message })); }
+      else if (checkoutIntentStoreFailure(message)) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent' })); }
     }
     return;
   }
@@ -880,9 +807,14 @@ const server = createServer(async (req, res) => {
     } catch {
       res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_id' })); return;
     }
-    const intent = await store.getCheckoutIntent(intentId);
-    if (!intent || intent.customerId !== dashboard.customer.id) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
-    res.end(JSON.stringify({ ok: true, intent }));
+    try {
+      const intent = await store.getCheckoutIntent(intentId);
+      if (!intent || intent.customerId !== dashboard.customer.id) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+      res.end(JSON.stringify({ ok: true, intent }));
+    } catch (error) {
+      if (checkoutIntentStoreFailure(error instanceof Error ? error.message : '')) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_unavailable' })); }
+    }
     return;
   }
 
@@ -892,10 +824,15 @@ const server = createServer(async (req, res) => {
     const body = await readJsonBody(req);
     const intentId = stringField(body, 'intent_id') ?? stringField(body, 'intentId');
     if (!intentId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'missing_intent_id' })); return; }
-    const cancelled = await store.cancelCheckoutIntent({ intentId, customerId: dashboard.customer.id });
-    if (cancelled.error === 'not_found') { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
-    if (cancelled.error === 'consumed') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_consumed' })); return; }
-    res.end(JSON.stringify({ ok: true, intent: cancelled.intent }));
+    try {
+      const cancelled = await store.cancelCheckoutIntent({ intentId, customerId: dashboard.customer.id });
+      if (cancelled.error === 'not_found') { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_not_found' })); return; }
+      if (cancelled.error === 'consumed') { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_consumed' })); return; }
+      res.end(JSON.stringify({ ok: true, intent: cancelled.intent }));
+    } catch (error) {
+      if (checkoutIntentStoreFailure(error instanceof Error ? error.message : '')) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_unavailable' })); }
+    }
     return;
   }
 
@@ -906,9 +843,14 @@ const server = createServer(async (req, res) => {
     const customerId = stringField(body, 'customer_id') ?? stringField(body, 'customerId');
     const paypalOrderId = stringField(body, 'paypal_order_id') ?? stringField(body, 'paypalOrderId');
     if (!intentId || !customerId || !paypalOrderId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_checkout_intent_bind' })); return; }
-    const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
-    if (bound.error) { res.statusCode = bound.error === 'expired' ? 410 : bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: bound.error })); return; }
-    res.end(JSON.stringify({ ok: true, intent: bound.intent }));
+    try {
+      const bound = await store.bindCheckoutIntentPaypalOrder({ intentId, customerId, paypalOrderId });
+      if (bound.error) { res.statusCode = bound.error === 'expired' ? 410 : bound.error === 'not_found' ? 404 : 409; res.end(JSON.stringify({ ok: false, error: bound.error })); return; }
+      res.end(JSON.stringify({ ok: true, intent: bound.intent }));
+    } catch (error) {
+      if (checkoutIntentStoreFailure(error instanceof Error ? error.message : '')) { res.statusCode = 503; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_store_unavailable' })); }
+      else { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'checkout_intent_unavailable' })); }
+    }
     return;
   }
 
