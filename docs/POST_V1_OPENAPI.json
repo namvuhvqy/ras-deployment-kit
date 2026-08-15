@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RAS Post V1",
-    "version": "1.0.0",
-    "description": "Tenant is derived only from the authenticated session or PAT principal."
+    "version": "1.1.0",
+    "description": "Tenant is derived only from the authenticated session or PAT principal. Publish and schedule availability is connection-capability driven; live actions are queued and terminal lifecycle comes from signed webhooks."
   },
   "paths": {
     "/api/v1/posts/capabilities": {
@@ -172,7 +172,7 @@
     },
     "/api/v1/posts/publish": {
       "post": {
-        "operationId": "publishNowDryRun",
+        "operationId": "publishNow",
         "security": [
           {
             "bearerAuth": [
@@ -235,7 +235,7 @@
     },
     "/api/v1/posts/schedule": {
       "post": {
-        "operationId": "scheduleDryRun",
+        "operationId": "schedulePost",
         "security": [
           {
             "bearerAuth": [
@@ -359,7 +359,24 @@
             "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
           },
           "platform": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "facebook",
+              "instagram",
+              "youtube",
+              "tiktok",
+              "linkedin",
+              "twitter",
+              "threads",
+              "pinterest",
+              "reddit",
+              "bluesky",
+              "google_business",
+              "telegram",
+              "snapchat",
+              "discord",
+              "whatsapp"
+            ]
           },
           "availability": {
             "type": "boolean"
@@ -416,8 +433,14 @@
             "enum": [
               "draft_created",
               "publish_requested",
+              "queued",
+              "provider_accepted",
               "published_dry_run",
-              "schedule_requested"
+              "schedule_requested",
+              "publishing",
+              "published",
+              "partial",
+              "failed"
             ]
           },
           "atIso": {
@@ -451,7 +474,24 @@
             "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
           },
           "platform": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "facebook",
+              "instagram",
+              "youtube",
+              "tiktok",
+              "linkedin",
+              "twitter",
+              "threads",
+              "pinterest",
+              "reddit",
+              "bluesky",
+              "google_business",
+              "telegram",
+              "snapchat",
+              "discord",
+              "whatsapp"
+            ]
           },
           "text": {
             "type": "string",
@@ -464,8 +504,13 @@
           "status": {
             "enum": [
               "draft",
+              "queued",
+              "provider_accepted",
+              "scheduled",
+              "publishing",
               "published",
-              "scheduled"
+              "partial",
+              "failed"
             ]
           },
           "revision": {
@@ -485,7 +530,7 @@
               "$ref": "#/components/schemas/Event"
             },
             "minItems": 1,
-            "maxItems": 2
+            "maxItems": 20
           },
           "scheduleAtIso": {
             "type": "string",
@@ -498,6 +543,13 @@
           "publishedAtIso": {
             "type": "string",
             "format": "date-time"
+          },
+          "platformResults": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformResult"
+            },
+            "maxItems": 15
           }
         }
       },
@@ -631,6 +683,52 @@
           "timezone": {
             "type": "string",
             "minLength": 1
+          }
+        }
+      },
+      "PlatformResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "platform",
+          "status"
+        ],
+        "properties": {
+          "platform": {
+            "enum": [
+              "facebook",
+              "instagram",
+              "youtube",
+              "tiktok",
+              "linkedin",
+              "twitter",
+              "threads",
+              "pinterest",
+              "reddit",
+              "bluesky",
+              "google_business",
+              "telegram",
+              "snapchat",
+              "discord",
+              "whatsapp"
+            ]
+          },
+          "status": {
+            "enum": [
+              "published",
+              "failed"
+            ]
+          },
+          "publishedAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reasonCode": {
+            "const": "platform_failed"
           }
         }
       }

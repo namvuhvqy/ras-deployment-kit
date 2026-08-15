@@ -1,5 +1,5 @@
 {
-  "version": "post-v1-slice-1",
+  "version": "post-v1-live-lane",
   "authentication": {
     "type": "bearer",
     "tenantBinding": "Tenant is derived exclusively from authenticated session or PAT principal; no tenant selector is accepted."
@@ -96,8 +96,8 @@
       }
     },
     {
-      "name": "ras_posts_publish_now_dry_run",
-      "description": "Publish immediately only in dry-run mode; no external call is made.",
+      "name": "ras_posts_publish_now",
+      "description": "Publish immediately when the selected connection capability permits it; dry-run is simulated.",
       "method": "POST",
       "path": "/api/v1/posts/publish",
       "requiredScopes": [
@@ -122,8 +122,8 @@
       }
     },
     {
-      "name": "ras_posts_schedule_dry_run",
-      "description": "Schedule only in dry-run mode; no external call or job is created.",
+      "name": "ras_posts_schedule",
+      "description": "Schedule when the selected connection capability permits it; dry-run is simulated.",
       "method": "POST",
       "path": "/api/v1/posts/schedule",
       "requiredScopes": [

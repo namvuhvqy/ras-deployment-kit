@@ -136,12 +136,40 @@ test('Post V1 dry-run publish and schedule persist safe lifecycle without jobs o
   }, { ZERNIO_MODE: 'dry-run' });
 });
 
+test('Post V1 live actions are capability-driven, atomic, opaque, and queue exactly one job', async () => {
+  await withApi(async (baseUrl, dbPath) => {
+    const initial = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ capabilities?: string[] }> };
+    initial.connectedAccounts[0]!.capabilities = ['posts:publish', 'posts:schedule'];
+    await writeFile(dbPath, JSON.stringify(initial));
+
+    const capabilities = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(capabilities.status, 200);
+    const connection = (await capabilities.json() as { connections: Array<{ connectionId: string; allowedModes: string[] }> }).connections[0]!;
+    assert.deepEqual(connection.allowedModes, ['draft', 'publish_now', 'schedule']);
+
+    const published = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'live-publish-1', { connectionId: connection.connectionId, text: 'live safely', media: [] });
+    assert.equal(published.status, 201);
+    const body = await published.json() as { post: { status: string; events: Array<{ type: string }> } };
+    assert.equal(body.post.status, 'queued');
+    assert.deepEqual(body.post.events.map((event) => event.type), ['publish_requested', 'queued']);
+    assert.equal(/customerId|accountId|profileId|zernio|provider|jobId|error/i.test(JSON.stringify(body)), false);
+
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { socialPosts: Array<{ status: string; zernioPostId?: string }>; jobs: Array<{ type: string; payload: Record<string, unknown> }> };
+    assert.equal(persisted.socialPosts.length, 1);
+    assert.equal(persisted.socialPosts[0]!.status, 'queued');
+    assert.equal(persisted.socialPosts[0]!.zernioPostId, undefined);
+    assert.equal(persisted.jobs.length, 1);
+    assert.equal(persisted.jobs[0]!.type, 'publish_post');
+    assert.equal(persisted.jobs[0]!.payload.publishNow, true);
+  }, { ZERNIO_MODE: 'live' });
+});
+
 test('Post V1 OpenAPI validates runtime responses and covers all emitted statuses', async () => {
   const openapi = JSON.parse(await readTextFile(join(process.cwd(), 'docs/POST_V1_OPENAPI.json'), 'utf8'));
   const tools = JSON.parse(await readTextFile(join(process.cwd(), 'docs/POST_V1_AGENT_TOOLS.json'), 'utf8'));
   assert.deepEqual(Object.keys(openapi.paths).sort(), ['/api/v1/posts', '/api/v1/posts/capabilities', '/api/v1/posts/drafts', '/api/v1/posts/publish', '/api/v1/posts/schedule', '/api/v1/posts/{postId}']);
   const serialized = JSON.stringify({ openapi, tools });
-  assert.equal(/customerId|tenantId|accountId|profileId|zernio|provider|internal.*url|raw.*error/i.test(serialized), false);
+  assert.equal(/customerId|tenantId|accountId|profileId|zernio|internal.*url|raw.*error/i.test(serialized), false);
   for (const schema of Object.values(openapi.components.schemas) as Array<Record<string, unknown>>) assert.equal(schema.additionalProperties, false);
   const Ajv = (AjvModule as unknown as { default?: new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } }; }).default ?? AjvModule as unknown as new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } };
   const ajv = new Ajv({ strict: false }); ajv.addSchema({ ...openapi, $id: 'post-v1' }, 'post-v1');
@@ -168,8 +196,8 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
     createDraft: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
     listDrafts: ['200', '401', '403', '429', '503'],
     getDraft: ['200', '401', '403', '404', '429', '503'],
-    publishNowDryRun: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
-    scheduleDryRun: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
+    publishNow: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
+    schedulePost: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
   };
   for (const operation of Object.values(openapi.paths).flatMap((path: any) => Object.values(path) as any[])) assert.deepEqual(Object.keys(operation.responses).sort(), expectedStatuses[operation.operationId]);
   assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media']);

@@ -330,7 +330,8 @@ function canonicalPostHash(value: Record<string, unknown>): string {
 
 const POST_TEXT_LIMITS: Record<SocialPlatform, number> = {
   facebook: 63_206, instagram: 2_200, youtube: 5_000, twitter: 280, linkedin: 3_000,
-  tiktok: 4_000, threads: 500, bluesky: 300, telegram: 4_096, whatsapp: 4_096, reddit: 40_000,
+  tiktok: 4_000, threads: 500, pinterest: 500, reddit: 40_000, bluesky: 300, google_business: 1_500,
+  telegram: 4_096, snapchat: 10_000, discord: 2_000, whatsapp: 4_096,
 };
 
 function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
@@ -339,13 +340,16 @@ function publicSocialPost(post: import('../../../packages/shared/src/types.js').
 
 function postCapability(account: import('../../../packages/shared/src/types.js').ConnectedAccount) {
   const allowed = account.status === 'connected' && !account.capabilities?.includes('posts:disabled');
+  const livePublish = account.capabilities?.includes('posts:publish') === true;
+  const liveSchedule = account.capabilities?.includes('posts:schedule') === true;
+  const dryRun = process.env.ZERNIO_MODE === 'dry-run';
   return {
     connectionId: account.publicConnectionId!,
     displayLabel: account.handle ?? account.username ?? `${account.platform} account`,
     platform: account.platform,
     availability: allowed,
     contentLimit: POST_TEXT_LIMITS[account.platform],
-    allowedModes: allowed && process.env.ZERNIO_MODE === 'dry-run' ? ['draft', 'publish_now', 'schedule'] : allowed ? ['draft'] : [],
+    allowedModes: allowed ? ['draft', ...(dryRun || livePublish ? ['publish_now'] : []), ...(dryRun || liveSchedule ? ['schedule'] : [])] : [],
     media: { supported: false },
     ...(allowed ? {} : { reasonCode: account.status === 'connected' ? 'posting_unavailable' : 'connection_unavailable' }),
   };
@@ -363,6 +367,7 @@ function publicPostCore(post: SocialPost) {
     ...(post.scheduleAtIso ? { scheduleAtIso: post.scheduleAtIso } : {}),
     ...(post.timezone ? { timezone: post.timezone } : {}),
     ...(post.publishedAtIso ? { publishedAtIso: post.publishedAtIso } : {}),
+    ...(post.platformResults?.length ? { platformResults: post.platformResults.map(({ platform, status, publishedAtIso, platformPostId, reasonCode }) => ({ platform, status, ...(publishedAtIso ? { publishedAtIso } : {}), ...(platformPostId ? { platformPostId } : {}), ...(reasonCode ? { reasonCode } : {}) })) } : {}),
     revision: post.revision ?? 1,
     createdAtIso,
     updatedAtIso: post.updatedAtIso,
@@ -371,7 +376,7 @@ function publicPostCore(post: SocialPost) {
 }
 
 function isV1Draft(post: SocialPost): boolean {
-  return ['draft', 'scheduled', 'published'].includes(post.status) && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
+  return ['draft', 'queued', 'provider_accepted', 'scheduled', 'publishing', 'published', 'partial', 'failed'].includes(post.status) && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
 }
 
 function isIanaTimezone(value: string | undefined): value is string {
@@ -404,17 +409,8 @@ function checkoutBillingCycleField(body: Record<string, unknown>): RasBillingCyc
   return value === 'monthly' || value === 'yearly' ? value : undefined;
 }
 
-function isSocialPlatform(value: unknown): value is 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' {
-  return (
-    value === 'facebook' ||
-    value === 'instagram' ||
-    value === 'youtube' ||
-    value === 'twitter' ||
-    value === 'linkedin' ||
-    value === 'tiktok' ||
-    value === 'threads' ||
-    value === 'bluesky'
-  );
+function isSocialPlatform(value: unknown): value is SocialPlatform {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(POST_TEXT_LIMITS, value);
 }
 
 async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ refreshed: boolean; reason?: string; accountCount?: number }> {
@@ -1086,7 +1082,7 @@ const server = createServer(async (req, res) => {
     const canonicalScheduleAtIso = scheduleAtIso && Number.isFinite(Date.parse(scheduleAtIso)) ? new Date(scheduleAtIso).toISOString() : undefined;
     const isAction = operation === 'publish' || operation === 'schedule';
     const allowedBodyKeys = operation === 'schedule' ? ['connectionId', 'text', 'media', 'scheduleAtIso', 'timezone'] : ['connectionId', 'text', 'media'];
-    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || Object.keys(body).some((key) => !allowedBodyKeys.includes(key)) || (operation === 'schedule' && (!canonicalScheduleAtIso || Date.parse(canonicalScheduleAtIso) <= Date.now() || !isIanaTimezone(timezone))) || (isAction && process.env.ZERNIO_MODE !== 'dry-run')) {
+    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || Object.keys(body).some((key) => !allowedBodyKeys.includes(key)) || (operation === 'schedule' && (!canonicalScheduleAtIso || Date.parse(canonicalScheduleAtIso) <= Date.now() || !isIanaTimezone(timezone)))) {
       res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: isAction ? 'invalid_post_request' : 'invalid_draft_request' })); return;
     }
     const state = await store.load();
@@ -1094,14 +1090,18 @@ const server = createServer(async (req, res) => {
     if (!account) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connection_not_found' })); return; }
     const capability = postCapability(account);
     if (!capability.availability) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: capability.reasonCode ?? 'posting_unavailable' })); return; }
+    if (isAction && !capability.allowedModes.includes(operation === 'publish' ? 'publish_now' : 'schedule')) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'posting_unavailable' })); return; }
     if (text.length > capability.contentLimit) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'text_limit_exceeded' })); return; }
     const payloadHash = canonicalPostHash({ operation, connectionId, text, media: [], ...(canonicalScheduleAtIso ? { scheduleAtIso: canonicalScheduleAtIso } : {}), ...(timezone ? { timezone } : {}) });
     const createdAtIso = new Date().toISOString();
-    const publishedAtIso = operation === 'publish' ? createdAtIso : undefined;
-    const status = operation === 'drafts' ? 'draft' : operation === 'publish' ? 'published' : 'scheduled';
-    const history = operation === 'drafts' ? [{ atIso: createdAtIso, event: 'created' as const }] : operation === 'publish' ? [{ atIso: createdAtIso, event: 'publish_requested' as const }, { atIso: publishedAtIso!, event: 'published_dry_run' as const }] : [{ atIso: createdAtIso, event: 'schedule_requested' as const }];
-    const post: SocialPost = { id: `post_${randomUUID()}`, customerId, accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: operation === 'drafts', status, ...(canonicalScheduleAtIso ? { scheduleAtIso: canonicalScheduleAtIso, timezone } : {}), ...(publishedAtIso ? { publishedAtIso } : {}), idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history, createdAtIso, updatedAtIso: createdAtIso };
-    const result = await store.createPostCoreIdempotently({ post });
+    const dryRun = process.env.ZERNIO_MODE === 'dry-run';
+    const publishedAtIso = operation === 'publish' && dryRun ? createdAtIso : undefined;
+    const status = operation === 'drafts' ? 'draft' : operation === 'publish' ? (dryRun ? 'published' : 'queued') : (dryRun ? 'scheduled' : 'queued');
+    const history = operation === 'drafts' ? [{ atIso: createdAtIso, event: 'created' as const }] : operation === 'publish' ? (dryRun ? [{ atIso: createdAtIso, event: 'publish_requested' as const }, { atIso: publishedAtIso!, event: 'published_dry_run' as const }] : [{ atIso: createdAtIso, event: 'publish_requested' as const }, { atIso: createdAtIso, event: 'queued' as const }]) : [{ atIso: createdAtIso, event: 'schedule_requested' as const }, ...(dryRun ? [] : [{ atIso: createdAtIso, event: 'queued' as const }])];
+    const jobId = !dryRun && isAction ? `publish_${randomUUID()}` : undefined;
+    const post: SocialPost = { id: `post_${randomUUID()}`, customerId, ...(jobId ? { jobId } : {}), accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: operation === 'drafts', status, ...(canonicalScheduleAtIso ? { scheduleAtIso: canonicalScheduleAtIso, timezone } : {}), ...(publishedAtIso ? { publishedAtIso } : {}), idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history, createdAtIso, updatedAtIso: createdAtIso };
+    const job = jobId ? { id: jobId, customerId, profileId: account.zernioProfileId ?? account.profileId ?? '', accountId: account.id, platform: account.platform, type: 'publish_post' as const, priority: 'P2' as const, status: 'queued' as const, retryCount: 0, payload: { postId: post.id, accountId: account.zernioAccountId, platform: account.platform, content: text, mediaUrls: [], publishNow: operation === 'publish', ...(canonicalScheduleAtIso ? { scheduleAtIso: canonicalScheduleAtIso } : {}) }, createdAtIso } : undefined;
+    const result = job ? await store.createPostAndJobIdempotently({ post, job }) : await store.createPostCoreIdempotently({ post });
     if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
     if (!isV1Draft(result.post)) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
     res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicPostCore(result.post) })); return;

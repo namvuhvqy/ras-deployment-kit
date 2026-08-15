@@ -963,11 +963,21 @@ export class JsonRasStore {
     status: SocialPost['status'];
     publishedAtIso?: string;
     errorMessage?: string;
+    event?: NonNullable<SocialPost['history']>[number]['event'];
+    platformResult?: NonNullable<SocialPost['platformResults']>[number];
   }): Promise<SocialPost> {
     return this.mutate((state) => {
       const index = state.socialPosts.findIndex((post) => post.zernioPostId === input.postId || post.platformPostId === input.postId || post.id === input.postId);
       if (index < 0) throw new Error(`Social post not found: ${input.postId}`);
-      const updated: SocialPost = { ...state.socialPosts[index], status: input.status, ...(input.publishedAtIso ? { publishedAtIso: input.publishedAtIso } : {}), ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}), updatedAtIso: new Date().toISOString() };
+      const existing = state.socialPosts[index];
+      const atIso = new Date().toISOString();
+      const history = input.event && !existing.history?.some((entry) => entry.event === input.event)
+        ? [...(existing.history ?? []), { event: input.event, atIso }]
+        : existing.history;
+      const platformResults = input.platformResult
+        ? [...(existing.platformResults ?? []).filter((row) => row.platform !== input.platformResult!.platform), input.platformResult]
+        : existing.platformResults;
+      const updated: SocialPost = { ...existing, status: input.status, ...(input.publishedAtIso ? { publishedAtIso: input.publishedAtIso } : {}), ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}), ...(history ? { history } : {}), ...(platformResults ? { platformResults } : {}), updatedAtIso: atIso };
       state.socialPosts[index] = updated; return updated;
     });
   }

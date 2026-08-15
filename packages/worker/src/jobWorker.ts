@@ -74,7 +74,12 @@ export class RasJobWorker {
   private async processJob(job: RasJob): Promise<'completed' | 'failed' | 'requeued'> {
     try {
       const metadata = await this.execute(job);
-      if (job.type === 'publish_post' && isSocialPostStatus(metadata.status)) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: metadata.status });
+      // Submission acknowledgement is not terminal. Only signed lifecycle webhooks
+      // advance a live post beyond provider acceptance.
+      if (job.type === 'publish_post' && metadata.providerAccepted === true && job.payload.isDraft !== true) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: 'provider_accepted', event: 'provider_accepted' });
+      // Preserve legacy internal draft-job behavior while the public V1 lane
+      // only progresses live actions through provider acknowledgement/webhooks.
+      if (job.type === 'publish_post' && job.payload.isDraft === true && isSocialPostStatus(metadata.status)) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: metadata.status });
       const completed = await this.store.completeJob(job.id, metadata, job.claimToken);
       if (!completed) return 'requeued';
       await this.store.appendAuditLog({
@@ -121,7 +126,7 @@ export class RasJobWorker {
       }
       const result = await this.adapter.createPost(input);
       await this.store.attachZernioPostId(job.id, result.zernioPostId);
-      return { dryRun: false, ...result };
+      return { dryRun: false, providerAccepted: true, acceptedStatus: result.status, status: result.status };
     }
 
     if (job.type === 'provision_entitlement') return this.provisionEntitlement(job);
@@ -177,7 +182,7 @@ export class RasJobWorker {
   private async processZernioWebhook(job: RasJob): Promise<Record<string, unknown>> {
     const payload = asRecord(job.payload);
     const eventType = requiredString(payload, 'eventType');
-    if (eventType === 'post.platform.published' || eventType === 'post.platform.failed') {
+    if (['post.platform.published', 'post.platform.failed', 'post.scheduled', 'post.published', 'post.failed', 'post.partial'].includes(eventType)) {
       const webhookPayload = asRecord(payload.webhookPayload);
       const post = asRecord(webhookPayload.post);
       const platform = asRecord(webhookPayload.platform);
@@ -187,11 +192,13 @@ export class RasJobWorker {
       const platformPostId = optionalString(platform.platformPostId) ?? optionalString(post.platformPostId) ?? optionalString(webhookPayload.platformPostId);
       const postId = zernioPostId ?? platformPostId;
       if (!postId) throw new Error('Webhook payload missing post id');
+      const platformName = optionalString(platform.name) ?? optionalString(platform.platform);
       const saved = await this.store.updateSocialPostStatus({
         postId,
-        status: eventType === 'post.platform.published' ? 'published' : 'failed',
+        status: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'scheduled' : eventType === 'post.partial' ? 'partial' : 'failed',
         publishedAtIso: optionalString(post.publishedAt) ?? optionalString(platform.publishedAt) ?? optionalString(webhookPayload.publishedAt),
-        errorMessage: optionalString(platform.error) ?? optionalString(post.error) ?? optionalString(webhookPayload.error),
+        event: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'schedule_requested' : eventType === 'post.partial' ? 'partial' : 'failed',
+        ...(platformName && isSocialPlatform(platformName) ? { platformResult: { platform: platformName, status: eventType === 'post.platform.published' ? 'published' : 'failed', ...(platformPostId ? { platformPostId } : {}), ...(eventType === 'post.platform.failed' ? { reasonCode: 'platform_failed' as const } : {}) } } : {}),
       });
       return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
     }
@@ -334,7 +341,11 @@ function retryDelayMs(retryCount: number, baseRetryMs: number): number {
 }
 
 function isSocialPostStatus(value: unknown): value is import('../../shared/src/types.js').SocialPost['status'] {
-  return typeof value === 'string' && ['queued', 'draft', 'scheduled', 'published', 'failed'].includes(value);
+  return typeof value === 'string' && ['queued', 'provider_accepted', 'draft', 'scheduled', 'publishing', 'published', 'partial', 'failed'].includes(value);
+}
+
+function isSocialPlatform(value: string): value is import('../../shared/src/types.js').SocialPlatform {
+  return ['facebook', 'instagram', 'youtube', 'tiktok', 'linkedin', 'twitter', 'threads', 'pinterest', 'reddit', 'bluesky', 'google_business', 'telegram', 'snapchat', 'discord', 'whatsapp'].includes(value);
 }
 
 function topicForJob(job: RasJob): number {
