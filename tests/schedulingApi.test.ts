@@ -145,10 +145,21 @@ test('Post V1 capabilities project only registry platforms and static contract d
     const tiktok = body.connections.find((connection) => connection.platform === 'tiktok')!;
     assert.equal(tiktok.contentLimit, 2_200);
     assert.deepEqual(tiktok.allowedModes, ['draft', 'publish_now', 'schedule']);
-    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ id: string; publicConnectionId: string }> };
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ id: string; publicConnectionId: string }>; socialPosts: Array<Record<string, unknown>> };
     const whatsappConnectionId = persisted.connectedAccounts.find((account) => account.id === 'acct_whatsapp')!.publicConnectionId;
     const whatsappDraft = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'whatsapp-not-post-v1', { connectionId: whatsappConnectionId, text: 'not supported', media: [] });
     assert.equal(whatsappDraft.status, 404);
+    const legacyWhatsApp = {
+      id: 'post_legacy_whatsapp', customerId: 'cust_a', connectionId: whatsappConnectionId, platform: 'whatsapp', content: 'legacy', mediaUrls: [], isDraft: true,
+      status: 'draft', revision: 1, history: [{ atIso: now, event: 'created' }], createdAtIso: now, updatedAtIso: now,
+    };
+    persisted.socialPosts.push(legacyWhatsApp);
+    await writeFile(dbPath, JSON.stringify(persisted));
+    const list = await fetch(`${baseUrl}/api/v1/posts`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(list.status, 200);
+    assert.equal(JSON.stringify(await list.json()).includes('whatsapp'), false);
+    const legacyGet = await fetch(`${baseUrl}/api/v1/posts/${legacyWhatsApp.id}`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(legacyGet.status, 404);
   }, { ZERNIO_MODE: 'dry-run' });
 });
 

@@ -378,7 +378,7 @@ function publicPostCore(post: SocialPost) {
 }
 
 function isV1Draft(post: SocialPost): boolean {
-  return ['draft', 'queued', 'provider_accepted', 'scheduled', 'publishing', 'published', 'partial', 'failed'].includes(post.status) && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
+  return asPostV1Platform(post.platform) !== undefined && ['draft', 'queued', 'provider_accepted', 'scheduled', 'publishing', 'published', 'partial', 'failed'].includes(post.status) && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
 }
 
 function isIanaTimezone(value: string | undefined): value is string {
