@@ -1014,6 +1014,11 @@ export class JsonRasStore {
     });
   }
 
+  /** Creates a Post Core record only; deliberately never creates a worker job. */
+  async createPostCoreIdempotently(input: { post: SocialPost }): Promise<{ created: boolean; conflict: boolean; post: SocialPost }> {
+    return this.createDraftIdempotently(input);
+  }
+
   async attachZernioPostId(jobId: string, zernioPostId: string): Promise<SocialPost> {
     return this.mutate((state) => {
       const index = state.socialPosts.findIndex((post) => post.jobId === jobId);

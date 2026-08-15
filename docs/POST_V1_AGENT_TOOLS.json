@@ -1,43 +1,117 @@
 {
   "version": "post-v1-slice-1",
-  "authentication": { "type": "bearer", "tenantBinding": "Tenant is derived exclusively from authenticated session or PAT principal; no tenant selector is accepted." },
+  "authentication": {
+    "type": "bearer",
+    "tenantBinding": "Tenant is derived exclusively from authenticated session or PAT principal; no tenant selector is accepted."
+  },
   "tools": [
     {
       "name": "ras_posts_list_capabilities",
       "method": "GET",
       "path": "/api/v1/posts/capabilities",
-      "requiredScopes": ["posts:read"],
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/CapabilitiesEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:read"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/CapabilitiesEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     },
     {
       "name": "ras_posts_create_draft",
       "method": "POST",
       "path": "/api/v1/posts/drafts",
-      "requiredScopes": ["posts:write"],
-      "headers": { "Idempotency-Key": { "type": "string", "minLength": 1, "maxLength": 256, "required": true } },
-      "inputSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/DraftCreateRequest" },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:write"
+      ],
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "required": true
+        }
+      },
+      "inputSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/DraftCreateRequest"
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     },
     {
       "name": "ras_posts_list_drafts",
       "method": "GET",
       "path": "/api/v1/posts",
-      "requiredScopes": ["posts:read"],
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostListEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:read"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostListEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     },
     {
       "name": "ras_posts_get_draft",
       "method": "GET",
       "path": "/api/v1/posts/{postId}",
-      "requiredScopes": ["posts:read"],
-      "inputSchema": { "type": "object", "additionalProperties": false, "required": ["postId"], "properties": { "postId": { "type": "string", "minLength": 1 } } },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:read"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "postId"
+        ],
+        "properties": {
+          "postId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
+    },
+    {
+      "name": "ras_posts_publish_now_dry_run",
+      "description": "Publish immediately only in dry-run mode; no external call is made.",
+      "method": "POST",
+      "path": "/api/v1/posts/publish",
+      "inputSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PublishNowRequest"
+      }
+    },
+    {
+      "name": "ras_posts_schedule_dry_run",
+      "description": "Schedule only in dry-run mode; no external call or job is created.",
+      "method": "POST",
+      "path": "/api/v1/posts/schedule",
+      "inputSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/ScheduleRequest"
+      }
     }
   ]
 }

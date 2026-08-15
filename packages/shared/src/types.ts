@@ -283,13 +283,15 @@ export interface SocialPost {
   mediaUrls?: string[];
   isDraft?: boolean;
   scheduleAtIso?: string;
+  /** IANA timezone supplied for a scheduled customer-facing action. */
+  timezone?: string;
   idempotencyKey?: string;
   idempotencyPayloadHash?: string;
   zernioPostId?: string;
   platformPostId?: string;
   status: SocialPostStatus;
   revision?: number;
-  history?: Array<{ atIso: string; event: 'created' }>;
+  history?: Array<{ atIso: string; event: 'created' | 'publish_requested' | 'published_dry_run' | 'schedule_requested' }>;
   publishedAtIso?: string;
   errorMessage?: string;
   updatedAtIso: string;

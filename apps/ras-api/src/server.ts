@@ -345,7 +345,7 @@ function postCapability(account: import('../../../packages/shared/src/types.js')
     platform: account.platform,
     availability: allowed,
     contentLimit: POST_TEXT_LIMITS[account.platform],
-    allowedModes: allowed ? ['draft'] : [],
+    allowedModes: allowed && process.env.ZERNIO_MODE === 'dry-run' ? ['draft', 'publish_now', 'schedule'] : allowed ? ['draft'] : [],
     media: { supported: false },
     ...(allowed ? {} : { reasonCode: account.status === 'connected' ? 'posting_unavailable' : 'connection_unavailable' }),
   };
@@ -359,16 +359,24 @@ function publicPostCore(post: SocialPost) {
     platform: post.platform,
     text: post.content ?? '',
     media: [],
-    status: 'draft' as const,
+    status: post.status,
+    ...(post.scheduleAtIso ? { scheduleAtIso: post.scheduleAtIso } : {}),
+    ...(post.timezone ? { timezone: post.timezone } : {}),
+    ...(post.publishedAtIso ? { publishedAtIso: post.publishedAtIso } : {}),
     revision: post.revision ?? 1,
     createdAtIso,
     updatedAtIso: post.updatedAtIso,
-    events: [{ type: 'draft_created' as const, atIso: createdAtIso }],
+    events: post.history?.map((entry) => ({ type: entry.event === 'created' ? 'draft_created' : entry.event, atIso: entry.atIso })) ?? [{ type: 'draft_created' as const, atIso: createdAtIso }],
   };
 }
 
 function isV1Draft(post: SocialPost): boolean {
-  return post.status === 'draft' && post.isDraft === true && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
+  return ['draft', 'scheduled', 'published'].includes(post.status) && typeof post.connectionId === 'string' && /^conn_[A-Za-z0-9_-]{20,}$/.test(post.connectionId) && Array.isArray(post.mediaUrls) && post.mediaUrls.length === 0 && typeof post.createdAtIso === 'string' && typeof post.updatedAtIso === 'string';
+}
+
+function isIanaTimezone(value: string | undefined): value is string {
+  if (!value) return false;
+  try { return Intl.DateTimeFormat(undefined, { timeZone: value }).resolvedOptions().timeZone === value; } catch { return false; }
 }
 
 type PaidRasBasePlanId = Exclude<RasBasePlanId, 'none'>;
@@ -1046,7 +1054,7 @@ const server = createServer(async (req, res) => {
   }
 
   const postV1Path = req.url ? new URL(req.url, 'http://localhost').pathname : '';
-  const postV1Match = /^\/api\/v1\/posts(?:\/(capabilities|drafts|([^/]+)))?$/.exec(postV1Path);
+  const postV1Match = /^\/api\/v1\/posts(?:\/(capabilities|drafts|publish|schedule|([^/]+)))?$/.exec(postV1Path);
   if (postV1Match) {
     const operation = postV1Match[1];
     const postId = postV1Match[2] ? decodeURIComponent(postV1Match[2]) : undefined;
@@ -1066,14 +1074,18 @@ const server = createServer(async (req, res) => {
       if (!post || !isV1Draft(post)) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'post_not_found' })); return; }
       res.end(JSON.stringify({ ok: true, post: publicPostCore(post) })); return;
     }
-    if (req.method !== 'POST' || operation !== 'drafts') { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
+    if (req.method !== 'POST' || !['drafts', 'publish', 'schedule'].includes(operation ?? '')) { res.statusCode = 405; res.end(JSON.stringify({ ok: false, error: 'method_not_allowed' })); return; }
     const idempotencyKey = firstHeader(req, 'idempotency-key')?.trim();
     let body: Record<string, unknown>;
     try { body = await readJsonBody(req); } catch { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_json' })); return; }
     const connectionId = stringField(body, 'connectionId');
     const text = stringField(body, 'text')?.trim();
     const media = body.media;
-    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || text.length === 0 || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || 'publishNow' in body || 'scheduleAtIso' in body) {
+    const scheduleAtIso = stringField(body, 'scheduleAtIso');
+    const timezone = stringField(body, 'timezone');
+    const canonicalScheduleAtIso = scheduleAtIso && Number.isFinite(Date.parse(scheduleAtIso)) ? new Date(scheduleAtIso).toISOString() : undefined;
+    const isAction = operation === 'publish' || operation === 'schedule';
+    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || 'publishNow' in body || (operation === 'drafts' && ('scheduleAtIso' in body || 'timezone' in body)) || (operation === 'publish' && ('scheduleAtIso' in body || 'timezone' in body)) || (operation === 'schedule' && (!canonicalScheduleAtIso || Date.parse(canonicalScheduleAtIso) <= Date.now() || !isIanaTimezone(timezone))) || (isAction && process.env.ZERNIO_MODE !== 'dry-run')) {
       res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_draft_request' })); return;
     }
     const state = await store.load();
@@ -1082,10 +1094,13 @@ const server = createServer(async (req, res) => {
     const capability = postCapability(account);
     if (!capability.availability) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: capability.reasonCode ?? 'posting_unavailable' })); return; }
     if (text.length > capability.contentLimit) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'text_limit_exceeded' })); return; }
-    const payloadHash = canonicalPostHash({ connectionId, text, media: [] });
+    const payloadHash = canonicalPostHash({ operation, connectionId, text, media: [], ...(canonicalScheduleAtIso ? { scheduleAtIso: canonicalScheduleAtIso } : {}), ...(timezone ? { timezone } : {}) });
     const createdAtIso = new Date().toISOString();
-    const post: SocialPost = { id: `post_${randomUUID()}`, customerId, accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: true, status: 'draft', idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history: [{ atIso: createdAtIso, event: 'created' }], createdAtIso, updatedAtIso: createdAtIso };
-    const result = await store.createDraftIdempotently({ post });
+    const publishedAtIso = operation === 'publish' ? createdAtIso : undefined;
+    const status = operation === 'drafts' ? 'draft' : operation === 'publish' ? 'published' : 'scheduled';
+    const history = operation === 'drafts' ? [{ atIso: createdAtIso, event: 'created' as const }] : operation === 'publish' ? [{ atIso: createdAtIso, event: 'publish_requested' as const }, { atIso: publishedAtIso!, event: 'published_dry_run' as const }] : [{ atIso: createdAtIso, event: 'schedule_requested' as const }];
+    const post: SocialPost = { id: `post_${randomUUID()}`, customerId, accountId: account.id, profileId: account.zernioProfileId ?? account.profileId, connectionId, platform: account.platform, content: text, mediaUrls: [], isDraft: operation === 'drafts', status, ...(canonicalScheduleAtIso ? { scheduleAtIso: canonicalScheduleAtIso, timezone } : {}), ...(publishedAtIso ? { publishedAtIso } : {}), idempotencyKey, idempotencyPayloadHash: payloadHash, revision: 1, history, createdAtIso, updatedAtIso: createdAtIso };
+    const result = await store.createPostCoreIdempotently({ post });
     if (result.conflict) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
     if (!isV1Draft(result.post)) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'idempotency_conflict' })); return; }
     res.statusCode = result.created ? 201 : 200; res.end(JSON.stringify({ ok: true, post: publicPostCore(result.post) })); return;

@@ -169,6 +169,132 @@
           }
         }
       }
+    },
+    "/api/v1/posts/publish": {
+      "post": {
+        "operationId": "publishNowDryRun",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishNowRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Post"
+          },
+          "201": {
+            "$ref": "#/components/responses/Post"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidDraft"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectionNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/posts/schedule": {
+      "post": {
+        "operationId": "scheduleDryRun",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Post"
+          },
+          "201": {
+            "$ref": "#/components/responses/Post"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidDraft"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectionNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -244,9 +370,13 @@
           "allowedModes": {
             "type": "array",
             "items": {
-              "const": "draft"
+              "enum": [
+                "draft",
+                "publish_now",
+                "schedule"
+              ]
             },
-            "maxItems": 1
+            "maxItems": 3
           },
           "media": {
             "type": "object",
@@ -282,7 +412,12 @@
         ],
         "properties": {
           "type": {
-            "const": "draft_created"
+            "enum": [
+              "draft_created",
+              "publish_requested",
+              "published_dry_run",
+              "schedule_requested"
+            ]
           },
           "atIso": {
             "type": "string",
@@ -326,7 +461,11 @@
             "maxItems": 0
           },
           "status": {
-            "const": "draft"
+            "enum": [
+              "draft",
+              "published",
+              "scheduled"
+            ]
           },
           "revision": {
             "const": 1
@@ -345,7 +484,19 @@
               "$ref": "#/components/schemas/Event"
             },
             "minItems": 1,
-            "maxItems": 1
+            "maxItems": 2
+          },
+          "scheduleAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1
+          },
+          "publishedAtIso": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -423,6 +574,62 @@
             "items": {
               "$ref": "#/components/schemas/Connection"
             }
+          }
+        }
+      },
+      "PublishNowRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connectionId",
+          "text",
+          "media"
+        ],
+        "properties": {
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media": {
+            "type": "array",
+            "maxItems": 0
+          }
+        }
+      },
+      "ScheduleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connectionId",
+          "text",
+          "media",
+          "scheduleAtIso",
+          "timezone"
+        ],
+        "properties": {
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "scheduleAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
