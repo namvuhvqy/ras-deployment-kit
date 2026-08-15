@@ -294,6 +294,8 @@ export interface SocialPost {
   scheduleAtIso?: string;
   /** IANA timezone supplied for a scheduled customer-facing action. */
   timezone?: string;
+  /** P2 typed, public platform settings validated at the API boundary. */
+  platformSpecificData?: Record<string, unknown>;
   idempotencyKey?: string;
   idempotencyPayloadHash?: string;
   zernioPostId?: string;

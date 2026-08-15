@@ -351,7 +351,8 @@
           "availability",
           "contentLimit",
           "allowedModes",
-          "media"
+          "media",
+          "platformSpecificData"
         ],
         "properties": {
           "connectionId": {
@@ -418,6 +419,13 @@
           "displayLabel": {
             "type": "string",
             "minLength": 1
+          },
+          "platformSpecificData": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/PlatformSetting"
+            }
           }
         }
       },
@@ -550,6 +558,9 @@
               "$ref": "#/components/schemas/PlatformResult"
             },
             "maxItems": 15
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
           }
         }
       },
@@ -573,6 +584,9 @@
           "media": {
             "type": "array",
             "maxItems": 0
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
           }
         }
       },
@@ -656,6 +670,9 @@
           "media": {
             "type": "array",
             "maxItems": 0
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
           }
         }
       },
@@ -689,6 +706,9 @@
           "timezone": {
             "type": "string",
             "minLength": 1
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
           }
         }
       },
@@ -735,6 +755,84 @@
           },
           "reasonCode": {
             "const": "platform_failed"
+          }
+        }
+      },
+      "PlatformSetting": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "type"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "title",
+              "visibility",
+              "madeForKids",
+              "privacyLevel"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "enum",
+              "boolean"
+            ]
+          },
+          "maxLength": {
+            "type": "integer",
+            "const": 100
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "public",
+                "unlisted",
+                "private",
+                "PUBLIC_TO_EVERYONE",
+                "MUTUAL_FOLLOW_FRIENDS",
+                "SELF_ONLY"
+              ]
+            },
+            "minItems": 3,
+            "maxItems": 3
+          }
+        }
+      },
+      "PlatformSpecificData": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "unlisted",
+              "private"
+            ]
+          },
+          "madeForKids": {
+            "type": "boolean"
+          },
+          "privacyLevel": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_TO_EVERYONE",
+              "MUTUAL_FOLLOW_FRIENDS",
+              "SELF_ONLY"
+            ]
           }
         }
       }

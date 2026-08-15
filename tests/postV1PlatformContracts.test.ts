@@ -4,7 +4,29 @@ import {
   POST_V1_PLATFORM_CONTRACT_VERSION,
   POST_V1_PLATFORM_CONTRACTS,
   POST_V1_PUBLIC_PLATFORMS,
+  getPostV1PlatformSettings,
+  validatePostV1PlatformSpecificData,
 } from '../packages/shared/src/postV1PlatformContracts.js';
+
+// P2 static allowlist: only manifest-verified setting samples are public.
+test('P2 settings registry is typed, fail-closed, and absent for unsupported platforms', () => {
+  assert.deepEqual(getPostV1PlatformSettings('facebook'), []);
+  assert.deepEqual(getPostV1PlatformSettings('tiktok'), [{ key: 'privacyLevel', type: 'enum', values: ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'] }]);
+  assert.deepEqual(getPostV1PlatformSettings('youtube'), [
+    { key: 'title', type: 'string', maxLength: 100 },
+    { key: 'visibility', type: 'enum', values: ['public', 'unlisted', 'private'] },
+    { key: 'madeForKids', type: 'boolean' },
+  ]);
+  assert.deepEqual(validatePostV1PlatformSpecificData('tiktok', { privacyLevel: 'SELF_ONLY' }), { privacyLevel: 'SELF_ONLY' });
+  assert.deepEqual(validatePostV1PlatformSpecificData('youtube', { title: 'A title', visibility: 'unlisted', madeForKids: false }), { title: 'A title', visibility: 'unlisted', madeForKids: false });
+  assert.equal(validatePostV1PlatformSpecificData('facebook', {}), undefined);
+  assert.equal(validatePostV1PlatformSpecificData('facebook', { privacyLevel: 'SELF_ONLY' }), undefined);
+  assert.equal(validatePostV1PlatformSpecificData('tiktok', { privacyLevel: 'PRIVATE' }), undefined);
+  assert.equal(validatePostV1PlatformSpecificData('youtube', { title: 'x'.repeat(101) }), undefined);
+  assert.equal(validatePostV1PlatformSpecificData('youtube', { madeForKids: 'false' }), undefined);
+  assert.equal((POST_V1_PUBLIC_PLATFORMS as readonly string[]).includes('whatsapp'), false);
+});
+
 import { createPostPayload } from '../packages/zernio-adapter/src/index.js';
 import { toZernioPostPlatform } from '../packages/zernio-adapter/src/postPlatformMapping.js';
 
@@ -41,6 +63,6 @@ test('Zernio mapping changes only google_business at the adapter boundary', () =
 
 // This is a compile-time DTO boundary assertion: provider identifiers cannot be assigned to public contracts.
 test('public registry projection has no provider identifier field', () => {
-  const publicProjection = POST_V1_PLATFORM_CONTRACTS.map(({ platform, text, supportedModes, media }) => ({ platform, text, supportedModes, media }));
+  const publicProjection = POST_V1_PLATFORM_CONTRACTS.map(({ platform, text, supportedModes, media, platformSpecificData }) => ({ platform, text, supportedModes, media, platformSpecificData }));
   assert.deepEqual(publicProjection, POST_V1_PLATFORM_CONTRACTS);
 });

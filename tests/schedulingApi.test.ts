@@ -139,12 +139,22 @@ test('Post V1 capabilities project only registry platforms and static contract d
   await withApi(async (baseUrl, dbPath) => {
     const response = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
     assert.equal(response.status, 200);
-    const body = await response.json() as { contractVersion?: string; connections: Array<{ connectionId: string; platform: string; contentLimit: number; allowedModes: string[] }> };
+    const body = await response.json() as { contractVersion?: string; connections: Array<{ connectionId: string; platform: string; contentLimit: number; allowedModes: string[]; platformSpecificData: unknown }> };
     assert.equal(body.contractVersion, '1');
     assert.deepEqual(body.connections.map((connection) => connection.platform).sort(), ['facebook', 'tiktok', 'twitter']);
     const tiktok = body.connections.find((connection) => connection.platform === 'tiktok')!;
     assert.equal(tiktok.contentLimit, 2_200);
     assert.deepEqual(tiktok.allowedModes, ['draft', 'publish_now', 'schedule']);
+    assert.deepEqual(tiktok.platformSpecificData, [{ key: 'privacyLevel', type: 'enum', values: ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'] }]);
+    const facebook = body.connections.find((connection) => connection.platform === 'facebook')!;
+    assert.deepEqual(facebook.platformSpecificData, []);
+    const typedDraft = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'typed-p2-draft', { connectionId: tiktok.connectionId, text: 'safe', media: [], platformSpecificData: { privacyLevel: 'SELF_ONLY' } });
+    assert.equal(typedDraft.status, 201);
+    assert.deepEqual((await typedDraft.json() as { post: { platformSpecificData: unknown } }).post.platformSpecificData, { privacyLevel: 'SELF_ONLY' });
+    const unsupportedSettings = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'unsupported-p2-draft', { connectionId: facebook.connectionId, text: 'safe', media: [], platformSpecificData: { privacyLevel: 'SELF_ONLY' } });
+    assert.equal(unsupportedSettings.status, 400);
+    const unknownSettings = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'unknown-p2-draft', { connectionId: tiktok.connectionId, text: 'safe', media: [], platformSpecificData: { privacyLevel: 'PRIVATE' } });
+    assert.equal(unknownSettings.status, 400);
     const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ id: string; publicConnectionId: string }>; socialPosts: Array<Record<string, unknown>> };
     const whatsappConnectionId = persisted.connectedAccounts.find((account) => account.id === 'acct_whatsapp')!.publicConnectionId;
     const whatsappDraft = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'whatsapp-not-post-v1', { connectionId: whatsappConnectionId, text: 'not supported', media: [] });
@@ -282,9 +292,11 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
   assert.equal(openapi.components.schemas.CapabilitiesEnvelope.properties.contractVersion.const, '1');
   assert.deepEqual(openapi.components.schemas.CapabilitiesEnvelope.required, ['ok', 'contractVersion', 'connections']);
   assert.ok(tools.tools.every((tool: { responseSchema?: { $ref?: string } }) => typeof tool.responseSchema?.$ref === 'string' && tool.responseSchema.$ref.startsWith('POST_V1_OPENAPI.json#/')));
-  assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media']);
+  assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media', 'platformSpecificData']);
   assert.deepEqual(openapi.components.schemas.Connection.properties.reasonCode.enum, ['connection_unavailable', 'posting_unavailable']);
   assert.deepEqual(openapi.components.schemas.DraftCreateRequest.required, ['connectionId', 'text', 'media']);
+  assert.deepEqual(openapi.components.schemas.PlatformSetting.properties.key.enum, ['title', 'visibility', 'madeForKids', 'privacyLevel']);
+  assert.equal(openapi.components.schemas.Post.properties.platformSpecificData.$ref, '#/components/schemas/PlatformSpecificData');
 });
 
 test('scheduling API creates drafts/schedules atomically, idempotently, and tenant-scoped without accepting publishNow', async () => {

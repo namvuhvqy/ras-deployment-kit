@@ -17,6 +17,7 @@
         "additionalProperties": false,
         "properties": {}
       },
+      "description": "Returns connection-specific availability plus the static typed platformSpecificData allowlist. Empty settings means platform-specific data is unsupported.",
       "responseSchema": {
         "$ref": "POST_V1_OPENAPI.json#/components/schemas/CapabilitiesEnvelope"
       },
