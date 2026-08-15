@@ -372,6 +372,25 @@ for (const lifecycle of [
   });
 }
 
+test('RasJobWorker advances a V1 post when the lifecycle webhook uses its mapped Zernio account id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-v1-lifecycle-account-correlation-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertConnectedAccount({ id: 'local_account_1', customerId: 'cust_v1', zernioAccountId: 'zernio_account_1', profileId: 'profile_v1', zernioProfileId: 'profile_v1', platform: 'facebook', username: 'shop', status: 'connected' });
+    await store.upsertSocialPost({ id: 'post_v1_1', jobId: 'publish_v1_1', customerId: 'cust_v1', profileId: 'profile_v1', accountId: 'local_account_1', platform: 'facebook', zernioPostId: 'zernio_post_v1_1', status: 'provider_accepted', updatedAtIso: new Date(0).toISOString() });
+    await store.enqueueJob({
+      id: 'webhook_v1_published_1', customerId: 'cust_v1', profileId: 'profile_v1', accountId: 'zernio_account_1', platform: 'facebook', type: 'webhook_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+      payload: { eventType: 'post.platform.published', webhookPayload: { post: { _id: 'zernio_post_v1_1', publishedAt: '2026-08-15T00:00:00.000Z' }, platform: { name: 'facebook', platformPostId: 'facebook_v1_1' }, account: { accountId: 'zernio_account_1', profileId: 'profile_v1', platform: 'facebook' } } },
+    });
+
+    assert.deepEqual(await new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 0, baseRetryMs: 1, singleRun: true, dryRun: false }).runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const post = (await store.load()).socialPosts[0];
+    assert.equal(post?.status, 'published');
+    assert.deepEqual(post?.platformResults, [{ platform: 'facebook', status: 'published', platformPostId: 'facebook_v1_1' }]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('RasJobWorker does not mutate a terminal post when webhook account or platform differs from its local mapping', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

@@ -260,8 +260,34 @@ export class RasJobWorker {
     if (!socialPost) throw new Error(`Social post mapping not found for lifecycle webhook: ${zernioPostId ?? platformPostId}`);
     const account = asRecord(webhookPayload.account);
     const webhookAccountId = optionalString(account.accountId) ?? job.accountId;
+    const webhookProfileId = optionalString(account.profileId) ?? job.profileId;
     const webhookPlatform = optionalString(account.platform) ?? platformName ?? job.platform;
-    if (socialPost.customerId !== job.customerId || (socialPost.profileId && socialPost.profileId !== job.profileId) || (socialPost.accountId && socialPost.accountId !== webhookAccountId) || (webhookPlatform && socialPost.platform !== webhookPlatform)) {
+    const mappedAccount = webhookAccountId
+      ? state.connectedAccounts.find((candidate) => candidate.zernioAccountId === webhookAccountId)
+      : undefined;
+
+    const commonMismatch = socialPost.customerId !== job.customerId
+      || (socialPost.profileId && socialPost.profileId !== job.profileId)
+      || (webhookProfileId && webhookProfileId !== job.profileId)
+      || (webhookPlatform && socialPost.platform !== webhookPlatform);
+    if (commonMismatch) throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
+
+    if (mappedAccount) {
+      const mappedProfileId = mappedAccount.zernioProfileId ?? mappedAccount.profileId;
+      if (mappedAccount.customerId !== job.customerId
+        || mappedAccount.id !== socialPost.accountId
+        || mappedAccount.platform !== socialPost.platform
+        || (mappedProfileId && mappedProfileId !== job.profileId)
+        || (webhookPlatform && mappedAccount.platform !== webhookPlatform)
+        || (webhookProfileId && mappedProfileId && mappedProfileId !== webhookProfileId)) {
+        throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
+      }
+      return;
+    }
+
+    // Legacy posts predate the durable provider-account mapping. Accept only an
+    // exact direct ID match; never infer a local account from an unknown provider ID.
+    if (socialPost.accountId && socialPost.accountId !== webhookAccountId) {
       throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
     }
   }
