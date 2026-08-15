@@ -199,7 +199,9 @@ export class RasJobWorker {
         status: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'scheduled' : eventType === 'post.partial' ? 'partial' : 'failed',
         publishedAtIso: optionalString(post.publishedAt) ?? optionalString(platform.publishedAt) ?? optionalString(webhookPayload.publishedAt),
         event: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'schedule_requested' : eventType === 'post.partial' ? 'partial' : 'failed',
-        ...(platformName && isSocialPlatform(platformName) ? { platformResult: { platform: platformName, status: eventType === 'post.platform.published' ? 'published' : 'failed', ...(platformPostId ? { platformPostId } : {}), ...(eventType === 'post.platform.failed' ? { reasonCode: 'platform_failed' as const } : {}) } } : {}),
+        ...(eventType === 'post.platform.published' || eventType === 'post.platform.failed') && platformName && isSocialPlatform(platformName)
+          ? { platformResult: { platform: platformName, status: eventType === 'post.platform.published' ? 'published' : 'failed', ...(platformPostId ? { platformPostId } : {}), ...(eventType === 'post.platform.failed' ? { reasonCode: 'platform_failed' as const } : {}) } }
+          : {},
       });
       return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
     }

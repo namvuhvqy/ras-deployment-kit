@@ -310,7 +310,7 @@ test('RasJobWorker maps a published webhook by platformPostId when Zernio post i
     });
     await store.enqueueJob({
       ...makePublishJob('webhook_1', 'profile_a', 'P0'), type: 'webhook_process',
-      payload: { eventType: 'post.platform.published', webhookPayload: { platform: { platformPostId: 'facebook_42', publishedAt: '2026-07-29T00:00:00.000Z' } } },
+      payload: { eventType: 'post.platform.published', webhookPayload: { platform: { name: 'facebook', platformPostId: 'facebook_42', publishedAt: '2026-07-29T00:00:00.000Z' } } },
     });
     const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false });
 
@@ -320,10 +320,57 @@ test('RasJobWorker maps a published webhook by platformPostId when Zernio post i
     assert.deepEqual(result, { processed: 1, completed: 1, failed: 0, requeued: 0 });
     assert.equal(post?.status, 'published');
     assert.equal(post?.publishedAtIso, '2026-07-29T00:00:00.000Z');
+    assert.deepEqual(post?.platformResults, [{ platform: 'facebook', status: 'published', platformPostId: 'facebook_42' }]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('RasJobWorker records a per-platform failure with a safe reason code', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-platform-failure-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertSocialPost({ id: 'post_platform_failure_1', jobId: 'publish_platform_failure_1', customerId: 'cust_platform_failure', profileId: 'profile_platform_failure', accountId: 'acct_platform_failure', platform: 'facebook', zernioPostId: 'zernio_platform_failure_1', status: 'provider_accepted', updatedAtIso: new Date(0).toISOString() });
+    await store.enqueueJob({
+      id: 'webhook_post_platform_failed', customerId: 'cust_platform_failure', profileId: 'profile_platform_failure', accountId: 'acct_platform_failure', platform: 'facebook', type: 'webhook_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+      payload: { eventType: 'post.platform.failed', webhookPayload: { post: { _id: 'zernio_platform_failure_1' }, platform: { name: 'facebook', platformPostId: 'facebook_failure_1' }, account: { accountId: 'acct_platform_failure', profileId: 'profile_platform_failure', platform: 'facebook' } } },
+    });
+
+    assert.deepEqual(await new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false }).runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+    const post = (await store.load()).socialPosts[0];
+    assert.equal(post?.status, 'failed');
+    assert.deepEqual(post?.platformResults, [{ platform: 'facebook', status: 'failed', platformPostId: 'facebook_failure_1', reasonCode: 'platform_failed' }]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+for (const lifecycle of [
+  { eventType: 'post.scheduled', status: 'scheduled' as const, historyEvent: 'schedule_requested' as const },
+  { eventType: 'post.published', status: 'published' as const, historyEvent: 'published' as const },
+  { eventType: 'post.failed', status: 'failed' as const, historyEvent: 'failed' as const },
+  { eventType: 'post.partial', status: 'partial' as const, historyEvent: 'partial' as const },
+]) {
+  test(`RasJobWorker records aggregate ${lifecycle.eventType} without fabricating a platform result`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ras-worker-aggregate-lifecycle-'));
+    try {
+      const store = new JsonRasStore(join(dir, 'ras-store.json'));
+      await store.migrate();
+      await store.upsertSocialPost({
+        id: 'post_aggregate_1', jobId: 'publish_aggregate_1', customerId: 'cust_aggregate', profileId: 'profile_aggregate', accountId: 'acct_aggregate', platform: 'facebook', zernioPostId: 'zernio_aggregate_1', status: 'provider_accepted', updatedAtIso: new Date(0).toISOString(),
+      });
+      await store.enqueueJob({
+        id: `webhook_${lifecycle.eventType}`, customerId: 'cust_aggregate', profileId: 'profile_aggregate', accountId: 'acct_aggregate', platform: 'facebook', type: 'webhook_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+        payload: { eventType: lifecycle.eventType, webhookPayload: { post: { _id: 'zernio_aggregate_1', publishedAt: '2026-07-30T00:00:00.000Z' }, platform: { name: 'facebook', platformPostId: 'facebook_aggregate_1' }, account: { accountId: 'acct_aggregate', profileId: 'profile_aggregate', platform: 'facebook' } } },
+      });
+
+      assert.deepEqual(await new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 1, baseRetryMs: 1, singleRun: true, dryRun: false }).runOnce(), { processed: 1, completed: 1, failed: 0, requeued: 0 });
+      const post = (await store.load()).socialPosts[0];
+      assert.equal(post?.status, lifecycle.status);
+      assert.ok(post?.history?.some((entry) => entry.event === lifecycle.historyEvent));
+      assert.equal(post?.platformResults, undefined);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+}
 
 test('RasJobWorker does not mutate a terminal post when webhook account or platform differs from its local mapping', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
