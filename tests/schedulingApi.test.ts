@@ -103,6 +103,10 @@ test('Post V1 dry-run publish and schedule persist safe lifecycle without jobs o
     const repeat = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'publish-dry-1', { connectionId: connectionId.connectionId, text: 'publish safely', media: [] });
     assert.equal(repeat.status, 200);
     assert.deepEqual((await repeat.json()).post, publishedBody.post);
+    const changedPublish = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'publish-dry-1', { connectionId: connectionId.connectionId, text: 'changed payload', media: [] });
+    assert.equal(changedPublish.status, 409);
+    const unexpectedPublish = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'unexpected-publish', { connectionId: connectionId.connectionId, text: 'unexpected', media: [], unexpected: true });
+    assert.equal(unexpectedPublish.status, 400);
 
     const futureAt = new Date(Date.now() + 60 * 60_000).toISOString();
     const scheduled = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schedule-dry-1', { connectionId: connectionId.connectionId, text: 'schedule safely', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York' });
@@ -112,6 +116,13 @@ test('Post V1 dry-run publish and schedule persist safe lifecycle without jobs o
     assert.equal(scheduledBody.post.scheduleAtIso, futureAt);
     assert.equal(scheduledBody.post.timezone, 'America/New_York');
     assert.deepEqual(scheduledBody.post.events, [{ type: 'schedule_requested', atIso: scheduledBody.post.createdAtIso }]);
+    const repeatSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schedule-dry-1', { connectionId: connectionId.connectionId, text: 'schedule safely', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York' });
+    assert.equal(repeatSchedule.status, 200);
+    assert.deepEqual((await repeatSchedule.json()).post, scheduledBody.post);
+    const changedSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schedule-dry-1', { connectionId: connectionId.connectionId, text: 'changed payload', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York' });
+    assert.equal(changedSchedule.status, 409);
+    const unexpectedSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'unexpected-schedule', { connectionId: connectionId.connectionId, text: 'unexpected', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York', unexpected: true });
+    assert.equal(unexpectedSchedule.status, 400);
     const invalidSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'bad-schedule', { connectionId: connectionId.connectionId, text: 'bad', media: [], scheduleAtIso: '2020-01-01T00:00:00.000Z', timezone: 'Invalid/Timezone' });
     assert.equal(invalidSchedule.status, 400);
     const mediaRejected = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'media-publish', { connectionId: connectionId.connectionId, text: 'no media', media: ['https://cdn.test/a.png'] });
@@ -135,14 +146,23 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
   const Ajv = (AjvModule as unknown as { default?: new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } }; }).default ?? AjvModule as unknown as new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } };
   const ajv = new Ajv({ strict: false }); ajv.addSchema({ ...openapi, $id: 'post-v1' }, 'post-v1');
   const validateCapability = ajv.compile({ $ref: 'post-v1#/components/schemas/CapabilitiesEnvelope' });
-  const validateDraft = ajv.compile({ $ref: 'post-v1#/components/schemas/PostEnvelope' });
+  const validatePost = ajv.compile({ $ref: 'post-v1#/components/schemas/PostEnvelope' });
   await withApi(async (baseUrl) => {
     const caps = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
     const capBody = await caps.json(); assert.equal(caps.status, 200); assert.equal(validateCapability(capBody), true, JSON.stringify(validateCapability.errors));
     const connectionId = capBody.connections[0].connectionId;
     const created = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'schema-draft', { connectionId, text: 'safe', media: [] });
-    const postBody = await created.json(); assert.equal(created.status, 201); assert.equal(validateDraft(postBody), true, JSON.stringify(validateDraft.errors));
-  });
+    const draftBody = await created.json(); assert.equal(created.status, 201); assert.equal(validatePost(draftBody), true, JSON.stringify(validatePost.errors));
+    const published = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'schema-publish', { connectionId, text: 'publish', media: [] });
+    const publishedBody = await published.json(); assert.equal(published.status, 201); assert.equal(validatePost(publishedBody), true, JSON.stringify(validatePost.errors));
+    const repeatedPublish = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'schema-publish', { connectionId, text: 'publish', media: [] });
+    const repeatedPublishBody = await repeatedPublish.json(); assert.equal(repeatedPublish.status, 200); assert.equal(validatePost(repeatedPublishBody), true, JSON.stringify(validatePost.errors));
+    const scheduleAtIso = new Date(Date.now() + 60 * 60_000).toISOString();
+    const scheduled = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schema-schedule', { connectionId, text: 'schedule', media: [], scheduleAtIso, timezone: 'America/New_York' });
+    const scheduledBody = await scheduled.json(); assert.equal(scheduled.status, 201); assert.equal(validatePost(scheduledBody), true, JSON.stringify(validatePost.errors));
+    const repeatedSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schema-schedule', { connectionId, text: 'schedule', media: [], scheduleAtIso, timezone: 'America/New_York' });
+    const repeatedScheduleBody = await repeatedSchedule.json(); assert.equal(repeatedSchedule.status, 200); assert.equal(validatePost(repeatedScheduleBody), true, JSON.stringify(validatePost.errors));
+  }, { ZERNIO_MODE: 'dry-run' });
   const expectedStatuses: Record<string, string[]> = {
     listPostCapabilities: ['200', '401', '403', '429', '503'],
     createDraft: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],

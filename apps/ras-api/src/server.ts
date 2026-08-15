@@ -1085,8 +1085,9 @@ const server = createServer(async (req, res) => {
     const timezone = stringField(body, 'timezone');
     const canonicalScheduleAtIso = scheduleAtIso && Number.isFinite(Date.parse(scheduleAtIso)) ? new Date(scheduleAtIso).toISOString() : undefined;
     const isAction = operation === 'publish' || operation === 'schedule';
-    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || 'publishNow' in body || (operation === 'drafts' && ('scheduleAtIso' in body || 'timezone' in body)) || (operation === 'publish' && ('scheduleAtIso' in body || 'timezone' in body)) || (operation === 'schedule' && (!canonicalScheduleAtIso || Date.parse(canonicalScheduleAtIso) <= Date.now() || !isIanaTimezone(timezone))) || (isAction && process.env.ZERNIO_MODE !== 'dry-run')) {
-      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'invalid_draft_request' })); return;
+    const allowedBodyKeys = operation === 'schedule' ? ['connectionId', 'text', 'media', 'scheduleAtIso', 'timezone'] : ['connectionId', 'text', 'media'];
+    if (!idempotencyKey || idempotencyKey.length > 256 || !connectionId || !text || !Object.prototype.hasOwnProperty.call(body, 'media') || !Array.isArray(media) || media.length !== 0 || Object.keys(body).some((key) => !allowedBodyKeys.includes(key)) || (operation === 'schedule' && (!canonicalScheduleAtIso || Date.parse(canonicalScheduleAtIso) <= Date.now() || !isIanaTimezone(timezone))) || (isAction && process.env.ZERNIO_MODE !== 'dry-run')) {
+      res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: isAction ? 'invalid_post_request' : 'invalid_draft_request' })); return;
     }
     const state = await store.load();
     const account = state.connectedAccounts.find((row) => row.customerId === customerId && row.publicConnectionId === connectionId);

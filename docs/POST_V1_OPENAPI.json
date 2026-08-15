@@ -210,7 +210,7 @@
             "$ref": "#/components/responses/Post"
           },
           "400": {
-            "$ref": "#/components/responses/InvalidDraft"
+            "$ref": "#/components/responses/InvalidPost"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -273,7 +273,7 @@
             "$ref": "#/components/responses/Post"
           },
           "400": {
-            "$ref": "#/components/responses/InvalidDraft"
+            "$ref": "#/components/responses/InvalidPost"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -322,6 +322,7 @@
               "unauthorized",
               "forbidden",
               "invalid_draft_request",
+              "invalid_post_request",
               "invalid_json",
               "connection_not_found",
               "posting_unavailable",
@@ -746,6 +747,16 @@
       },
       "RateLimitUnavailable": {
         "description": "PAT rate-limit backend unavailable; fail closed",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "InvalidPost": {
+        "description": "Publish or schedule request rejected",
         "content": {
           "application/json": {
             "schema": {

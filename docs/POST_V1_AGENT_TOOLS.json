@@ -100,8 +100,25 @@
       "description": "Publish immediately only in dry-run mode; no external call is made.",
       "method": "POST",
       "path": "/api/v1/posts/publish",
+      "requiredScopes": [
+        "posts:write"
+      ],
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "required": true
+        }
+      },
       "inputSchema": {
         "$ref": "POST_V1_OPENAPI.json#/components/schemas/PublishNowRequest"
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
       }
     },
     {
@@ -109,8 +126,25 @@
       "description": "Schedule only in dry-run mode; no external call or job is created.",
       "method": "POST",
       "path": "/api/v1/posts/schedule",
+      "requiredScopes": [
+        "posts:write"
+      ],
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "required": true
+        }
+      },
       "inputSchema": {
         "$ref": "POST_V1_OPENAPI.json#/components/schemas/ScheduleRequest"
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
       }
     }
   ]
