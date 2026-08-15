@@ -83,6 +83,8 @@ function state() {
     sandboxes: [], agents: [], servicePackages: [],
     connectedAccounts: [
       { id: 'acct_a', customerId: 'cust_a', platform: 'facebook', zernioAccountId: 'provider_a', zernioProfileId: 'profile_a', status: 'connected' },
+      { id: 'acct_tiktok', customerId: 'cust_a', platform: 'tiktok', zernioAccountId: 'provider_tiktok', zernioProfileId: 'profile_a', status: 'connected' },
+      { id: 'acct_whatsapp', customerId: 'cust_a', platform: 'whatsapp', zernioAccountId: 'provider_whatsapp', zernioProfileId: 'profile_a', status: 'connected' },
       { id: 'acct_disconnected', customerId: 'cust_a', platform: 'twitter', zernioAccountId: 'provider_disconnected', zernioProfileId: 'profile_a', status: 'disconnected' },
       { id: 'acct_b', customerId: 'cust_b', platform: 'instagram', zernioAccountId: 'provider_b', zernioProfileId: 'profile_b', status: 'connected' },
     ],
@@ -131,6 +133,23 @@ test('Post V1 public contract is session/PAT-derived, opaque, and excludes legac
     const cross = await fetch(`${baseUrl}/api/v1/posts/${encodeURIComponent(draft.post.postId)}`, { headers: { authorization: 'Bearer other-token' } }); assert.equal(cross.status, 404);
     const raw = JSON.parse(await readFile(dbPath, 'utf8')) as { jobs: unknown[] }; assert.equal(raw.jobs.length, 1); // legacy only
   }, { RAS_SYSTEM_ADMIN_USER_IDS: 'user_system' });
+});
+
+test('Post V1 capabilities project only registry platforms and static contract data', async () => {
+  await withApi(async (baseUrl, dbPath) => {
+    const response = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { contractVersion?: string; connections: Array<{ connectionId: string; platform: string; contentLimit: number; allowedModes: string[] }> };
+    assert.equal(body.contractVersion, '1');
+    assert.deepEqual(body.connections.map((connection) => connection.platform).sort(), ['facebook', 'tiktok', 'twitter']);
+    const tiktok = body.connections.find((connection) => connection.platform === 'tiktok')!;
+    assert.equal(tiktok.contentLimit, 2_200);
+    assert.deepEqual(tiktok.allowedModes, ['draft', 'publish_now', 'schedule']);
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ id: string; publicConnectionId: string }> };
+    const whatsappConnectionId = persisted.connectedAccounts.find((account) => account.id === 'acct_whatsapp')!.publicConnectionId;
+    const whatsappDraft = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'whatsapp-not-post-v1', { connectionId: whatsappConnectionId, text: 'not supported', media: [] });
+    assert.equal(whatsappDraft.status, 404);
+  }, { ZERNIO_MODE: 'dry-run' });
 });
 
 test('Post V1 dry-run publish and schedule persist safe lifecycle without jobs or provider data', async () => {
@@ -246,6 +265,12 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
     schedulePost: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
   };
   for (const operation of Object.values(openapi.paths).flatMap((path: any) => Object.values(path) as any[])) assert.deepEqual(Object.keys(operation.responses).sort(), expectedStatuses[operation.operationId]);
+  const expectedPlatforms = ['twitter', 'instagram', 'tiktok', 'youtube', 'facebook', 'linkedin', 'bluesky', 'threads', 'reddit', 'pinterest', 'telegram', 'snapchat', 'google_business', 'discord', 'slack'];
+  for (const schemaName of ['Connection', 'Post', 'PlatformResult']) assert.deepEqual(openapi.components.schemas[schemaName].properties.platform.enum, expectedPlatforms);
+  assert.equal(/whatsapp|googlebusiness/i.test(serialized), false);
+  assert.equal(openapi.components.schemas.CapabilitiesEnvelope.properties.contractVersion.const, '1');
+  assert.deepEqual(openapi.components.schemas.CapabilitiesEnvelope.required, ['ok', 'contractVersion', 'connections']);
+  assert.ok(tools.tools.every((tool: { responseSchema?: { $ref?: string } }) => typeof tool.responseSchema?.$ref === 'string' && tool.responseSchema.$ref.startsWith('POST_V1_OPENAPI.json#/')));
   assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media']);
   assert.deepEqual(openapi.components.schemas.Connection.properties.reasonCode.enum, ['connection_unavailable', 'posting_unavailable']);
   assert.deepEqual(openapi.components.schemas.DraftCreateRequest.required, ['connectionId', 'text', 'media']);

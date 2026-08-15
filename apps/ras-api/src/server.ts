@@ -6,6 +6,7 @@ import { consumeRedisPatRateLimit } from './patRateLimit.js';
 import { redisUrlFromEnv } from './redisConfig.js';
 import { createZernioAdapterFromEnv } from '../../../packages/zernio-adapter/src/index.js';
 import type { RasBasePlanId, RasBillingCycle, RasEntitlement, SocialPlatform, SocialPost } from '../../../packages/shared/src/types.js';
+import { POST_V1_PLATFORM_CONTRACT_VERSION, getPostV1PlatformContract, type PostV1Platform } from '../../../packages/shared/src/postV1PlatformContracts.js';
 
 const adapter = createZernioAdapterFromEnv();
 const store = createStoreFromEnv();
@@ -328,17 +329,18 @@ function canonicalPostHash(value: Record<string, unknown>): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
-const POST_TEXT_LIMITS: Record<SocialPlatform, number> = {
-  facebook: 63_206, instagram: 2_200, youtube: 5_000, twitter: 280, linkedin: 3_000,
-  tiktok: 4_000, threads: 500, pinterest: 500, reddit: 40_000, bluesky: 300, google_business: 1_500,
-  telegram: 4_096, snapchat: 10_000, discord: 2_000, whatsapp: 4_096,
-};
-
 function publicSocialPost(post: import('../../../packages/shared/src/types.js').SocialPost) {
   return { monitorId: post.id, accountId: post.accountId, platform: post.platform, content: post.content, mediaUrls: post.mediaUrls, isDraft: post.isDraft, scheduleAtIso: post.scheduleAtIso, zernioPostId: post.zernioPostId, platformPostId: post.platformPostId, status: post.status, publishedAtIso: post.publishedAtIso, createdAtIso: post.createdAtIso, updatedAtIso: post.updatedAtIso };
 }
 
+function asPostV1Platform(platform: SocialPlatform): PostV1Platform | undefined {
+  try { return getPostV1PlatformContract(platform as PostV1Platform).platform; } catch { return undefined; }
+}
+
 function postCapability(account: import('../../../packages/shared/src/types.js').ConnectedAccount) {
+  const platform = asPostV1Platform(account.platform);
+  if (!platform) return undefined;
+  const contract = getPostV1PlatformContract(platform);
   const allowed = account.status === 'connected' && !account.capabilities?.includes('posts:disabled');
   const livePublish = account.capabilities?.includes('posts:publish') === true;
   const liveSchedule = account.capabilities?.includes('posts:schedule') === true;
@@ -346,10 +348,10 @@ function postCapability(account: import('../../../packages/shared/src/types.js')
   return {
     connectionId: account.publicConnectionId!,
     displayLabel: account.handle ?? account.username ?? `${account.platform} account`,
-    platform: account.platform,
+    platform,
     availability: allowed,
-    contentLimit: POST_TEXT_LIMITS[account.platform],
-    allowedModes: allowed ? ['draft', ...(dryRun || livePublish ? ['publish_now'] : []), ...(dryRun || liveSchedule ? ['schedule'] : [])] : [],
+    contentLimit: contract.text.limit,
+    allowedModes: allowed ? contract.supportedModes.filter((mode) => mode === 'draft' || (mode === 'publish_now' && (dryRun || livePublish)) || (mode === 'schedule' && (dryRun || liveSchedule))).sort((left, right) => ['draft', 'publish_now', 'schedule'].indexOf(left) - ['draft', 'publish_now', 'schedule'].indexOf(right)) : [],
     media: { supported: false },
     ...(allowed ? {} : { reasonCode: account.status === 'connected' ? 'posting_unavailable' : 'connection_unavailable' }),
   };
@@ -410,7 +412,7 @@ function checkoutBillingCycleField(body: Record<string, unknown>): RasBillingCyc
 }
 
 function isSocialPlatform(value: unknown): value is SocialPlatform {
-  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(POST_TEXT_LIMITS, value);
+  return typeof value === 'string' && ['facebook', 'instagram', 'youtube', 'twitter', 'linkedin', 'tiktok', 'threads', 'pinterest', 'reddit', 'bluesky', 'google_business', 'telegram', 'snapchat', 'discord', 'whatsapp'].includes(value);
 }
 
 async function refreshZernioAccountsForCustomer(customerId: string): Promise<{ refreshed: boolean; reason?: string; accountCount?: number }> {
@@ -1059,7 +1061,7 @@ const server = createServer(async (req, res) => {
     const customerId = access.principal!.customerId;
     if (req.method === 'GET' && operation === 'capabilities') {
       const state = await store.load();
-      res.end(JSON.stringify({ ok: true, connections: state.connectedAccounts.filter((account) => account.customerId === customerId).map(postCapability) }));
+      res.end(JSON.stringify({ ok: true, contractVersion: POST_V1_PLATFORM_CONTRACT_VERSION, connections: state.connectedAccounts.filter((account) => account.customerId === customerId).map(postCapability).filter((capability): capability is NonNullable<typeof capability> => capability !== undefined) }));
       return;
     }
     if (req.method === 'GET' && !operation) {
@@ -1089,6 +1091,7 @@ const server = createServer(async (req, res) => {
     const account = state.connectedAccounts.find((row) => row.customerId === customerId && row.publicConnectionId === connectionId);
     if (!account) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connection_not_found' })); return; }
     const capability = postCapability(account);
+    if (!capability) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'connection_not_found' })); return; }
     if (!capability.availability) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: capability.reasonCode ?? 'posting_unavailable' })); return; }
     if (isAction && !capability.allowedModes.includes(operation === 'publish' ? 'publish_now' : 'schedule')) { res.statusCode = 409; res.end(JSON.stringify({ ok: false, error: 'posting_unavailable' })); return; }
     if (text.length > capability.contentLimit) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'text_limit_exceeded' })); return; }

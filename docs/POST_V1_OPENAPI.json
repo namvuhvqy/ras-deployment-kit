@@ -361,21 +361,21 @@
           "platform": {
             "type": "string",
             "enum": [
-              "facebook",
-              "instagram",
-              "youtube",
-              "tiktok",
-              "linkedin",
               "twitter",
-              "threads",
-              "pinterest",
-              "reddit",
+              "instagram",
+              "tiktok",
+              "youtube",
+              "facebook",
+              "linkedin",
               "bluesky",
-              "google_business",
+              "threads",
+              "reddit",
+              "pinterest",
               "telegram",
               "snapchat",
+              "google_business",
               "discord",
-              "whatsapp"
+              "slack"
             ]
           },
           "availability": {
@@ -476,21 +476,21 @@
           "platform": {
             "type": "string",
             "enum": [
-              "facebook",
-              "instagram",
-              "youtube",
-              "tiktok",
-              "linkedin",
               "twitter",
-              "threads",
-              "pinterest",
-              "reddit",
+              "instagram",
+              "tiktok",
+              "youtube",
+              "facebook",
+              "linkedin",
               "bluesky",
-              "google_business",
+              "threads",
+              "reddit",
+              "pinterest",
               "telegram",
               "snapchat",
+              "google_business",
               "discord",
-              "whatsapp"
+              "slack"
             ]
           },
           "text": {
@@ -616,6 +616,7 @@
         "additionalProperties": false,
         "required": [
           "ok",
+          "contractVersion",
           "connections"
         ],
         "properties": {
@@ -627,6 +628,11 @@
             "items": {
               "$ref": "#/components/schemas/Connection"
             }
+          },
+          "contractVersion": {
+            "type": "string",
+            "const": "1",
+            "description": "Static Post V1 platform contract registry version."
           }
         }
       },
@@ -696,21 +702,21 @@
         "properties": {
           "platform": {
             "enum": [
-              "facebook",
-              "instagram",
-              "youtube",
-              "tiktok",
-              "linkedin",
               "twitter",
-              "threads",
-              "pinterest",
-              "reddit",
+              "instagram",
+              "tiktok",
+              "youtube",
+              "facebook",
+              "linkedin",
               "bluesky",
-              "google_business",
+              "threads",
+              "reddit",
+              "pinterest",
               "telegram",
               "snapchat",
+              "google_business",
               "discord",
-              "whatsapp"
+              "slack"
             ]
           },
           "status": {
