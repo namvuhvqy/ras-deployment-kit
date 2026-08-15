@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 
 const now = new Date().toISOString();
 
-async function withApi<T>(state: Record<string, unknown>, env: Record<string, string>, run: (baseUrl: string) => Promise<T>): Promise<T> {
+async function withApi<T>(state: Record<string, unknown>, env: Record<string, string>, run: (baseUrl: string, dbPath: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), 'ras-webhook-api-'));
   const dbPath = join(dir, 'ras-store.json');
   const port = 20_080 + Math.floor(Math.random() * 1000);
@@ -30,7 +30,7 @@ async function withApi<T>(state: Record<string, unknown>, env: Record<string, st
       });
       child.on('error', reject);
     });
-    return await run(`http://127.0.0.1:${port}`);
+    return await run(`http://127.0.0.1:${port}`, dbPath);
   } finally {
     child.kill();
     await new Promise<void>((resolve) => child.once('exit', () => resolve()));
@@ -86,6 +86,39 @@ test('post lifecycle webhook resolves customer from mapped account when Zernio o
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true, deduped: false, eventId: 'evt_post_1', signature: 'verified' });
   });
+});
+
+test('signed malformed post lifecycle webhook rejects before durable event or job', async () => {
+  const state = emptyState();
+  state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+  state.connectedAccounts = [{ id: 'account_1', customerId: 'cust_1', zernioAccountId: 'acct_1', profileId: 'profile_1', platform: 'instagram', username: 'ag', status: 'connected' }];
+  const rawBody = JSON.stringify({ id: 'evt_malformed', event: 'post.platform.published', post: { _id: 'post_1' }, account: { accountId: 'acct_1' }, timestamp: now });
+  await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl, dbPath) => {
+    const response = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) }, body: rawBody });
+    assert.equal(response.status, 422);
+    const saved = JSON.parse(await (await import('node:fs/promises')).readFile(dbPath, 'utf8')) as { webhookEvents: unknown[]; jobs: unknown[] };
+    assert.equal(saved.webhookEvents.length, 0);
+    assert.equal(saved.jobs.length, 0);
+  });
+});
+
+test('post lifecycle rejects mapped account profile or platform mismatch before durable event or job', async () => {
+  for (const account of [
+    { accountId: 'acct_1', profileId: 'other_profile', platform: 'instagram', username: 'ag' },
+    { accountId: 'acct_1', profileId: 'profile_1', platform: 'facebook', username: 'ag' },
+  ]) {
+    const state = emptyState();
+    state.customers = [{ id: 'cust_1', name: 'Customer', zernioProfileId: 'profile_1' }];
+    state.connectedAccounts = [{ id: 'account_1', customerId: 'cust_1', zernioAccountId: 'acct_1', profileId: 'profile_1', platform: 'instagram', username: 'ag', status: 'connected' }];
+    const rawBody = JSON.stringify({ id: `evt_mismatch_${account.profileId}_${account.platform}`, event: 'post.platform.published', post: { _id: 'post_1' }, platform: { name: 'instagram', status: 'published', platformPostId: 'instagram_1' }, account, timestamp: now });
+    await withApi(state, { ZERNIO_WEBHOOK_SECRET: 'topsecret' }, async (baseUrl, dbPath) => {
+      const response = await fetch(`${baseUrl}/webhooks/zernio`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-zernio-signature': signature('topsecret', rawBody) }, body: rawBody });
+      assert.equal(response.status, 422);
+      const saved = JSON.parse(await (await import('node:fs/promises')).readFile(dbPath, 'utf8')) as { webhookEvents: unknown[]; jobs: unknown[] };
+      assert.equal(saved.webhookEvents.length, 0);
+      assert.equal(saved.jobs.length, 0);
+    });
+  }
 });
 
 test('inbox webhook maps tenant by account, queues one draft-only processing job, and dedupes', async () => {

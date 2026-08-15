@@ -53,17 +53,20 @@ export function createZernioWebhookRouter(options: ZernioWebhookRouterOptions) {
 
     const validator = validatorFor(eventType, validators);
     const isPostLifecycleEvent = ['post.platform.published', 'post.platform.failed', 'post.scheduled', 'post.published', 'post.failed', 'post.partial'].includes(eventType);
-    if ((!validator && !isPostLifecycleEvent) || (validator && !validator(payload))) return endFailure(options.store, res, eventId, `schema_invalid_${eventType}`, 422);
+    if (!validator || !validator(payload)) return endFailure(options.store, res, eventId, `schema_invalid_${eventType}`, 422);
 
     const account = extractAccount(payload);
     const rawAccount = asRecord(payload.account);
     const profileId = account?.profileId ?? stringAt(rawAccount, 'profileId') ?? stringAt(payload, 'profileId');
     const accountId = account?.accountId ?? stringAt(rawAccount, 'accountId') ?? stringAt(payload, 'accountId');
-    // Lifecycle routing must resolve a tenant before durable recording: an
-    // unmapped signed event cannot become a poisoned audit row.
+    // A lifecycle event is trustworthy only when its explicit Zernio account is
+    // mapped and every optional target qualifier agrees with that mapping.
     const mappedAccount = accountId ? await accountForZernioId(options.store, accountId) : undefined;
-    const lifecycleCustomer = isPostLifecycleEvent ? (profileId ? await customerForProfile(options.store, profileId) : mappedAccount ? await customerForAccount(options.store, mappedAccount.customerId) : undefined) : undefined;
-    if (isPostLifecycleEvent && !lifecycleCustomer) return endFailure(options.store, res, eventId, 'unknown_zernio_account', 422);
+    const lifecycleCustomer = isPostLifecycleEvent && mappedAccount ? await customerForAccount(options.store, mappedAccount.customerId) : undefined;
+    const suppliedPlatform = account?.platform ?? stringAt(rawAccount, 'platform') ?? platformFromLifecyclePayload(payload);
+    if (isPostLifecycleEvent && (!mappedAccount || !lifecycleCustomer || !lifecycleMappingMatches(mappedAccount, lifecycleCustomer, profileId, suppliedPlatform))) {
+      return endFailure(options.store, res, eventId, 'zernio_account_mapping_mismatch', 422);
+    }
     const event = await options.store.recordWebhookEvent({
       id: eventId,
       source: 'zernio',
@@ -133,6 +136,24 @@ function webhookJob(eventId: string, customerId: string, account: AccountEvent, 
 async function customerForProfile(store: JsonRasStore, profileId: string) {
   const state = await store.load();
   return state.customers.find((customer) => customer.zernioProfileId === profileId || customer.zernioProfileIds?.includes(profileId));
+}
+
+function platformFromLifecyclePayload(payload: WebhookPayload): string | undefined {
+  const platform = asRecord(payload.platform);
+  return stringAt(platform, 'name') ?? stringAt(platform, 'platform') ?? stringAt(payload, 'platform');
+}
+
+function lifecycleMappingMatches(
+  mappedAccount: { profileId?: string; zernioProfileId?: string; platform: Platform },
+  customer: { zernioProfileId?: string; zernioProfileIds?: string[] },
+  suppliedProfileId: string | undefined,
+  suppliedPlatform: string | undefined,
+): boolean {
+  if (suppliedPlatform && suppliedPlatform !== mappedAccount.platform) return false;
+  if (!suppliedProfileId) return true;
+  const accountProfileId = mappedAccount.profileId ?? mappedAccount.zernioProfileId;
+  return suppliedProfileId === accountProfileId
+    && (customer.zernioProfileId === suppliedProfileId || customer.zernioProfileIds?.includes(suppliedProfileId) === true);
 }
 
 async function accountForZernioId(store: JsonRasStore, zernioAccountId: string) {

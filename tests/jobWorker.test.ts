@@ -325,6 +325,25 @@ test('RasJobWorker maps a published webhook by platformPostId when Zernio post i
   }
 });
 
+test('RasJobWorker does not mutate a terminal post when webhook account or platform differs from its local mapping', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
+  try {
+    const store = new JsonRasStore(join(dir, 'ras-store.json'));
+    await store.migrate();
+    await store.upsertSocialPost({ id: 'post_1', jobId: 'publish_1', customerId: 'cust_1', profileId: 'profile_1', accountId: 'acct_expected', platform: 'instagram', zernioPostId: 'zernio_post_1', status: 'provider_accepted', updatedAtIso: new Date(0).toISOString() });
+    await store.enqueueJob({
+      id: 'webhook_mismatch_1', customerId: 'cust_1', profileId: 'profile_1', accountId: 'acct_other', platform: 'facebook', type: 'webhook_process', priority: 'P0', status: 'queued', retryCount: 0, createdAtIso: new Date().toISOString(),
+      payload: { eventType: 'post.platform.published', webhookPayload: { post: { _id: 'zernio_post_1' }, platform: { name: 'facebook', platformPostId: 'facebook_1' }, account: { accountId: 'acct_other', profileId: 'profile_1', platform: 'facebook' } } },
+    });
+    const worker = new RasJobWorker(store, noopAdapter, { batchSize: 1, idleMs: 1, maxRetries: 0, baseRetryMs: 1, singleRun: true, dryRun: false });
+
+    assert.deepEqual(await worker.runOnce(), { processed: 1, completed: 0, failed: 1, requeued: 0 });
+    const state = await store.load();
+    assert.equal(state.socialPosts[0]?.status, 'provider_accepted');
+    assert.equal(state.socialPosts[0]?.platformPostId, undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('RasJobWorker verifies an account-connected webhook from the profile list when getAccount returns 405', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ras-worker-'));
   try {

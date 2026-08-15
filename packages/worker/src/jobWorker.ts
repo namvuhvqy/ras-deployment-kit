@@ -193,6 +193,7 @@ export class RasJobWorker {
       const postId = zernioPostId ?? platformPostId;
       if (!postId) throw new Error('Webhook payload missing post id');
       const platformName = optionalString(platform.name) ?? optionalString(platform.platform);
+      await this.assertLifecyclePostMapping(job, webhookPayload, zernioPostId, platformPostId, platformName);
       const saved = await this.store.updateSocialPostStatus({
         postId,
         status: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'scheduled' : eventType === 'post.partial' ? 'partial' : 'failed',
@@ -243,6 +244,24 @@ export class RasJobWorker {
       capabilities: detail.capabilities ?? [],
       lastVerifiedAtIso: saved.lastVerifiedAtIso,
     };
+  }
+
+  private async assertLifecyclePostMapping(
+    job: RasJob,
+    webhookPayload: Record<string, unknown>,
+    zernioPostId: string | undefined,
+    platformPostId: string | undefined,
+    platformName: string | undefined,
+  ): Promise<void> {
+    const state = await this.store.load();
+    const socialPost = state.socialPosts.find((post) => (zernioPostId && post.zernioPostId === zernioPostId) || (platformPostId && post.platformPostId === platformPostId));
+    if (!socialPost) throw new Error(`Social post mapping not found for lifecycle webhook: ${zernioPostId ?? platformPostId}`);
+    const account = asRecord(webhookPayload.account);
+    const webhookAccountId = optionalString(account.accountId) ?? job.accountId;
+    const webhookPlatform = optionalString(account.platform) ?? platformName ?? job.platform;
+    if (socialPost.customerId !== job.customerId || (socialPost.profileId && socialPost.profileId !== job.profileId) || (socialPost.accountId && socialPost.accountId !== webhookAccountId) || (webhookPlatform && socialPost.platform !== webhookPlatform)) {
+      throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
+    }
   }
 
   private async processInboxReply(job: RasJob): Promise<Record<string, unknown>> {
