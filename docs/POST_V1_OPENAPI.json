@@ -759,53 +759,10 @@
         }
       },
       "PlatformSetting": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "key",
-          "type"
-        ],
-        "properties": {
-          "key": {
-            "type": "string",
-            "enum": [
-              "title",
-              "visibility",
-              "madeForKids",
-              "privacyLevel"
-            ]
-          },
-          "type": {
-            "type": "string",
-            "enum": [
-              "string",
-              "enum",
-              "boolean"
-            ]
-          },
-          "maxLength": {
-            "type": "integer",
-            "const": 100
-          },
-          "values": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "enum": [
-                "public",
-                "unlisted",
-                "private",
-                "PUBLIC_TO_EVERYONE",
-                "MUTUAL_FOLLOW_FRIENDS",
-                "SELF_ONLY"
-              ]
-            },
-            "minItems": 3,
-            "maxItems": 3
-          }
-        },
         "oneOf": [
           {
+            "type": "object",
+            "additionalProperties": false,
             "properties": {
               "key": {
                 "const": "title"
@@ -824,6 +781,8 @@
             ]
           },
           {
+            "type": "object",
+            "additionalProperties": false,
             "properties": {
               "key": {
                 "const": "visibility"
@@ -847,6 +806,8 @@
             ]
           },
           {
+            "type": "object",
+            "additionalProperties": false,
             "properties": {
               "key": {
                 "const": "madeForKids"
@@ -861,6 +822,8 @@
             ]
           },
           {
+            "type": "object",
+            "additionalProperties": false,
             "properties": {
               "key": {
                 "const": "privacyLevel"

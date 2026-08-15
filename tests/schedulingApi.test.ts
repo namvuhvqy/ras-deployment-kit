@@ -256,11 +256,21 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
   assert.deepEqual(Object.keys(openapi.paths).sort(), ['/api/v1/posts', '/api/v1/posts/capabilities', '/api/v1/posts/drafts', '/api/v1/posts/publish', '/api/v1/posts/schedule', '/api/v1/posts/{postId}']);
   const serialized = JSON.stringify({ openapi, tools });
   assert.equal(/customerId|tenantId|accountId|profileId|zernio|internal.*url|raw.*error/i.test(serialized), false);
-  for (const schema of Object.values(openapi.components.schemas) as Array<Record<string, unknown>>) assert.equal(schema.additionalProperties, false);
+  for (const [schemaName, schema] of Object.entries(openapi.components.schemas) as Array<[string, Record<string, unknown>]>) {
+    if (schemaName === 'PlatformSetting') {
+      assert.equal(Array.isArray(schema.oneOf), true);
+      assert.equal((schema.oneOf as Array<Record<string, unknown>>).every((branch) => branch.additionalProperties === false), true);
+    } else assert.equal(schema.additionalProperties, false);
+  }
   const Ajv = (AjvModule as unknown as { default?: new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } }; }).default ?? AjvModule as unknown as new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } };
   const ajv = new Ajv({ strict: false }); ajv.addSchema({ ...openapi, $id: 'post-v1' }, 'post-v1');
   const validateCapability = ajv.compile({ $ref: 'post-v1#/components/schemas/CapabilitiesEnvelope' });
   const validatePost = ajv.compile({ $ref: 'post-v1#/components/schemas/PostEnvelope' });
+  const validatePlatformSetting = ajv.compile({ $ref: 'post-v1#/components/schemas/PlatformSetting' });
+  assert.equal(validatePlatformSetting({ key: 'madeForKids', type: 'boolean' }), true);
+  assert.equal(validatePlatformSetting({ key: 'title', type: 'string', maxLength: 100 }), true);
+  assert.equal(validatePlatformSetting({ key: 'madeForKids', type: 'boolean', values: ['public', 'unlisted', 'private'] }), false);
+  assert.equal(validatePlatformSetting({ key: 'title', type: 'string', maxLength: 100, values: ['public', 'unlisted', 'private'] }), false);
   await withApi(async (baseUrl) => {
     const caps = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
     const capBody = await caps.json(); assert.equal(caps.status, 200); assert.equal(validateCapability(capBody), true, JSON.stringify(validateCapability.errors));
@@ -296,7 +306,7 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
   assert.deepEqual(openapi.components.schemas.Connection.properties.reasonCode.enum, ['connection_unavailable', 'posting_unavailable']);
   assert.equal(openapi.components.schemas.PlatformSetting.oneOf.length, 4);
   assert.deepEqual(openapi.components.schemas.DraftCreateRequest.required, ['connectionId', 'text', 'media']);
-  assert.deepEqual(openapi.components.schemas.PlatformSetting.properties.key.enum, ['title', 'visibility', 'madeForKids', 'privacyLevel']);
+  assert.deepEqual(openapi.components.schemas.PlatformSetting.oneOf.map((branch: { properties: { key: { const: string } } }) => branch.properties.key.const), ['title', 'visibility', 'madeForKids', 'privacyLevel']);
   assert.equal(openapi.components.schemas.Post.properties.platformSpecificData.$ref, '#/components/schemas/PlatformSpecificData');
 });
 
