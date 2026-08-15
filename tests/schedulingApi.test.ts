@@ -3,6 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+
+type ChildExitObserver = { exitCode: number | null; once: (event: 'exit', listener: () => void) => unknown };
+type ServerStartObserver = ChildExitObserver & {
+  stdout: { on: (event: 'data', listener: (chunk: unknown) => void) => unknown };
+  stderr: { on: (event: 'data', listener: (chunk: unknown) => void) => unknown };
+  on: (event: 'error', listener: (error: Error) => void) => unknown;
+};
 import { readFile as readTextFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +19,49 @@ import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 const now = new Date().toISOString();
 const future = new Date(Date.now() + 60 * 60_000).toISOString();
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+
+function waitForChildExit(child: ChildExitObserver): Promise<void> {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => child.once('exit', () => resolve()));
+}
+
+test('child cleanup resolves when the child already exited', async () => {
+  let settled = false;
+  void waitForChildExit({ exitCode: 0, once: () => undefined } as ChildExitObserver).then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, true);
+});
+
+async function waitForServerStart(child: ServerStartObserver, timeoutMs = 5_000): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let stderr = '';
+    const timer = setTimeout(() => reject(new Error(`server did not start: ${stderr || 'no stderr output'}`)), timeoutMs);
+    const rejectWithExit = () => { clearTimeout(timer); reject(new Error(`server exited before listening: ${stderr || 'no stderr output'}`)); };
+    const rejectWithError = (error: Error) => { clearTimeout(timer); reject(error); };
+    child.stdout.on('data', (chunk) => { if (String(chunk).includes('ras-api listening')) { clearTimeout(timer); resolve(); } });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    if (child.exitCode !== null) return rejectWithExit();
+    child.once('exit', rejectWithExit);
+    child.on('error', rejectWithError);
+  });
+}
+
+test('server startup rejects with stderr when the child exits before listening', async () => {
+  let exitListener: (() => void) | undefined;
+  let stderrListener: ((chunk: unknown) => void) | undefined;
+  const child: ServerStartObserver = {
+    exitCode: null,
+    once: (_event, listener) => { exitListener = listener; },
+    stdout: { on: () => undefined },
+    stderr: { on: (_event, listener) => { stderrListener = listener; } },
+    on: (event, listener) => { if (event === 'error') void listener; },
+  };
+  const start = waitForServerStart(child);
+  stderrListener?.('simulated startup failure');
+  child.exitCode = 1;
+  exitListener?.();
+  await assert.rejects(start, /server exited before listening: simulated startup failure/);
+});
 
 function state() {
   return {
@@ -48,15 +98,11 @@ async function withApi(run: (baseUrl: string, dbPath: string) => Promise<void>, 
   await writeFile(dbPath, JSON.stringify(state()));
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], { cwd: process.cwd(), env: { ...process.env, ...env, PORT: String(port), RAS_DB_PATH: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('server did not start')), 5000);
-      child.stdout.on('data', (chunk) => { if (String(chunk).includes('ras-api listening')) { clearTimeout(timer); resolve(); } });
-      child.on('error', reject);
-    });
+    await waitForServerStart(child);
     await run(`http://127.0.0.1:${port}`, dbPath);
   } finally {
     child.kill();
-    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    await waitForChildExit(child);
     await rm(dir, { recursive: true, force: true });
   }
 }
