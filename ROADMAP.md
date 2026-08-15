@@ -2,15 +2,15 @@
 
 ## Post V1 — official contract delivery plan
 
-**Current state:** P0 contract baseline is complete and awaiting Owner review. Post V1 is **not** yet eligible to be described as complete for all official provider capabilities.
+**Current state:** P0 and P1 are complete. Post V1 is **not** yet eligible to be described as complete for all official provider capabilities; P2 is the next planned phase.
 
-**P0 authority:** [`docs/POST_V1_PLATFORM_CONTRACT.md`](docs/POST_V1_PLATFORM_CONTRACT.md). For Zernio Posts, the operation-level schema for `POST /v1/posts` is authoritative over overview or marketing copy.
+**P0 authority:** [`docs/POST_V1_PLATFORM_CONTRACT.md`](docs/POST_V1_PLATFORM_CONTRACT.md). Official source URLs and their intended use are pinned in [`docs/ZERNIO_OFFICIAL_SOURCE_MANIFEST.md`](docs/ZERNIO_OFFICIAL_SOURCE_MANIFEST.md). For Zernio Posts, the operation-level schema for `POST /v1/posts` is authoritative over overview or marketing copy.
 
 | Phase | Scope | State |
 |---|---|---|
-| P0 Contract baseline & roadmap correction | Record canonical Zernio Posts enum; resolve Slack/WhatsApp scope; define three-level `google_business` / `googlebusiness` identifier policy; pin operation-level OpenAPI snapshot/parity policy | `READY TO CLOSE / PASS — Owner review pending` |
-| P1 Static Platform Contract Registry + connection availability | Central versioned registry for canonical provider contract; separate it from connection-specific availability/capability; adapter mapping tests and public DTO non-leak tests | `PLANNED` |
-| P2 Typed platform-settings framework | Capability-gated, typed, allowlisted `platformSpecificData` validation and UI/BFF projection; Slack is Post V1 supported; WhatsApp is intentionally excluded to Messaging/Broadcast/Inbox | `PLANNED` |
+| P0 Contract baseline & roadmap correction | Record canonical Zernio Posts enum; resolve Slack/WhatsApp scope; define three-level `google_business` / `googlebusiness` identifier policy; pin operation-level OpenAPI snapshot/parity policy | `PASS` |
+| P1 Static Platform Contract Registry + connection availability | Central versioned registry for canonical provider contract; separate it from connection-specific availability/capability; adapter mapping tests and public DTO non-leak tests | `PASS` |
+| P2 Typed platform-settings framework | Capability-gated, typed, allowlisted `platformSpecificData` validation and UI/BFF projection; Slack is Post V1 supported; WhatsApp is intentionally excluded to Messaging/Broadcast/Inbox | `NEXT / PLANNED` |
 | P3 Media foundation | Tenant-scoped presign/direct-upload boundary, ownership/expiry, validation, typed media DTO, and per-platform media preflight | `PLANNED` |
 | P4 Multi-target Post Core | One durable Post Core across multiple tenant-owned connections, target-level result/history, safe duplicate reconciliation | `PLANNED` |
 | P5 Provider scheduling & shared throttling | Distinguish exact `scheduledFor`/`timezone` from `queuedFromProfile`; shared team limiter honoring provider rate-limit headers, `Retry-After`, and velocity controls | `PLANNED` |
