@@ -294,6 +294,7 @@ test('Post V1 OpenAPI validates runtime responses and covers all emitted statuse
   assert.ok(tools.tools.every((tool: { responseSchema?: { $ref?: string } }) => typeof tool.responseSchema?.$ref === 'string' && tool.responseSchema.$ref.startsWith('POST_V1_OPENAPI.json#/')));
   assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media', 'platformSpecificData']);
   assert.deepEqual(openapi.components.schemas.Connection.properties.reasonCode.enum, ['connection_unavailable', 'posting_unavailable']);
+  assert.equal(openapi.components.schemas.PlatformSetting.oneOf.length, 4);
   assert.deepEqual(openapi.components.schemas.DraftCreateRequest.required, ['connectionId', 'text', 'media']);
   assert.deepEqual(openapi.components.schemas.PlatformSetting.properties.key.enum, ['title', 'visibility', 'madeForKids', 'privacyLevel']);
   assert.equal(openapi.components.schemas.Post.properties.platformSpecificData.$ref, '#/components/schemas/PlatformSpecificData');

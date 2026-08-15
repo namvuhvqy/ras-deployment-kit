@@ -803,7 +803,87 @@
             "minItems": 3,
             "maxItems": 3
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "const": "title"
+              },
+              "type": {
+                "const": "string"
+              },
+              "maxLength": {
+                "const": 100
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "maxLength"
+            ]
+          },
+          {
+            "properties": {
+              "key": {
+                "const": "visibility"
+              },
+              "type": {
+                "const": "enum"
+              },
+              "values": {
+                "type": "array",
+                "const": [
+                  "public",
+                  "unlisted",
+                  "private"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "values"
+            ]
+          },
+          {
+            "properties": {
+              "key": {
+                "const": "madeForKids"
+              },
+              "type": {
+                "const": "boolean"
+              }
+            },
+            "required": [
+              "key",
+              "type"
+            ]
+          },
+          {
+            "properties": {
+              "key": {
+                "const": "privacyLevel"
+              },
+              "type": {
+                "const": "enum"
+              },
+              "values": {
+                "type": "array",
+                "const": [
+                  "PUBLIC_TO_EVERYONE",
+                  "MUTUAL_FOLLOW_FRIENDS",
+                  "SELF_ONLY"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "values"
+            ]
+          }
+        ]
       },
       "PlatformSpecificData": {
         "type": "object",
