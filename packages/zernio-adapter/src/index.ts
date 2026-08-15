@@ -345,6 +345,9 @@ export class LiveZernioAdapter implements ZernioAdapter {
 
 export function createZernioAdapterFromEnv(env: NodeJS.ProcessEnv = process.env): ZernioAdapter {
   const mode = env.ZERNIO_MODE ?? env.RAS_ZERNIO_MODE ?? 'dry-run';
+  // The queue-lifecycle test uses live mode to exercise non-dry-run routing,
+  // but deliberately injects a local fake adapter. This cannot enable outside NODE_ENV=test.
+  if (mode === 'live' && env.NODE_ENV === 'test' && env.RAS_TEST_FAKE_ZERNIO_ADAPTER === '1') return new DryRunZernioAdapter();
   if (mode === 'live') {
     return new LiveZernioAdapter({
       apiKey: env.ZERNIO_API_KEY ?? '',

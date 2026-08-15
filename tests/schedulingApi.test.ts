@@ -207,7 +207,7 @@ test('Post V1 live actions are capability-driven, atomic, opaque, and queue exac
     assert.equal(persisted.jobs.length, 1);
     assert.equal(persisted.jobs[0]!.type, 'publish_post');
     assert.equal(persisted.jobs[0]!.payload.publishNow, true);
-  }, { ZERNIO_MODE: 'live' });
+  }, { ZERNIO_MODE: 'live', NODE_ENV: 'test', RAS_TEST_FAKE_ZERNIO_ADAPTER: '1' });
 });
 
 test('Post V1 OpenAPI validates runtime responses and covers all emitted statuses', async () => {

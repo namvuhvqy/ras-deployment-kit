@@ -12,6 +12,11 @@ test('createZernioAdapterFromEnv creates live adapter only when requested', () =
   assert.ok(adapter instanceof LiveZernioAdapter);
 });
 
+test('createZernioAdapterFromEnv injects a fake adapter for explicit test-only live queue tests without a key', () => {
+  const adapter = createZernioAdapterFromEnv({ ZERNIO_MODE: 'live', NODE_ENV: 'test', RAS_TEST_FAKE_ZERNIO_ADAPTER: '1' });
+  assert.ok(adapter instanceof DryRunZernioAdapter);
+});
+
 test('DryRunZernioAdapter exposes the platform as a top-level connect URL query parameter', async () => {
   const adapter = new DryRunZernioAdapter();
   const url = new URL(await adapter.getConnectUrl({
