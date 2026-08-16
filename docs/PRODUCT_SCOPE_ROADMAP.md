@@ -16,8 +16,13 @@ Status: LOCKED FOR MVP EXECUTION
 
 1. **Phase 5B Dashboard:** session-derived customer overview, Channels, Inbox entry point, PAT/security link, VPS/agent cards and Billing; remove production customer UI dependence on static demo customer ID.
 2. **Phase 5C Admin management:** backend role-authorized customer/order/package/profile/VPS assignment with safe audit records. Do not rely solely on frontend email allow-lists.
-3. **Phase 6B Inbox UI:** controlled adaptation of the MIT-licensed `zernio-dev/unified-inbox` UI shell, calling only tenant-scoped RAS APIs. Draft → explicit approval → worker send remains mandatory; no raw Zernio key or direct-send route enters the web app.
-4. **Phase 7 Pricing release:** only after entitlement decisions are approved; update authoritative backend plan table, clean `/pay` frontend release, staging checkout/provisioning smoke, then separate Production approval.
+3. **Phase 6B Inbox UI — released:** controlled adaptation of the MIT-licensed `zernio-dev/unified-inbox` shell through tenant-scoped RAS APIs. Draft → explicit approval → worker send remains mandatory; no raw Zernio key or direct-send route enters the web app.
+4. **Phase 6C Scheduling UI:** adapt selected Composer/Calendar patterns from `zernio-dev/latewiz` only after tenant-safe RAS post/schedule APIs and no-publish tests exist.
+5. **Phase 6D Ads reporting UI:** adapt read-only reporting patterns from `zernio-dev/ads-dashboard` only after account ownership, entitlement and read-only API contracts are enforced. Live campaign/budget actions remain separately gated.
+6. **Phase 6E Automation builder:** use `zernio-dev/zernflow` as a design/component reference for versioned draft graphs and a no-side-effect simulator; worker execution and HTTP/action nodes require later approval and SSRF/secret controls.
+7. **Phase 7 Pricing release:** only after entitlement decisions are approved; update authoritative backend plan table, clean `/pay` frontend release, staging checkout/provisioning smoke, then separate Production approval.
+
+Exact upstream revisions and the direct/adapted/planned classification are recorded in `docs/ZERNIO_UPSTREAM_UI_INTEGRATION_INVENTORY.md`.
 
 
 ## 0. Current integration checkpoint — 2026-07-23
