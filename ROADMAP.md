@@ -2,7 +2,7 @@
 
 ## Post V1 — official contract delivery plan
 
-**Current state:** P0 and P1 are complete. Post V1 is **not** yet eligible to be described as complete for all official provider capabilities; P2 is the next planned phase.
+**Current state:** P0, P1, and P2 are complete. Post V1 is **not** yet eligible to be described as complete for all official provider capabilities; P3 is the next planned phase.
 
 **P0 authority:** [`docs/POST_V1_PLATFORM_CONTRACT.md`](docs/POST_V1_PLATFORM_CONTRACT.md). Official source URLs and their intended use are pinned in [`docs/ZERNIO_OFFICIAL_SOURCE_MANIFEST.md`](docs/ZERNIO_OFFICIAL_SOURCE_MANIFEST.md). For Zernio Posts, the operation-level schema for `POST /v1/posts` is authoritative over overview or marketing copy.
 
@@ -10,8 +10,8 @@
 |---|---|---|
 | P0 Contract baseline & roadmap correction | Record canonical Zernio Posts enum; resolve Slack/WhatsApp scope; define three-level `google_business` / `googlebusiness` identifier policy; pin operation-level OpenAPI snapshot/parity policy | `PASS` |
 | P1 Static Platform Contract Registry + connection availability | Central versioned registry for canonical provider contract; separate it from connection-specific availability/capability; adapter mapping tests and public DTO non-leak tests | `PASS` |
-| P2 Typed platform-settings framework | Capability-gated, typed, allowlisted `platformSpecificData` validation and UI/BFF projection; Slack is Post V1 supported; WhatsApp is intentionally excluded to Messaging/Broadcast/Inbox | `NEXT / PLANNED` |
-| P3 Media foundation | Tenant-scoped presign/direct-upload boundary, ownership/expiry, validation, typed media DTO, and per-platform media preflight | `PLANNED` |
+| P2 Typed platform-settings framework | Capability-gated, typed, allowlisted `platformSpecificData` validation and UI/BFF projection; Slack is Post V1 supported; WhatsApp is intentionally excluded to Messaging/Broadcast/Inbox | `PASS` |
+| P3 Media foundation | Tenant-scoped presign/direct-upload boundary, ownership/expiry, validation, typed media DTO, and per-platform media preflight | `NEXT` |
 | P4 Multi-target Post Core | One durable Post Core across multiple tenant-owned connections, target-level result/history, safe duplicate reconciliation | `PLANNED` |
 | P5 Provider scheduling & shared throttling | Distinguish exact `scheduledFor`/`timezone` from `queuedFromProfile`; shared team limiter honoring provider rate-limit headers, `Retry-After`, and velocity controls | `PLANNED` |
 | P6 Complete lifecycle & reconciliation | Explicit official lifecycle handling/safe decisions, webhook-first result projection, bounded reconciliation and observability | `PLANNED` |
@@ -38,6 +38,8 @@ reddit, pinterest, telegram, snapchat, googlebusiness, discord, slack
 - WhatsApp belongs to Messaging/Broadcast/Inbox and must be absent from every Post V1 capability, DTO, settings, validation, adapter post-target, worker/lifecycle, fixture, and test surface.
 
 ### Phase boundaries
+
+- P2 closure evidence: backend contract `e19c45531d942db327224ea18626c645139b3e04`; frontend Preview `7390cbab49013fea4dfd320bfe93a4f275cdf350`, deployment `dpl_DuEoR75BtNESxPzMuJAd84Zs7Eiu`, verified through the stable `feat/post-v1-slice-2` Preview alias with an Owner-confirmed tenant-test session. Desktop/mobile screenshots and redacted read-only QA evidence are retained outside the repository. No provider, tenant-data, Production, connect/disconnect, publish, or schedule mutation was performed for closure.
 
 - P1 separates a static/versioned platform contract registry from connection-specific availability. Do not duplicate full provider contract data into every connection record without a concrete need.
 - Capability, settings, media, cross-posting, queues, lifecycle, and rate limits remain fail-closed until their named phase has passed tests/review.
