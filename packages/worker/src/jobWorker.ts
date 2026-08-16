@@ -74,7 +74,12 @@ export class RasJobWorker {
   private async processJob(job: RasJob): Promise<'completed' | 'failed' | 'requeued'> {
     try {
       const metadata = await this.execute(job);
-      if (job.type === 'publish_post' && isSocialPostStatus(metadata.status)) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: metadata.status });
+      // Submission acknowledgement is not terminal. Only signed lifecycle webhooks
+      // advance a live post beyond provider acceptance.
+      if (job.type === 'publish_post' && metadata.providerAccepted === true && job.payload.isDraft !== true) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: 'provider_accepted', event: 'provider_accepted' });
+      // Preserve legacy internal draft-job behavior while the public V1 lane
+      // only progresses live actions through provider acknowledgement/webhooks.
+      if (job.type === 'publish_post' && job.payload.isDraft === true && isSocialPostStatus(metadata.status)) await this.store.updateSocialPostStatus({ postId: socialPostId(job), status: metadata.status });
       const completed = await this.store.completeJob(job.id, metadata, job.claimToken);
       if (!completed) return 'requeued';
       await this.store.appendAuditLog({
@@ -121,7 +126,7 @@ export class RasJobWorker {
       }
       const result = await this.adapter.createPost(input);
       await this.store.attachZernioPostId(job.id, result.zernioPostId);
-      return { dryRun: false, ...result };
+      return { dryRun: false, providerAccepted: true, acceptedStatus: result.status, status: result.status };
     }
 
     if (job.type === 'provision_entitlement') return this.provisionEntitlement(job);
@@ -177,7 +182,7 @@ export class RasJobWorker {
   private async processZernioWebhook(job: RasJob): Promise<Record<string, unknown>> {
     const payload = asRecord(job.payload);
     const eventType = requiredString(payload, 'eventType');
-    if (eventType === 'post.platform.published' || eventType === 'post.platform.failed') {
+    if (['post.platform.published', 'post.platform.failed', 'post.scheduled', 'post.published', 'post.failed', 'post.partial'].includes(eventType)) {
       const webhookPayload = asRecord(payload.webhookPayload);
       const post = asRecord(webhookPayload.post);
       const platform = asRecord(webhookPayload.platform);
@@ -187,11 +192,16 @@ export class RasJobWorker {
       const platformPostId = optionalString(platform.platformPostId) ?? optionalString(post.platformPostId) ?? optionalString(webhookPayload.platformPostId);
       const postId = zernioPostId ?? platformPostId;
       if (!postId) throw new Error('Webhook payload missing post id');
+      const platformName = optionalString(platform.name) ?? optionalString(platform.platform);
+      await this.assertLifecyclePostMapping(job, webhookPayload, zernioPostId, platformPostId, platformName);
       const saved = await this.store.updateSocialPostStatus({
         postId,
-        status: eventType === 'post.platform.published' ? 'published' : 'failed',
+        status: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'scheduled' : eventType === 'post.partial' ? 'partial' : 'failed',
         publishedAtIso: optionalString(post.publishedAt) ?? optionalString(platform.publishedAt) ?? optionalString(webhookPayload.publishedAt),
-        errorMessage: optionalString(platform.error) ?? optionalString(post.error) ?? optionalString(webhookPayload.error),
+        event: eventType === 'post.platform.published' || eventType === 'post.published' ? 'published' : eventType === 'post.scheduled' ? 'schedule_requested' : eventType === 'post.partial' ? 'partial' : 'failed',
+        ...(eventType === 'post.platform.published' || eventType === 'post.platform.failed') && platformName && isSocialPlatform(platformName)
+          ? { platformResult: { platform: platformName, status: eventType === 'post.platform.published' ? 'published' : 'failed', ...(platformPostId ? { platformPostId } : {}), ...(eventType === 'post.platform.failed' ? { reasonCode: 'platform_failed' as const } : {}) } }
+          : {},
       });
       return { eventType, synced: true, zernioPostId: saved.zernioPostId, status: saved.status };
     }
@@ -236,6 +246,50 @@ export class RasJobWorker {
       capabilities: detail.capabilities ?? [],
       lastVerifiedAtIso: saved.lastVerifiedAtIso,
     };
+  }
+
+  private async assertLifecyclePostMapping(
+    job: RasJob,
+    webhookPayload: Record<string, unknown>,
+    zernioPostId: string | undefined,
+    platformPostId: string | undefined,
+    platformName: string | undefined,
+  ): Promise<void> {
+    const state = await this.store.load();
+    const socialPost = state.socialPosts.find((post) => (zernioPostId && post.zernioPostId === zernioPostId) || (platformPostId && post.platformPostId === platformPostId));
+    if (!socialPost) throw new Error(`Social post mapping not found for lifecycle webhook: ${zernioPostId ?? platformPostId}`);
+    const account = asRecord(webhookPayload.account);
+    const webhookAccountId = optionalString(account.accountId) ?? job.accountId;
+    const webhookProfileId = optionalString(account.profileId) ?? job.profileId;
+    const webhookPlatform = optionalString(account.platform) ?? platformName ?? job.platform;
+    const mappedAccount = webhookAccountId
+      ? state.connectedAccounts.find((candidate) => candidate.zernioAccountId === webhookAccountId)
+      : undefined;
+
+    const commonMismatch = socialPost.customerId !== job.customerId
+      || (socialPost.profileId && socialPost.profileId !== job.profileId)
+      || (webhookProfileId && webhookProfileId !== job.profileId)
+      || (webhookPlatform && socialPost.platform !== webhookPlatform);
+    if (commonMismatch) throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
+
+    if (mappedAccount) {
+      const mappedProfileId = mappedAccount.zernioProfileId ?? mappedAccount.profileId;
+      if (mappedAccount.customerId !== job.customerId
+        || mappedAccount.id !== socialPost.accountId
+        || mappedAccount.platform !== socialPost.platform
+        || (mappedProfileId && mappedProfileId !== job.profileId)
+        || (webhookPlatform && mappedAccount.platform !== webhookPlatform)
+        || (webhookProfileId && mappedProfileId && mappedProfileId !== webhookProfileId)) {
+        throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
+      }
+      return;
+    }
+
+    // Legacy posts predate the durable provider-account mapping. Accept only an
+    // exact direct ID match; never infer a local account from an unknown provider ID.
+    if (socialPost.accountId && socialPost.accountId !== webhookAccountId) {
+      throw new Error('Lifecycle webhook post/account/platform mapping mismatch');
+    }
   }
 
   private async processInboxReply(job: RasJob): Promise<Record<string, unknown>> {
@@ -334,7 +388,11 @@ function retryDelayMs(retryCount: number, baseRetryMs: number): number {
 }
 
 function isSocialPostStatus(value: unknown): value is import('../../shared/src/types.js').SocialPost['status'] {
-  return typeof value === 'string' && ['queued', 'draft', 'scheduled', 'published', 'failed'].includes(value);
+  return typeof value === 'string' && ['queued', 'provider_accepted', 'draft', 'scheduled', 'publishing', 'published', 'partial', 'failed'].includes(value);
+}
+
+function isSocialPlatform(value: string): value is import('../../shared/src/types.js').SocialPlatform {
+  return ['facebook', 'instagram', 'youtube', 'tiktok', 'linkedin', 'twitter', 'threads', 'pinterest', 'reddit', 'bluesky', 'google_business', 'telegram', 'snapchat', 'discord', 'whatsapp'].includes(value);
 }
 
 function topicForJob(job: RasJob): number {

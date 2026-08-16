@@ -1,4 +1,6 @@
 import type { ConnectedAccount, Platform, RasCustomer } from '../../shared/src/types.js';
+import type { PostV1Platform } from '../../shared/src/postV1PlatformContracts.js';
+import { toZernioPostPlatform } from './postPlatformMapping.js';
 
 export interface CreateProfileInput {
   customerId: string;
@@ -41,7 +43,8 @@ export interface FacebookPageSelectionResult {
 
 export interface CreatePostInput {
   accountId: string;
-  platform: Platform;
+  /** Post V1 accepts only the static registry's normalized public platforms. */
+  platform: PostV1Platform;
   content: string;
   mediaUrls?: string[];
   scheduleAtIso?: string;
@@ -54,7 +57,8 @@ export interface CreatePostInput {
 type MediaType = 'image' | 'video';
 
 export interface PlatformTargetPayload {
-  platform: Platform;
+  /** Provider-wire identifier; constructed only at this adapter boundary. */
+  platform: string;
   accountId: string;
   customContent?: string;
   customMedia?: Array<{ type: MediaType; url: string }>;
@@ -345,6 +349,9 @@ export class LiveZernioAdapter implements ZernioAdapter {
 
 export function createZernioAdapterFromEnv(env: NodeJS.ProcessEnv = process.env): ZernioAdapter {
   const mode = env.ZERNIO_MODE ?? env.RAS_ZERNIO_MODE ?? 'dry-run';
+  // The queue-lifecycle test uses live mode to exercise non-dry-run routing,
+  // but deliberately injects a local fake adapter. This cannot enable outside NODE_ENV=test.
+  if (mode === 'live' && env.NODE_ENV === 'test' && env.RAS_TEST_FAKE_ZERNIO_ADAPTER === '1') return new DryRunZernioAdapter();
   if (mode === 'live') {
     return new LiveZernioAdapter({
       apiKey: env.ZERNIO_API_KEY ?? '',
@@ -444,7 +451,7 @@ export function createProfilePayload(input: CreateProfileInput): { name: string;
 
 export function createPostPayload(input: CreatePostInput): ZernioPostPayload {
   const platformTarget: ZernioPostPayload['platforms'][number] = {
-    platform: input.platform,
+    platform: toZernioPostPlatform(input.platform as PostV1Platform),
     accountId: input.accountId,
     ...(input.platformSpecificData ? { platformSpecificData: input.platformSpecificData } : {}),
   };

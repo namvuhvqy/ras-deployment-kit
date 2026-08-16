@@ -1,4 +1,4 @@
-export type SocialPlatform = 'facebook' | 'instagram' | 'youtube' | 'twitter' | 'linkedin' | 'tiktok' | 'threads' | 'bluesky' | 'telegram' | 'whatsapp' | 'reddit';
+export type SocialPlatform = 'facebook' | 'instagram' | 'youtube' | 'tiktok' | 'linkedin' | 'twitter' | 'threads' | 'pinterest' | 'reddit' | 'bluesky' | 'google_business' | 'telegram' | 'snapchat' | 'discord' | 'whatsapp';
 export type Platform = SocialPlatform;
 
 export type SandboxStatus = 'provisioning' | 'starting' | 'running' | 'degraded' | 'stopped' | 'failed';
@@ -266,7 +266,16 @@ export interface ConnectedAccount {
   lastVerifiedAtIso?: string;
 }
 
-export type SocialPostStatus = 'draft' | 'queued' | 'scheduled' | 'published' | 'failed';
+export type SocialPostStatus = 'draft' | 'queued' | 'provider_accepted' | 'scheduled' | 'publishing' | 'published' | 'partial' | 'failed';
+export type SocialPostEvent = 'created' | 'publish_requested' | 'queued' | 'provider_accepted' | 'published_dry_run' | 'schedule_requested' | 'publishing' | 'published' | 'partial' | 'failed';
+export interface SocialPostPlatformResult {
+  platform: SocialPlatform;
+  status: 'published' | 'failed';
+  publishedAtIso?: string;
+  /** A safe, platform-native identifier; never a provider URL or raw error. */
+  platformPostId?: string;
+  reasonCode?: 'platform_failed';
+}
 
 /** Durable provider-agnostic post core. Provider references remain internal-only. */
 export interface SocialPost {
@@ -283,13 +292,18 @@ export interface SocialPost {
   mediaUrls?: string[];
   isDraft?: boolean;
   scheduleAtIso?: string;
+  /** IANA timezone supplied for a scheduled customer-facing action. */
+  timezone?: string;
+  /** P2 typed, public platform settings validated at the API boundary. */
+  platformSpecificData?: Record<string, unknown>;
   idempotencyKey?: string;
   idempotencyPayloadHash?: string;
   zernioPostId?: string;
   platformPostId?: string;
   status: SocialPostStatus;
   revision?: number;
-  history?: Array<{ atIso: string; event: 'created' }>;
+  history?: Array<{ atIso: string; event: SocialPostEvent }>;
+  platformResults?: SocialPostPlatformResult[];
   publishedAtIso?: string;
   errorMessage?: string;
   updatedAtIso: string;

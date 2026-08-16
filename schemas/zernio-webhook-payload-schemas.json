@@ -417,7 +417,7 @@
           "platform": "whatsapp",
           "platformMessageId": "wamid.HBgLMTQxNTU1NTEyMzQVAgARGBI1RTY3ODlB",
           "direction": "incoming",
-          "text": "Tôi muốn tư vấn về giải pháp RAS AI",
+          "text": "T\u00f4i mu\u1ed1n t\u01b0 v\u1ea5n v\u1ec1 gi\u1ea3i ph\u00e1p RAS AI",
           "attachments": [],
           "sender": {
             "id": "14155551234",
@@ -562,7 +562,7 @@
           "postId": "65f1c0a9e2b5af0012ab34cd",
           "platformPostId": "1234567890_9876543210",
           "platform": "facebook",
-          "text": "Giá gói Growth bao nhiêu vậy shop?",
+          "text": "Gi\u00e1 g\u00f3i Growth bao nhi\u00eau v\u1eady shop?",
           "author": {
             "id": "pfid_fb_110293",
             "username": "nguyenvana",
@@ -821,6 +821,664 @@
           }
         },
         "timestamp": "2026-07-28T01:31:07Z"
+      }
+    },
+    "post_scheduled": {
+      "description": "Fired when a post lifecycle transitions to post.scheduled.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "post",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "post.scheduled"
+            ]
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "_id"
+            ],
+            "properties": {
+              "_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "postId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "platform"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "post_published": {
+      "description": "Fired when a post lifecycle transitions to post.published.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "post",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "post.published"
+            ]
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "_id"
+            ],
+            "properties": {
+              "_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "postId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "platform"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "post_failed": {
+      "description": "Fired when a post lifecycle transitions to post.failed.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "post",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "post.failed"
+            ]
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "_id"
+            ],
+            "properties": {
+              "_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "postId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "platform"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "post_partial": {
+      "description": "Fired when a post lifecycle transitions to post.partial.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "post",
+          "account",
+          "timestamp"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "post.partial"
+            ]
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "_id"
+            ],
+            "properties": {
+              "_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "postId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "platform"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "post_platform_published": {
+      "description": "Fired when a post lifecycle transitions to post.platform.published.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "post",
+          "account",
+          "timestamp",
+          "platform"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "post.platform.published"
+            ]
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "_id"
+            ],
+            "properties": {
+              "_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "postId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "platform"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platform": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "platformPostId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "publishedUrl": {
+                "type": "string"
+              },
+              "error": {}
+            }
+          }
+        }
+      }
+    },
+    "post_platform_failed": {
+      "description": "Fired when a post lifecycle transitions to post.platform.failed.",
+      "schema": {
+        "type": "object",
+        "required": [
+          "id",
+          "event",
+          "post",
+          "account",
+          "timestamp",
+          "platform"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "post.platform.failed"
+            ]
+          },
+          "post": {
+            "type": "object",
+            "required": [
+              "_id"
+            ],
+            "properties": {
+              "_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "postId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "account": {
+            "type": "object",
+            "required": [
+              "accountId",
+              "platform"
+            ],
+            "properties": {
+              "accountId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "profileId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "username": {
+                "type": "string"
+              },
+              "displayName": {
+                "type": "string"
+              }
+            }
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "accountId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platform": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string"
+              },
+              "platformPostId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "publishedAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "publishedUrl": {
+                "type": "string"
+              },
+              "error": {}
+            }
+          }
+        }
       }
     }
   }

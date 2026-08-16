@@ -3,6 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+
+type ChildExitObserver = { exitCode: number | null; once: (event: 'exit', listener: () => void) => unknown };
+type ServerStartObserver = ChildExitObserver & {
+  stdout: { on: (event: 'data', listener: (chunk: unknown) => void) => unknown };
+  stderr: { on: (event: 'data', listener: (chunk: unknown) => void) => unknown };
+  on: (event: 'error', listener: (error: Error) => void) => unknown;
+};
 import { readFile as readTextFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +19,49 @@ import { JsonRasStore } from '../packages/shared/src/persistentStore.js';
 const now = new Date().toISOString();
 const future = new Date(Date.now() + 60 * 60_000).toISOString();
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+
+function waitForChildExit(child: ChildExitObserver): Promise<void> {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise<void>((resolve) => child.once('exit', () => resolve()));
+}
+
+test('child cleanup resolves when the child already exited', async () => {
+  let settled = false;
+  void waitForChildExit({ exitCode: 0, once: () => undefined } as ChildExitObserver).then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, true);
+});
+
+async function waitForServerStart(child: ServerStartObserver, timeoutMs = 5_000): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let stderr = '';
+    const timer = setTimeout(() => reject(new Error(`server did not start: ${stderr || 'no stderr output'}`)), timeoutMs);
+    const rejectWithExit = () => { clearTimeout(timer); reject(new Error(`server exited before listening: ${stderr || 'no stderr output'}`)); };
+    const rejectWithError = (error: Error) => { clearTimeout(timer); reject(error); };
+    child.stdout.on('data', (chunk) => { if (String(chunk).includes('ras-api listening')) { clearTimeout(timer); resolve(); } });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    if (child.exitCode !== null) return rejectWithExit();
+    child.once('exit', rejectWithExit);
+    child.on('error', rejectWithError);
+  });
+}
+
+test('server startup rejects with stderr when the child exits before listening', async () => {
+  let exitListener: (() => void) | undefined;
+  let stderrListener: ((chunk: unknown) => void) | undefined;
+  const child: ServerStartObserver = {
+    exitCode: null,
+    once: (_event, listener) => { exitListener = listener; },
+    stdout: { on: () => undefined },
+    stderr: { on: (_event, listener) => { stderrListener = listener; } },
+    on: (event, listener) => { if (event === 'error') void listener; },
+  };
+  const start = waitForServerStart(child);
+  stderrListener?.('simulated startup failure');
+  child.exitCode = 1;
+  exitListener?.();
+  await assert.rejects(start, /server exited before listening: simulated startup failure/);
+});
 
 function state() {
   return {
@@ -33,6 +83,8 @@ function state() {
     sandboxes: [], agents: [], servicePackages: [],
     connectedAccounts: [
       { id: 'acct_a', customerId: 'cust_a', platform: 'facebook', zernioAccountId: 'provider_a', zernioProfileId: 'profile_a', status: 'connected' },
+      { id: 'acct_tiktok', customerId: 'cust_a', platform: 'tiktok', zernioAccountId: 'provider_tiktok', zernioProfileId: 'profile_a', status: 'connected' },
+      { id: 'acct_whatsapp', customerId: 'cust_a', platform: 'whatsapp', zernioAccountId: 'provider_whatsapp', zernioProfileId: 'profile_a', status: 'connected' },
       { id: 'acct_disconnected', customerId: 'cust_a', platform: 'twitter', zernioAccountId: 'provider_disconnected', zernioProfileId: 'profile_a', status: 'disconnected' },
       { id: 'acct_b', customerId: 'cust_b', platform: 'instagram', zernioAccountId: 'provider_b', zernioProfileId: 'profile_b', status: 'connected' },
     ],
@@ -48,15 +100,11 @@ async function withApi(run: (baseUrl: string, dbPath: string) => Promise<void>, 
   await writeFile(dbPath, JSON.stringify(state()));
   const child = spawn(process.execPath, ['dist/apps/ras-api/src/server.js'], { cwd: process.cwd(), env: { ...process.env, ...env, PORT: String(port), RAS_DB_PATH: dbPath }, stdio: ['ignore', 'pipe', 'pipe'] });
   try {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('server did not start')), 5000);
-      child.stdout.on('data', (chunk) => { if (String(chunk).includes('ras-api listening')) { clearTimeout(timer); resolve(); } });
-      child.on('error', reject);
-    });
+    await waitForServerStart(child);
     await run(`http://127.0.0.1:${port}`, dbPath);
   } finally {
     child.kill();
-    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    await waitForChildExit(child);
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -87,34 +135,179 @@ test('Post V1 public contract is session/PAT-derived, opaque, and excludes legac
   }, { RAS_SYSTEM_ADMIN_USER_IDS: 'user_system' });
 });
 
+test('Post V1 capabilities project only registry platforms and static contract data', async () => {
+  await withApi(async (baseUrl, dbPath) => {
+    const response = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { contractVersion?: string; connections: Array<{ connectionId: string; platform: string; contentLimit: number; allowedModes: string[]; platformSpecificData: unknown }> };
+    assert.equal(body.contractVersion, '1');
+    assert.deepEqual(body.connections.map((connection) => connection.platform).sort(), ['facebook', 'tiktok', 'twitter']);
+    const tiktok = body.connections.find((connection) => connection.platform === 'tiktok')!;
+    assert.equal(tiktok.contentLimit, 2_200);
+    assert.deepEqual(tiktok.allowedModes, ['draft', 'publish_now', 'schedule']);
+    assert.deepEqual(tiktok.platformSpecificData, [{ key: 'privacyLevel', type: 'enum', values: ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'SELF_ONLY'] }]);
+    const facebook = body.connections.find((connection) => connection.platform === 'facebook')!;
+    assert.deepEqual(facebook.platformSpecificData, []);
+    const typedDraft = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'typed-p2-draft', { connectionId: tiktok.connectionId, text: 'safe', media: [], platformSpecificData: { privacyLevel: 'SELF_ONLY' } });
+    assert.equal(typedDraft.status, 201);
+    assert.deepEqual((await typedDraft.json() as { post: { platformSpecificData: unknown } }).post.platformSpecificData, { privacyLevel: 'SELF_ONLY' });
+    const unsupportedSettings = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'unsupported-p2-draft', { connectionId: facebook.connectionId, text: 'safe', media: [], platformSpecificData: { privacyLevel: 'SELF_ONLY' } });
+    assert.equal(unsupportedSettings.status, 400);
+    const unknownSettings = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'unknown-p2-draft', { connectionId: tiktok.connectionId, text: 'safe', media: [], platformSpecificData: { privacyLevel: 'PRIVATE' } });
+    assert.equal(unknownSettings.status, 400);
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ id: string; publicConnectionId: string }>; socialPosts: Array<Record<string, unknown>> };
+    const whatsappConnectionId = persisted.connectedAccounts.find((account) => account.id === 'acct_whatsapp')!.publicConnectionId;
+    const whatsappDraft = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'whatsapp-not-post-v1', { connectionId: whatsappConnectionId, text: 'not supported', media: [] });
+    assert.equal(whatsappDraft.status, 404);
+    const legacyWhatsApp = {
+      id: 'post_legacy_whatsapp', customerId: 'cust_a', connectionId: whatsappConnectionId, platform: 'whatsapp', content: 'legacy', mediaUrls: [], isDraft: true,
+      status: 'draft', revision: 1, history: [{ atIso: now, event: 'created' }], createdAtIso: now, updatedAtIso: now,
+    };
+    persisted.socialPosts.push(legacyWhatsApp);
+    await writeFile(dbPath, JSON.stringify(persisted));
+    const list = await fetch(`${baseUrl}/api/v1/posts`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(list.status, 200);
+    assert.equal(JSON.stringify(await list.json()).includes('whatsapp'), false);
+    const legacyGet = await fetch(`${baseUrl}/api/v1/posts/${legacyWhatsApp.id}`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(legacyGet.status, 404);
+  }, { ZERNIO_MODE: 'dry-run' });
+});
+
+test('Post V1 dry-run publish and schedule persist safe lifecycle without jobs or provider data', async () => {
+  await withApi(async (baseUrl, dbPath) => {
+    const caps = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
+    const connectionId = (await caps.json() as { connections: Array<{ connectionId: string; allowedModes: string[] }> }).connections[0]!;
+    assert.deepEqual(connectionId.allowedModes, ['draft', 'publish_now', 'schedule']);
+
+    const published = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'publish-dry-1', { connectionId: connectionId.connectionId, text: 'publish safely', media: [] });
+    assert.equal(published.status, 201);
+    const publishedBody = await published.json() as { post: Record<string, unknown> };
+    assert.equal(publishedBody.post.status, 'published');
+    assert.ok(typeof publishedBody.post.publishedAtIso === 'string');
+    assert.deepEqual(publishedBody.post.events, [{ type: 'publish_requested', atIso: publishedBody.post.createdAtIso }, { type: 'published_dry_run', atIso: publishedBody.post.publishedAtIso }]);
+    assert.equal(/customerId|accountId|profileId|zernio|provider|jobId/i.test(JSON.stringify(publishedBody)), false);
+    const repeat = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'publish-dry-1', { connectionId: connectionId.connectionId, text: 'publish safely', media: [] });
+    assert.equal(repeat.status, 200);
+    assert.deepEqual((await repeat.json()).post, publishedBody.post);
+    const changedPublish = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'publish-dry-1', { connectionId: connectionId.connectionId, text: 'changed payload', media: [] });
+    assert.equal(changedPublish.status, 409);
+    const unexpectedPublish = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'unexpected-publish', { connectionId: connectionId.connectionId, text: 'unexpected', media: [], unexpected: true });
+    assert.equal(unexpectedPublish.status, 400);
+
+    const futureAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const scheduled = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schedule-dry-1', { connectionId: connectionId.connectionId, text: 'schedule safely', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York' });
+    assert.equal(scheduled.status, 201);
+    const scheduledBody = await scheduled.json() as { post: Record<string, unknown> };
+    assert.equal(scheduledBody.post.status, 'scheduled');
+    assert.equal(scheduledBody.post.scheduleAtIso, futureAt);
+    assert.equal(scheduledBody.post.timezone, 'America/New_York');
+    assert.deepEqual(scheduledBody.post.events, [{ type: 'schedule_requested', atIso: scheduledBody.post.createdAtIso }]);
+    const repeatSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schedule-dry-1', { connectionId: connectionId.connectionId, text: 'schedule safely', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York' });
+    assert.equal(repeatSchedule.status, 200);
+    assert.deepEqual((await repeatSchedule.json()).post, scheduledBody.post);
+    const changedSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schedule-dry-1', { connectionId: connectionId.connectionId, text: 'changed payload', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York' });
+    assert.equal(changedSchedule.status, 409);
+    const unexpectedSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'unexpected-schedule', { connectionId: connectionId.connectionId, text: 'unexpected', media: [], scheduleAtIso: futureAt, timezone: 'America/New_York', unexpected: true });
+    assert.equal(unexpectedSchedule.status, 400);
+    const invalidSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'bad-schedule', { connectionId: connectionId.connectionId, text: 'bad', media: [], scheduleAtIso: '2020-01-01T00:00:00.000Z', timezone: 'Invalid/Timezone' });
+    assert.equal(invalidSchedule.status, 400);
+    const mediaRejected = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'media-publish', { connectionId: connectionId.connectionId, text: 'no media', media: ['https://cdn.test/a.png'] });
+    assert.equal(mediaRejected.status, 400);
+    const otherTenant = await fetch(`${baseUrl}/api/v1/posts/${encodeURIComponent(String(publishedBody.post.postId))}`, { headers: { authorization: 'Bearer other-token' } });
+    assert.equal(otherTenant.status, 404);
+    const raw = JSON.parse(await readFile(dbPath, 'utf8')) as { jobs: unknown[]; socialPosts: Array<Record<string, unknown>> };
+    assert.equal(raw.jobs.length, 0);
+    assert.equal(raw.socialPosts.length, 2);
+    assert.equal(/zernio|provider|jobId/i.test(JSON.stringify(raw.socialPosts)), false);
+  }, { ZERNIO_MODE: 'dry-run' });
+});
+
+test('Post V1 live actions are capability-driven, atomic, opaque, and queue exactly one job', async () => {
+  await withApi(async (baseUrl, dbPath) => {
+    const initial = JSON.parse(await readFile(dbPath, 'utf8')) as { connectedAccounts: Array<{ capabilities?: string[] }> };
+    initial.connectedAccounts[0]!.capabilities = ['posts:publish', 'posts:schedule'];
+    await writeFile(dbPath, JSON.stringify(initial));
+
+    const capabilities = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
+    assert.equal(capabilities.status, 200);
+    const connection = (await capabilities.json() as { connections: Array<{ connectionId: string; allowedModes: string[] }> }).connections[0]!;
+    assert.deepEqual(connection.allowedModes, ['draft', 'publish_now', 'schedule']);
+
+    const published = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'live-publish-1', { connectionId: connection.connectionId, text: 'live safely', media: [] });
+    assert.equal(published.status, 201);
+    const body = await published.json() as { post: { status: string; events: Array<{ type: string }> } };
+    assert.equal(body.post.status, 'queued');
+    assert.deepEqual(body.post.events.map((event) => event.type), ['publish_requested', 'queued']);
+    assert.equal(/customerId|accountId|profileId|zernio|provider|jobId|error/i.test(JSON.stringify(body)), false);
+
+    const persisted = JSON.parse(await readFile(dbPath, 'utf8')) as { socialPosts: Array<{ status: string; zernioPostId?: string }>; jobs: Array<{ type: string; payload: Record<string, unknown> }> };
+    assert.equal(persisted.socialPosts.length, 1);
+    assert.equal(persisted.socialPosts[0]!.status, 'queued');
+    assert.equal(persisted.socialPosts[0]!.zernioPostId, undefined);
+    assert.equal(persisted.jobs.length, 1);
+    assert.equal(persisted.jobs[0]!.type, 'publish_post');
+    assert.equal(persisted.jobs[0]!.payload.publishNow, true);
+  }, { ZERNIO_MODE: 'live', NODE_ENV: 'test', RAS_TEST_FAKE_ZERNIO_ADAPTER: '1' });
+});
+
 test('Post V1 OpenAPI validates runtime responses and covers all emitted statuses', async () => {
   const openapi = JSON.parse(await readTextFile(join(process.cwd(), 'docs/POST_V1_OPENAPI.json'), 'utf8'));
   const tools = JSON.parse(await readTextFile(join(process.cwd(), 'docs/POST_V1_AGENT_TOOLS.json'), 'utf8'));
-  assert.deepEqual(Object.keys(openapi.paths).sort(), ['/api/v1/posts', '/api/v1/posts/capabilities', '/api/v1/posts/drafts', '/api/v1/posts/{postId}']);
+  assert.deepEqual(Object.keys(openapi.paths).sort(), ['/api/v1/posts', '/api/v1/posts/capabilities', '/api/v1/posts/drafts', '/api/v1/posts/publish', '/api/v1/posts/schedule', '/api/v1/posts/{postId}']);
   const serialized = JSON.stringify({ openapi, tools });
-  assert.equal(/customerId|tenantId|accountId|profileId|zernio|provider|internal.*url|raw.*error/i.test(serialized), false);
-  for (const schema of Object.values(openapi.components.schemas) as Array<Record<string, unknown>>) assert.equal(schema.additionalProperties, false);
+  assert.equal(/customerId|tenantId|accountId|profileId|zernio|internal.*url|raw.*error/i.test(serialized), false);
+  for (const [schemaName, schema] of Object.entries(openapi.components.schemas) as Array<[string, Record<string, unknown>]>) {
+    if (schemaName === 'PlatformSetting') {
+      assert.equal(Array.isArray(schema.oneOf), true);
+      assert.equal((schema.oneOf as Array<Record<string, unknown>>).every((branch) => branch.additionalProperties === false), true);
+    } else assert.equal(schema.additionalProperties, false);
+  }
   const Ajv = (AjvModule as unknown as { default?: new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } }; }).default ?? AjvModule as unknown as new (options: { strict: boolean }) => { addSchema: (schema: unknown, id: string) => void; compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown } };
   const ajv = new Ajv({ strict: false }); ajv.addSchema({ ...openapi, $id: 'post-v1' }, 'post-v1');
   const validateCapability = ajv.compile({ $ref: 'post-v1#/components/schemas/CapabilitiesEnvelope' });
-  const validateDraft = ajv.compile({ $ref: 'post-v1#/components/schemas/PostEnvelope' });
+  const validatePost = ajv.compile({ $ref: 'post-v1#/components/schemas/PostEnvelope' });
+  const validatePlatformSetting = ajv.compile({ $ref: 'post-v1#/components/schemas/PlatformSetting' });
+  assert.equal(validatePlatformSetting({ key: 'madeForKids', type: 'boolean' }), true);
+  assert.equal(validatePlatformSetting({ key: 'title', type: 'string', maxLength: 100 }), true);
+  assert.equal(validatePlatformSetting({ key: 'madeForKids', type: 'boolean', values: ['public', 'unlisted', 'private'] }), false);
+  assert.equal(validatePlatformSetting({ key: 'title', type: 'string', maxLength: 100, values: ['public', 'unlisted', 'private'] }), false);
   await withApi(async (baseUrl) => {
     const caps = await fetch(`${baseUrl}/api/v1/posts/capabilities`, { headers: { authorization: 'Bearer reader-token' } });
     const capBody = await caps.json(); assert.equal(caps.status, 200); assert.equal(validateCapability(capBody), true, JSON.stringify(validateCapability.errors));
     const connectionId = capBody.connections[0].connectionId;
     const created = await post(baseUrl, '/api/v1/posts/drafts', 'writer-token', 'schema-draft', { connectionId, text: 'safe', media: [] });
-    const postBody = await created.json(); assert.equal(created.status, 201); assert.equal(validateDraft(postBody), true, JSON.stringify(validateDraft.errors));
-  });
+    const draftBody = await created.json(); assert.equal(created.status, 201); assert.equal(validatePost(draftBody), true, JSON.stringify(validatePost.errors));
+    const published = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'schema-publish', { connectionId, text: 'publish', media: [] });
+    const publishedBody = await published.json(); assert.equal(published.status, 201); assert.equal(validatePost(publishedBody), true, JSON.stringify(validatePost.errors));
+    const repeatedPublish = await post(baseUrl, '/api/v1/posts/publish', 'writer-token', 'schema-publish', { connectionId, text: 'publish', media: [] });
+    const repeatedPublishBody = await repeatedPublish.json(); assert.equal(repeatedPublish.status, 200); assert.equal(validatePost(repeatedPublishBody), true, JSON.stringify(validatePost.errors));
+    const scheduleAtIso = new Date(Date.now() + 60 * 60_000).toISOString();
+    const scheduled = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schema-schedule', { connectionId, text: 'schedule', media: [], scheduleAtIso, timezone: 'America/New_York' });
+    const scheduledBody = await scheduled.json(); assert.equal(scheduled.status, 201); assert.equal(validatePost(scheduledBody), true, JSON.stringify(validatePost.errors));
+    const repeatedSchedule = await post(baseUrl, '/api/v1/posts/schedule', 'writer-token', 'schema-schedule', { connectionId, text: 'schedule', media: [], scheduleAtIso, timezone: 'America/New_York' });
+    const repeatedScheduleBody = await repeatedSchedule.json(); assert.equal(repeatedSchedule.status, 200); assert.equal(validatePost(repeatedScheduleBody), true, JSON.stringify(validatePost.errors));
+  }, { ZERNIO_MODE: 'dry-run' });
   const expectedStatuses: Record<string, string[]> = {
     listPostCapabilities: ['200', '401', '403', '429', '503'],
     createDraft: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
     listDrafts: ['200', '401', '403', '429', '503'],
     getDraft: ['200', '401', '403', '404', '429', '503'],
+    publishNow: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
+    schedulePost: ['200', '201', '400', '401', '403', '404', '409', '429', '503'],
   };
   for (const operation of Object.values(openapi.paths).flatMap((path: any) => Object.values(path) as any[])) assert.deepEqual(Object.keys(operation.responses).sort(), expectedStatuses[operation.operationId]);
-  assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media']);
+  const expectedPlatforms = ['twitter', 'instagram', 'tiktok', 'youtube', 'facebook', 'linkedin', 'bluesky', 'threads', 'reddit', 'pinterest', 'telegram', 'snapchat', 'google_business', 'discord', 'slack'];
+  for (const schemaName of ['Connection', 'Post', 'PlatformResult']) assert.deepEqual(openapi.components.schemas[schemaName].properties.platform.enum, expectedPlatforms);
+  assert.equal(/whatsapp|googlebusiness/i.test(serialized), false);
+  assert.equal(openapi.components.schemas.CapabilitiesEnvelope.properties.contractVersion.const, '1');
+  assert.deepEqual(openapi.components.schemas.CapabilitiesEnvelope.required, ['ok', 'contractVersion', 'connections']);
+  assert.ok(tools.tools.every((tool: { responseSchema?: { $ref?: string } }) => typeof tool.responseSchema?.$ref === 'string' && tool.responseSchema.$ref.startsWith('POST_V1_OPENAPI.json#/')));
+  assert.deepEqual(openapi.components.schemas.Connection.required, ['connectionId', 'displayLabel', 'platform', 'availability', 'contentLimit', 'allowedModes', 'media', 'platformSpecificData']);
   assert.deepEqual(openapi.components.schemas.Connection.properties.reasonCode.enum, ['connection_unavailable', 'posting_unavailable']);
+  assert.equal(openapi.components.schemas.PlatformSetting.oneOf.length, 4);
   assert.deepEqual(openapi.components.schemas.DraftCreateRequest.required, ['connectionId', 'text', 'media']);
+  assert.deepEqual(openapi.components.schemas.PlatformSetting.oneOf.map((branch: { properties: { key: { const: string } } }) => branch.properties.key.const), ['title', 'visibility', 'madeForKids', 'privacyLevel']);
+  assert.equal(openapi.components.schemas.Post.properties.platformSpecificData.$ref, '#/components/schemas/PlatformSpecificData');
 });
 
 test('scheduling API creates drafts/schedules atomically, idempotently, and tenant-scoped without accepting publishNow', async () => {

@@ -1,43 +1,152 @@
 {
-  "version": "post-v1-slice-1",
-  "authentication": { "type": "bearer", "tenantBinding": "Tenant is derived exclusively from authenticated session or PAT principal; no tenant selector is accepted." },
+  "version": "post-v1-live-lane",
+  "authentication": {
+    "type": "bearer",
+    "tenantBinding": "Tenant is derived exclusively from authenticated session or PAT principal; no tenant selector is accepted."
+  },
   "tools": [
     {
       "name": "ras_posts_list_capabilities",
       "method": "GET",
       "path": "/api/v1/posts/capabilities",
-      "requiredScopes": ["posts:read"],
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/CapabilitiesEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:read"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "description": "Returns connection-specific availability plus the static typed platformSpecificData allowlist. Empty settings means platform-specific data is unsupported.",
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/CapabilitiesEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     },
     {
       "name": "ras_posts_create_draft",
       "method": "POST",
       "path": "/api/v1/posts/drafts",
-      "requiredScopes": ["posts:write"],
-      "headers": { "Idempotency-Key": { "type": "string", "minLength": 1, "maxLength": 256, "required": true } },
-      "inputSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/DraftCreateRequest" },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:write"
+      ],
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "required": true
+        }
+      },
+      "inputSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/DraftCreateRequest"
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     },
     {
       "name": "ras_posts_list_drafts",
       "method": "GET",
       "path": "/api/v1/posts",
-      "requiredScopes": ["posts:read"],
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostListEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:read"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostListEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     },
     {
       "name": "ras_posts_get_draft",
       "method": "GET",
       "path": "/api/v1/posts/{postId}",
-      "requiredScopes": ["posts:read"],
-      "inputSchema": { "type": "object", "additionalProperties": false, "required": ["postId"], "properties": { "postId": { "type": "string", "minLength": 1 } } },
-      "responseSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope" },
-      "errorSchema": { "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error" }
+      "requiredScopes": [
+        "posts:read"
+      ],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "postId"
+        ],
+        "properties": {
+          "postId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
+    },
+    {
+      "name": "ras_posts_publish_now",
+      "description": "Publish immediately when the selected connection capability permits it; dry-run is simulated.",
+      "method": "POST",
+      "path": "/api/v1/posts/publish",
+      "requiredScopes": [
+        "posts:write"
+      ],
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "required": true
+        }
+      },
+      "inputSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PublishNowRequest"
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
+    },
+    {
+      "name": "ras_posts_schedule",
+      "description": "Schedule when the selected connection capability permits it; dry-run is simulated.",
+      "method": "POST",
+      "path": "/api/v1/posts/schedule",
+      "requiredScopes": [
+        "posts:write"
+      ],
+      "headers": {
+        "Idempotency-Key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "required": true
+        }
+      },
+      "inputSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/ScheduleRequest"
+      },
+      "responseSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/PostEnvelope"
+      },
+      "errorSchema": {
+        "$ref": "POST_V1_OPENAPI.json#/components/schemas/Error"
+      }
     }
   ]
 }

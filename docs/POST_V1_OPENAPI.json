@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RAS Post V1",
-    "version": "1.0.0",
-    "description": "Tenant is derived only from the authenticated session or PAT principal."
+    "version": "1.1.0",
+    "description": "Tenant is derived only from the authenticated session or PAT principal. Publish and schedule availability is connection-capability driven; live actions are queued and terminal lifecycle comes from signed webhooks."
   },
   "paths": {
     "/api/v1/posts/capabilities": {
@@ -169,6 +169,132 @@
           }
         }
       }
+    },
+    "/api/v1/posts/publish": {
+      "post": {
+        "operationId": "publishNow",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishNowRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Post"
+          },
+          "201": {
+            "$ref": "#/components/responses/Post"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidPost"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectionNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/posts/schedule": {
+      "post": {
+        "operationId": "schedulePost",
+        "security": [
+          {
+            "bearerAuth": [
+              "posts:write"
+            ]
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Post"
+          },
+          "201": {
+            "$ref": "#/components/responses/Post"
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidPost"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/ConnectionNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "503": {
+            "$ref": "#/components/responses/RateLimitUnavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -196,6 +322,7 @@
               "unauthorized",
               "forbidden",
               "invalid_draft_request",
+              "invalid_post_request",
               "invalid_json",
               "connection_not_found",
               "posting_unavailable",
@@ -224,7 +351,8 @@
           "availability",
           "contentLimit",
           "allowedModes",
-          "media"
+          "media",
+          "platformSpecificData"
         ],
         "properties": {
           "connectionId": {
@@ -232,7 +360,24 @@
             "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
           },
           "platform": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "twitter",
+              "instagram",
+              "tiktok",
+              "youtube",
+              "facebook",
+              "linkedin",
+              "bluesky",
+              "threads",
+              "reddit",
+              "pinterest",
+              "telegram",
+              "snapchat",
+              "google_business",
+              "discord",
+              "slack"
+            ]
           },
           "availability": {
             "type": "boolean"
@@ -244,9 +389,13 @@
           "allowedModes": {
             "type": "array",
             "items": {
-              "const": "draft"
+              "enum": [
+                "draft",
+                "publish_now",
+                "schedule"
+              ]
             },
-            "maxItems": 1
+            "maxItems": 3
           },
           "media": {
             "type": "object",
@@ -270,6 +419,13 @@
           "displayLabel": {
             "type": "string",
             "minLength": 1
+          },
+          "platformSpecificData": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/PlatformSetting"
+            }
           }
         }
       },
@@ -282,7 +438,18 @@
         ],
         "properties": {
           "type": {
-            "const": "draft_created"
+            "enum": [
+              "draft_created",
+              "publish_requested",
+              "queued",
+              "provider_accepted",
+              "published_dry_run",
+              "schedule_requested",
+              "publishing",
+              "published",
+              "partial",
+              "failed"
+            ]
           },
           "atIso": {
             "type": "string",
@@ -315,7 +482,24 @@
             "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
           },
           "platform": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "twitter",
+              "instagram",
+              "tiktok",
+              "youtube",
+              "facebook",
+              "linkedin",
+              "bluesky",
+              "threads",
+              "reddit",
+              "pinterest",
+              "telegram",
+              "snapchat",
+              "google_business",
+              "discord",
+              "slack"
+            ]
           },
           "text": {
             "type": "string",
@@ -326,7 +510,16 @@
             "maxItems": 0
           },
           "status": {
-            "const": "draft"
+            "enum": [
+              "draft",
+              "queued",
+              "provider_accepted",
+              "scheduled",
+              "publishing",
+              "published",
+              "partial",
+              "failed"
+            ]
           },
           "revision": {
             "const": 1
@@ -345,7 +538,29 @@
               "$ref": "#/components/schemas/Event"
             },
             "minItems": 1,
-            "maxItems": 1
+            "maxItems": 20
+          },
+          "scheduleAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1
+          },
+          "publishedAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformResults": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformResult"
+            },
+            "maxItems": 15
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
           }
         }
       },
@@ -369,6 +584,9 @@
           "media": {
             "type": "array",
             "maxItems": 0
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
           }
         }
       },
@@ -412,6 +630,7 @@
         "additionalProperties": false,
         "required": [
           "ok",
+          "contractVersion",
           "connections"
         ],
         "properties": {
@@ -423,6 +642,240 @@
             "items": {
               "$ref": "#/components/schemas/Connection"
             }
+          },
+          "contractVersion": {
+            "type": "string",
+            "const": "1",
+            "description": "Static Post V1 platform contract registry version."
+          }
+        }
+      },
+      "PublishNowRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connectionId",
+          "text",
+          "media"
+        ],
+        "properties": {
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
+          }
+        }
+      },
+      "ScheduleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connectionId",
+          "text",
+          "media",
+          "scheduleAtIso",
+          "timezone"
+        ],
+        "properties": {
+          "connectionId": {
+            "type": "string",
+            "pattern": "^conn_[A-Za-z0-9_-]{20,}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "scheduleAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platformSpecificData": {
+            "$ref": "#/components/schemas/PlatformSpecificData"
+          }
+        }
+      },
+      "PlatformResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "platform",
+          "status"
+        ],
+        "properties": {
+          "platform": {
+            "enum": [
+              "twitter",
+              "instagram",
+              "tiktok",
+              "youtube",
+              "facebook",
+              "linkedin",
+              "bluesky",
+              "threads",
+              "reddit",
+              "pinterest",
+              "telegram",
+              "snapchat",
+              "google_business",
+              "discord",
+              "slack"
+            ]
+          },
+          "status": {
+            "enum": [
+              "published",
+              "failed"
+            ]
+          },
+          "publishedAtIso": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platformPostId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reasonCode": {
+            "const": "platform_failed"
+          }
+        }
+      },
+      "PlatformSetting": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "const": "title"
+              },
+              "type": {
+                "const": "string"
+              },
+              "maxLength": {
+                "const": 100
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "maxLength"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "const": "visibility"
+              },
+              "type": {
+                "const": "enum"
+              },
+              "values": {
+                "type": "array",
+                "const": [
+                  "public",
+                  "unlisted",
+                  "private"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "values"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "const": "madeForKids"
+              },
+              "type": {
+                "const": "boolean"
+              }
+            },
+            "required": [
+              "key",
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "const": "privacyLevel"
+              },
+              "type": {
+                "const": "enum"
+              },
+              "values": {
+                "type": "array",
+                "const": [
+                  "PUBLIC_TO_EVERYONE",
+                  "MUTUAL_FOLLOW_FRIENDS",
+                  "SELF_ONLY"
+                ]
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "values"
+            ]
+          }
+        ]
+      },
+      "PlatformSpecificData": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "public",
+              "unlisted",
+              "private"
+            ]
+          },
+          "madeForKids": {
+            "type": "boolean"
+          },
+          "privacyLevel": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_TO_EVERYONE",
+              "MUTUAL_FOLLOW_FRIENDS",
+              "SELF_ONLY"
+            ]
           }
         }
       }
@@ -539,6 +992,16 @@
       },
       "RateLimitUnavailable": {
         "description": "PAT rate-limit backend unavailable; fail closed",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "InvalidPost": {
+        "description": "Publish or schedule request rejected",
         "content": {
           "application/json": {
             "schema": {
